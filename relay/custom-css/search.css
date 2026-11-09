@@ -1,0 +1,39 @@
+.cinema-search {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 0.75em;
+  color: inherit;
+  font: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+  background: #263f2d;
+  color: #8bd895;
+  border-radius: 9px;
+}
+
+.cinema-search[hidden] { display: none !important; }
+.cinema-search:hover { background: #2c3931; }
+.cinema-search:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+
+.cinema-search svg {
+  width: 1.25em;
+  height: 1.25em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+@media (max-width: 600px) {
+  .cinema-search span { display: none; }
+  .cinema-search { padding: 0 0.5em; }
+}
+
+.cinema-theme-toggle{min-height:44px;min-width:44px;padding:0 .75em!important;font:inherit!important;font-size:14px!important;white-space:nowrap;border-radius:9px!important}.cinema-theme-toggle[hidden]{display:none!important}
+
+:root[data-cinema-theme=light] .cinema-search{background:#e7f2e7;color:#267939}:root[data-cinema-theme=light] .cinema-search:hover{background:#e8eeea}

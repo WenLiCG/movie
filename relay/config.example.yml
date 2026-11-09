@@ -1,0 +1,60 @@
+emby:
+  host: http://emby:8096
+  mount-path: /library
+  proxy-error-strategy: reject
+  download-strategy: "403"
+  local-media-roots: []
+  episodes-unplay-prior: false
+  resort-random-items: false
+  images-quality: 90
+  images-original: false
+  strm:
+    path-map: []
+    internal-redirect-enable: false
+  custom-css-js:
+    debug-mode: false
+
+openlist:
+  host: http://openlist:5244/openlist
+  token: "__OPENLIST_TOKEN__"
+  local-tree-gen:
+    enable: true
+    ffmpeg-enable: false
+    virtual-containers: mp4,mkv,mov,m4v,avi,ts,m2ts,webm
+    strm-containers: ""
+    music-containers: ""
+    # Keep indexes on remote outage/deletion; deliberate removals are manual.
+    auto-remove-max-count: 0
+    refresh-interval: 10
+    scan-prefixes:
+      - /aliyun/Movies
+      - /aliyun/TV
+    allow-containers: nfo,jpg,jpeg,png,srt,ass,ssa,vtt
+    threads: 2
+
+video-preview:
+  enable: true
+  containers: [mp4, mkv, mov, m4v, avi, ts, m2ts, webm]
+  ignore-template-ids: [LD, SD]
+
+path:
+  emby2openlist:
+    - /library/aliyun:/aliyun
+
+# Disable upstream response caching until per-user production verification.
+cache:
+  enable: false
+  expired: 10m
+ssl:
+  enable: false
+log:
+  disable-color: true
+ge2o:
+  api-secret: "__RELAY_SECRET__"
+  web:
+    disable: true
+    disable-emby-btn: true
+  trusted-proxies:
+    - 127.0.0.0/8
+    - 172.16.0.0/12
+

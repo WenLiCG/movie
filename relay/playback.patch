@@ -1,0 +1,81 @@
+--- a/internal/web/web.go
++++ b/internal/web/web.go
+@@ -40,5 +40,6 @@
+ func initRouter(r *gin.Engine) {
+ 	r.Use(referrerPolicySetter())
++	r.Use(emby.PlaybackRecorder())
+ 	r.Use(emby.ApiKeyChecker())
+ 	r.Use(emby.DownloadStrategyChecker())
+ 
+diff --git a/internal/service/openlist/path.go b/internal/service/openlist/path.go
+index dc9628d..f4e0498 100644
+--- a/internal/service/openlist/path.go
++++ b/internal/service/openlist/path.go
+@@ -1,6 +1,9 @@
+ package openlist
+ 
+-import "encoding/base64"
++import (
++	"encoding/base64"
++	"strings"
++)
+ 
+ // PathEncode 将 openlist 的资源原始路径进行编码, 防止路径在传输过程中出现错误
+ func PathEncode(rawPath string) string {
+@@ -11,7 +14,8 @@ func PathEncode(rawPath string) string {
+ //
+ // 如果解码失败, 则返回原路径
+ func PathDecode(encPath string) string {
+-	res, err := base64.StdEncoding.DecodeString(encPath)
++	// Some Emby clients form-decode '+' inside custom media IDs into spaces.
++	res, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(encPath, " ", "+"))
+ 	if err != nil {
+ 		return encPath
+ 	}
+diff --git a/internal/service/emby/playbackinfo.go b/internal/service/emby/playbackinfo.go
+index 5254953..1fc650e 100644
+--- a/internal/service/emby/playbackinfo.go
++++ b/internal/service/emby/playbackinfo.go
+@@ -117,6 +117,25 @@ func TransferPlaybackInfo(c *gin.Context) {
+ 		}
+ 
+ 		// 转换直链链接
++		// Selected cloud previews must stay HLS even when response caching is disabled.
++		if msInfo.Transcode {
++			u := url.URL{Path: fmt.Sprintf("/videos/%s/master.m3u8", itemInfo.Id)}
++			q := u.Query()
++			q.Set("item_id", itemInfo.Id)
++			q.Set("template_id", msInfo.TemplateId)
++			q.Set("openlist_path", msInfo.OpenlistPath)
++			q.Set("MediaSourceId", msInfo.RawId)
++			q.Set(QueryApiKeyName, itemInfo.ApiKey)
++			u.RawQuery = q.Encode()
++			source.Put("SupportsDirectPlay", jsons.FromValue(false))
++			source.Put("SupportsDirectStream", jsons.FromValue(false))
++			source.Put("SupportsTranscoding", jsons.FromValue(true))
++			source.Put("TranscodingContainer", jsons.FromValue("ts"))
++			source.Put("TranscodingSubProtocol", jsons.FromValue("hls"))
++			source.Put("TranscodingUrl", jsons.FromValue(u.String()))
++			source.DelKey("DirectStreamUrl")
++			return nil
++		}
+ 		source.Put("SupportsDirectPlay", jsons.FromValue(true))
+ 		source.Put("SupportsDirectStream", jsons.FromValue(true))
+ 		newUrl := fmt.Sprintf(
+diff --git a/internal/service/openlist/localtree/task.go b/internal/service/openlist/localtree/task.go
+index 2ff7f57..651bd84 100644
+--- a/internal/service/openlist/localtree/task.go
++++ b/internal/service/openlist/localtree/task.go
+@@ -106,6 +106,12 @@ func (vw *VirtualWriter) Write(task FileTask, localPath string) error {
+ 	// 默认写入时长 3 小时
+ 	dftDuration := time.Hour * 3
+ 	if !config.C.Openlist.LocalTreeGen.FFmpegEnable {
++		res := openlist.FetchFsOther(task.Path, nil)
++		seconds := res.Data.VideoPreviewPlayInfo.Meta.Duration
++		if res.Code == http.StatusOK && seconds > 0 && seconds <= float64(^uint32(0))/1000 {
++			dftDuration = time.Duration(seconds * float64(time.Second))
++		}
++		// shortcut: absent cloud duration keeps the upstream 3h estimate; regenerate the index once metadata is available.
+ 		return os.WriteFile(localPath, mp4s.GenWithDuration(dftDuration), os.ModePerm)
+ 	}
+ 

@@ -1,0 +1,172 @@
+name: cinema
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  gateway:
+    image: caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
+    profiles: [public]
+    restart: unless-stopped
+    environment:
+      MOVIE_DOMAIN: ${MOVIE_DOMAIN:?Run python3 configure.py first}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./state/caddy/data:/data
+      - ./state/caddy/config:/config
+    depends_on: [relay, portal, prowlarr, sonarr, qbittorrent, openlist]
+    logging: *logging
+
+  relay:
+    profiles: [connected, public]
+    build:
+      context: ./relay
+    image: cinema-relay:9b049b8-strict4
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:8095:8095"
+    volumes:
+      - ./state/relay/config.yml:/app/config.yml:ro
+      - ./state/uploader:/app/cinema-config:ro
+      - ./state/library:/app/openlist-local-tree
+      - ./state/relay/lib:/app/lib
+      - ./relay/custom-js:/app/custom-js:ro
+      - ./relay/custom-css:/app/custom-css:ro
+    depends_on: [emby, openlist]
+    # Upstream emits session tokens and signed URLs in diagnostic messages.
+    logging:
+      driver: none
+
+  emby:
+    image: emby/embyserver@sha256:7082c63b10a2fcb3805a7eaebba407d5723bc57c085c9f0b29b7d0a702765cc1
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      UID: "1000"
+      GID: "1000"
+    ports:
+      - "127.0.0.1:8096:8096"
+    volumes:
+      - ./state/emby:/config
+      - ./state/library:/library:ro
+    logging: *logging
+
+  openlist:
+    image: openlistteam/openlist@sha256:897563beb674e7ad04edff14b0037dc8443ca3978570614005519df7eae06434
+    restart: unless-stopped
+    user: "1000:1000"
+    entrypoint: ["/bin/sh", "/cinema/openlist-start.sh"]
+    command: ["/entrypoint.sh"]
+    environment:
+      TZ: Asia/Shanghai
+      UMASK: "022"
+      SITE_URL: https://${MOVIE_DOMAIN:?Run python3 configure.py first}/openlist
+    ports:
+      - "127.0.0.1:5244:5244"
+    volumes:
+      - ./state/openlist:/opt/openlist/data
+      - ./state/openlist-runtime:/run/cinema
+      - ./scripts/openlist-start.sh:/cinema/openlist-start.sh:ro
+    logging: *logging
+
+  prowlarr:
+    image: linuxserver/prowlarr@sha256:04be30163fbaf48d6aeee7b5893c9f6614ffbad6d853971df0d6dcdf01c7f104
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      TZ: Asia/Shanghai
+      PROWLARR__SERVER__URLBASE: /search
+    ports:
+      - "127.0.0.1:9696:9696"
+    volumes:
+      - ./state/prowlarr:/config
+    logging: *logging
+
+  sonarr:
+    image: linuxserver/sonarr@sha256:386c962ee6e260e3a5656b25df2ed056bcc9b6410e197d075f9547fd14c23bca
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      TZ: Asia/Shanghai
+      SONARR__SERVER__URLBASE: /sonarr
+    ports:
+      - "127.0.0.1:8989:8989"
+    volumes:
+      - ./state/sonarr:/config
+      - ./media:/media
+    logging: *logging
+
+  uploader:
+    build:
+      context: .
+      dockerfile: uploader/Dockerfile
+    image: cinema-uploader:2
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./state/uploader:/config:ro
+      - ./state/uploader/data:/state
+      - ./media:/media
+      - ./state/openlist-runtime:/runtime:ro
+      - ./state/library:/library
+    depends_on: [openlist, sonarr, qbittorrent]
+    logging: *logging
+
+  portal:
+    build:
+      context: .
+      dockerfile: portal/Dockerfile
+    image: cinema-portal:1
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:8097:8097"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./state/uploader:/state
+      - ./state/prowlarr:/services/prowlarr:ro
+      - ./state/sonarr:/services/sonarr:ro
+      - ./state/relay/lib/playback:/playback:ro
+      - ./media:/media:ro
+    depends_on: [emby, openlist, prowlarr, sonarr, qbittorrent]
+    logging: *logging
+
+  qbittorrent:
+    image: linuxserver/qbittorrent@sha256:05c1454f9a32967affc1f34f67f8cc0cc57dd805dca45489fe797095a6286556
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Shanghai
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "56881"
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "56881:56881/tcp"
+      - "56881:56881/udp"
+    volumes:
+      - ./state/qbittorrent:/config
+      - ./media:/media
+    logging: *logging
+

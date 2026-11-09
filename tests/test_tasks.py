@@ -1,0 +1,233 @@
+"""Project grouping, scoped controls and explicit local deletion boundaries."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock
+from urllib.parse import parse_qs,urlsplit
+
+from archive import archived_keys,task_actions
+from portal.server import App
+import test_uploader
+from uploader import Uploader,candidate,Failure
+
+
+class QB:
+    def __init__(self,root):
+        self.items=[];self.files={};self.calls=[]
+        for n in (1,2,3):
+            digest=str(n)*40
+            self.items.append({'hash':digest,'name':'Show' if n<3 else 'Movie','category':'sonarr-tv' if n<3 else 'cinema-movies',
+                               'save_path':str(root/'downloads'/('tv' if n<3 else 'movies')),'added_on':n,'progress':1 if n!=2 else .5,
+                               'size':10,'state':'uploading' if n!=2 else 'downloading','dlspeed':0})
+            self.files[digest]=[{'index':0,'name':str(n)+'.mkv','size':10,'priority':1,'progress':1 if n!=2 else .5}]
+            folder=Path(self.items[-1]['save_path']);folder.mkdir(parents=True,exist_ok=True);(folder/(str(n)+'.mkv')).write_bytes(b'frame-data')
+
+    def json(self,method,path,query=None):
+        parsed=urlsplit(path);params=query or {k:v[0] for k,v in parse_qs(parsed.query).items()}
+        if parsed.path.endswith('/info'):
+            return copy.deepcopy([t for t in self.items if not params.get('hashes') or t['hash']==params['hashes']])
+        if parsed.path.endswith('/files'):return copy.deepcopy(self.files[params['hash']])
+        raise AssertionError(path)
+
+    def request(self,method,path,body=None,headers=None,form=None):
+        values=form or {k:v[0] for k,v in parse_qs(body.decode()).items()};self.calls.append((path,values.copy()))
+        t=next(t for t in self.items if t['hash']==values['hashes'])
+        if path.endswith('/stop'):t['state']='stoppedUP' if t['progress']==1 else 'stoppedDL'
+        elif path.endswith('/start'):t['state']='uploading' if t['progress']==1 else 'downloading'
+        elif path.endswith('/delete'):
+            if values['deleteFiles']=='true':
+                for file in self.files[t['hash']]:
+                    p=Path(t['save_path'])/file['name']
+                    if p.exists():p.unlink()
+            self.items.remove(t)
+        else:raise AssertionError(path)
+        return b'Ok.'
+
+
+class Sonarr:
+    def __init__(self,root):
+        self.series=[{'id':9,'tvdbId':42,'title':'Show','monitored':True,'tags':[]},
+                     {'id':10,'tvdbId':99,'title':'Show','monitored':False,'tags':[]}]
+        self.queue=[{'downloadId':str(n)*40,'seriesId':9,'episodeId':100+n} for n in (1,2)]
+        self.tags=[];self.calls=[];self.busy=[];self.files=[]
+        for n in (1,2):
+            p=root/'library/tv/Show'/(str(n)+'.mkv');p.parent.mkdir(parents=True,exist_ok=True)
+            os.link(root/'downloads/tv'/(str(n)+'.mkv'),p)
+            self.files.append({'id':n,'seriesId':9,'path':str(p),'size':10})
+
+    def json(self,method,path,body=None,query=None):
+        route=urlsplit(path).path;self.calls.append((method,route,copy.deepcopy(body)))
+        if route=='/api/v3/series':return copy.deepcopy(self.series)
+        if route.startswith('/api/v3/series/'):
+            value=next(s for s in self.series if s['id']==int(route.split('/')[-1]))
+            if method=='PUT':value.update(copy.deepcopy(body))
+            return copy.deepcopy(value)
+        if route=='/api/v3/queue':return {'records':copy.deepcopy(self.queue)}
+        if route=='/api/v3/command':return self.busy
+        if route=='/api/v3/tag':
+            if method=='POST':self.tags.append({**body,'id':1})
+            return self.tags[-1] if method=='POST' else self.tags
+        if route=='/api/v3/episodefile':return copy.deepcopy(self.files)
+        if route=='/api/v3/episode':return [{'id':100+n,'episodeFileId':n,'seasonNumber':1,'episodeNumber':n} for n in (1,2)]
+        if route=='/api/v3/episode/monitor':return {}
+        raise AssertionError((method,path))
+
+    def request(self,method,path):
+        self.calls.append((method,path,None));file=next(f for f in self.files if f['id']==int(path.split('/')[-1]))
+        Path(file['path']).unlink();self.files.remove(file)
+
+
+class TaskTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.media=self.root/'media'
+        self.state=self.root/'state';(self.state/'data').mkdir(parents=True)
+        self.qb=QB(self.media);self.native=Sonarr(self.media);self.remote=Mock()
+        self.uploader=Uploader(self.remote,self.state/'data',self.media)
+        self.app=App(self.state);self.app.qb=lambda:self.qb;self.app.client=lambda _:self.native
+        self.app.require_version=Mock(return_value={})
+        self.sources=SimpleNamespace(qb=self.qb,sonarr=self.native,media=self.media)
+        self.jobs=[]
+        for n in (1,2):
+            source=self.media/'library/tv/Show'/(str(n)+'.mkv')
+            job=candidate('tv:'+str(n),source,'/aliyun/TV/Show/'+source.name,10,tvdb_id=42,episode_keys=json.dumps([[1,n]]),torrent_hash=str(n)*40,added_on=n,download_source=str(self.media/'downloads/tv'/source.name))
+            self.uploader.add(job)
+            if n==1:self.uploader.update(job,state='published',sha1=hashlib.sha1(source.read_bytes()).hexdigest())
+            self.jobs.append(job)
+
+    def tearDown(self):
+        self.uploader.db.close();self.temp.cleanup()
+
+    def run_action(self,action,delete_files=False,key='series:42'):
+        return self.app.task_action({}, {'id':key,'action':action,'delete_files':delete_files})
+
+    def test_same_series_groups_resources_and_other_movie_remains_separate(self):
+        groups=self.app.tasks()['items'];self.assertEqual(len(groups),2)
+        show=next(g for g in groups if g['id']=='series:42')
+        self.assertEqual(len(show['resources']),2);self.assertEqual(show['file_count'],2)
+        self.assertEqual(len(show['uploads']),2)
+
+    def test_pause_resume_and_disk_guard_do_not_undo_user_intent(self):
+        path=self.state/'data/disk-paused.json';path.write_text(json.dumps({'2'*40:{'at':1}}))
+        self.run_action('pause')
+        self.assertFalse(self.native.series[0]['monitored']);self.assertEqual(json.loads(path.read_text()),{})
+        self.assertTrue(all(t['state'].startswith('stopped') for t in self.qb.items[:2]))
+        self.run_action('resume')
+        self.assertTrue(self.native.series[0]['monitored']);self.app.require_version.assert_called_once()
+        self.assertEqual(self.qb.items[1]['state'],'downloading')
+
+    def test_pause_failure_preserves_user_intent_and_reports_unconfirmed_control(self):
+        path=self.state/'data/disk-paused.json';path.write_text(json.dumps({'2'*40:{'at':1}}))
+        self.qb.request=Mock(side_effect=ValueError('upstream unavailable'))
+        with self.assertRaisesRegex(ValueError,'尚未确认'):self.run_action('pause')
+        self.assertEqual(json.loads(path.read_text()),{})
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'task_control_failed')
+
+    def test_cancel_retains_payload_and_can_continue_after_acknowledgement(self):
+        self.run_action('cancel');self.uploader.process_actions(self.sources)
+        self.assertEqual(len(self.qb.items),3)
+        self.assertTrue(Path(self.jobs[1]['source']).exists())
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?',(self.jobs[1]['id'],)).fetchone()[0],'cancelled')
+        self.run_action('resume')
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?',(self.jobs[1]['id'],)).fetchone()[0],'pending')
+
+    def test_remove_only_keeps_local_and_cloud_archive_evidence(self):
+        self.run_action('delete');self.uploader.process_actions(self.sources)
+        self.assertEqual([t['hash'] for t in self.qb.items],['3'*40])
+        self.assertTrue(all(Path(j['source']).exists() for j in self.jobs))
+        self.assertEqual(len(self.native.files),2)
+        self.assertEqual(archived_keys(self.state/'data/uploads.sqlite3',42),{(1,1)})
+        self.assertFalse(any(g['id']=='series:42' for g in self.app.tasks()['items']))
+        self.remote.assert_not_called()
+
+    def test_delete_files_removes_only_selected_project_and_keeps_cloud_history(self):
+        self.run_action('delete',True);self.uploader.process_actions(self.sources)
+        self.assertFalse(any(Path(j['source']).exists() for j in self.jobs))
+        self.assertFalse((self.media/'downloads/tv/1.mkv').exists())
+        self.assertTrue((self.media/'downloads/movies/3.mkv').exists())
+        self.assertEqual(len(self.native.files),0)
+        self.assertEqual(archived_keys(self.state/'data/uploads.sqlite3',42),{(1,1)})
+
+    def test_queued_upload_must_end_before_local_delete(self):
+        self.uploader.update(self.jobs[1],state='queued',task_id='native',stage='/aliyun/.cinema-upload/test/2.mkv')
+        self.remote.upload_task.return_value={'state':3}
+        self.run_action('delete',True);self.uploader.process_actions(self.sources)
+        self.assertTrue(Path(self.jobs[1]['source']).exists());self.assertEqual(len(self.qb.items),3)
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'task_waiting_for_upload')
+        self.remote.upload_task.return_value={'state':4};self.uploader.process_actions(self.sources)
+        self.assertFalse(Path(self.jobs[1]['source']).exists())
+
+    def test_shared_payload_and_active_imports_fail_closed(self):
+        self.qb.items[2]['save_path']=self.qb.items[0]['save_path'];self.qb.files['3'*40][0]['name']='1.mkv'
+        self.run_action('delete',True);self.uploader.process_actions(self.sources)
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'cleanup_shared_file')
+        self.assertTrue(Path(self.jobs[0]['source']).exists())
+
+    def test_active_import_defers_file_deletion(self):
+        self.native.busy=[{'name':'ManualImport','status':'started'}]
+        self.run_action('delete',True);self.uploader.process_actions(self.sources)
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'task_waiting_for_import')
+        self.assertTrue(all(Path(j['source']).exists() for j in self.jobs))
+        self.native.busy=[];self.uploader.process_actions(self.sources)
+        self.assertFalse(any(Path(j['source']).exists() for j in self.jobs))
+
+    def test_explicit_readded_torrent_is_not_permanently_hidden(self):
+        self.run_action('delete',False,'torrent:'+'1'*40);self.uploader.process_actions(self.sources)
+        fresh={**self.jobs[0],'added_on':99};self.uploader.add(fresh)
+        current=dict(self.uploader.db.execute('SELECT * FROM jobs WHERE id=?',(fresh['id'],)).fetchone())
+        self.assertEqual(current['hidden'],0);self.assertFalse(self.uploader.blocked(current))
+
+    def test_unrecognized_targets_and_boolean_confusion_rejected(self):
+        for body in ({'id':'series:999','action':'delete'}, {'id':'series:42','action':'delete','delete_files':'false'}, {'id':'../etc','action':'pause'}):
+            with self.assertRaises(ValueError):self.app.task_action({},body)
+        self.assertTrue(self.native.series[0]['monitored'])
+
+    def test_one_resource_operation_does_not_touch_other_episodes(self):
+        self.run_action('delete',True,'torrent:'+'2'*40);self.uploader.process_actions(self.sources)
+        self.assertTrue(Path(self.jobs[0]['source']).exists());self.assertFalse(Path(self.jobs[1]['source']).exists())
+        self.assertTrue(self.native.series[0]['monitored'])
+
+    def test_resuming_one_cancelled_resource_keeps_the_other_stopped(self):
+        self.run_action('cancel');self.uploader.process_actions(self.sources)
+        self.run_action('resume',key='torrent:'+'2'*40)
+        jobs=[dict(r) for r in self.uploader.db.execute('SELECT * FROM jobs ORDER BY rowid')]
+        self.assertFalse(self.uploader.blocked(jobs[1]));self.assertEqual(jobs[1]['state'],'pending')
+        self.assertEqual(self.qb.items[0]['state'],'stoppedUP');self.assertEqual(self.qb.items[1]['state'],'downloading')
+        self.assertFalse(self.native.series[0]['monitored'])
+
+    def test_previously_removed_entry_keeps_its_files_when_remaining_project_is_deleted(self):
+        self.run_action('delete',False,'torrent:'+'1'*40);self.uploader.process_actions(self.sources)
+        self.run_action('delete',True);self.uploader.process_actions(self.sources)
+        self.assertTrue(Path(self.jobs[0]['source']).exists());self.assertFalse(Path(self.jobs[1]['source']).exists())
+        project=next(a for a in task_actions(self.state/'data/uploads.sqlite3') if a['id']=='series:42')
+        self.assertEqual(project['state'],'done');self.assertIsNone(project['error'])
+
+    def test_watch_session_contains_only_this_user_and_server_identity(self):
+        self.native.json=Mock(return_value={'Id':'server','ServerName':'Cinema'})
+        result=self.app.watch_session({'user':'admin','token':'user-session'})
+        self.assertEqual(result,{'server_id':'server','name':'Cinema','user_id':'admin','token':'user-session'})
+
+
+class UploadCancellationTests(unittest.TestCase):
+    setUp=test_uploader.UploaderTests.setUp
+    tearDown=test_uploader.UploaderTests.tearDown
+    row=test_uploader.UploaderTests.row
+    run_upload=test_uploader.UploaderTests.run_upload
+
+    def test_cancellation_arriving_during_put_cannot_publish(self):
+        original=self.remote.put
+        def put(*args):
+            result=original(*args)
+            payload={'jobs':[self.item['id']],'torrents':[]}
+            with self.uploader.db:self.uploader.db.execute("INSERT INTO task_actions VALUES ('job','cancel',?,'pending',NULL,0)",(json.dumps(payload),))
+            return result
+        self.remote.put=put;self.run_upload()
+        self.assertEqual(self.row()['state'],'uploaded');self.assertEqual(self.service.moves,0)
+        self.assertEqual(self.row()['error'],'task_cancelling')
+
+
+if __name__=='__main__':unittest.main()

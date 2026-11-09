@@ -1,0 +1,50 @@
+(cinema_admin) {
+    forward_auth portal:8097 {
+        uri /discover/api/admin-check
+    }
+}
+
+{$MOVIE_DOMAIN} {
+    encode zstd gzip
+    header Referrer-Policy "no-referrer"
+    redir /search /search/ 308
+    redir /discover /discover/ 308
+    redir /sonarr /sonarr/ 308
+    redir /qb /qb/ 308
+    redir /openlist /openlist/ 308
+    handle /discover/* {
+        reverse_proxy portal:8097
+    }
+    handle /search/* {
+        import cinema_admin
+        reverse_proxy prowlarr:9696 {
+            header_down Location ^http://(.*)$ https://$1
+            header_down Set-Cookie "^(.*)$" "$1; Secure"
+        }
+    }
+    handle /sonarr/* {
+        import cinema_admin
+        reverse_proxy sonarr:8989 {
+            header_down Location ^http://(.*)$ https://$1
+            header_down Set-Cookie "^(.*)$" "$1; Secure"
+        }
+    }
+    handle /openlist/* {
+        import cinema_admin
+        reverse_proxy openlist:5244
+    }
+    handle_path /qb/* {
+        import cinema_admin
+        reverse_proxy qbittorrent:8080
+    }
+    # Management stays on the SSH-tunnelled port, including the relay's web UI.
+    @management {
+        path /ge2o /ge2o/*
+        not path /ge2o/custom.js /ge2o/custom.css
+    }
+    respond @management "Not found" 404
+    handle {
+        reverse_proxy relay:8095
+    }
+}
+

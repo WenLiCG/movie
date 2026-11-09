@@ -1,0 +1,50 @@
+--- a/internal/service/openlist/api.go
++++ b/internal/service/openlist/api.go
+@@ -6,6 +6,7 @@
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"os"
+ 	"reflect"
+ 	"strings"
+ 	"time"
+@@ -154,8 +155,17 @@
+ 
+ // Fetch 请求 openlist api, 响应封装在 v 指针指向的结构中
+ func Fetch(uri, method string, header http.Header, body map[string]any, v any, closeConn bool) error {
++	if config.C == nil || config.C.Openlist == nil {
++		return fmt.Errorf("openlist is not configured")
++	}
+ 	host := config.C.Openlist.Host
+ 	token := config.C.Openlist.Token
++	// The portal rotates this private file without restarting playback sessions.
++	if data, err := os.ReadFile("/app/cinema-config/openlist-token"); err == nil {
++		token = strings.TrimSpace(string(data))
++	} else if !os.IsNotExist(err) {
++		return fmt.Errorf("cannot read managed OpenList token")
++	}
+ 	if strs.AnyEmpty(host, token) {
+ 		return fmt.Errorf("openlist.host 或 openlist.token 配置为空")
+ 	}
+--- /dev/null
++++ b/internal/service/openlist/managed_token_test.go
+@@ -0,0 +1,19 @@
++package openlist
++
++import (
++    "testing"
++    "github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
++)
++
++func TestStrictFetchRejectsMissingConfig(t *testing.T) {
++    original := config.C
++    defer func() { config.C = original }()
++    config.C = nil
++    if err := Fetch("/api/fs/list", "POST", nil, nil, nil, false); err == nil {
++        t.Fatal("missing configuration must return an error")
++    }
++    config.C = &config.Config{}
++    if err := Fetch("/api/fs/list", "POST", nil, nil, nil, false); err == nil {
++        t.Fatal("missing OpenList configuration must return an error")
++    }
++}

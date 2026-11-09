@@ -1,0 +1,10 @@
+**
+!portal/
+!portal/**
+!integration.py
+!configure.py
+!archive.py
+!uploader/
+!uploader/**
+uploader/__pycache__/
+portal/__pycache__/

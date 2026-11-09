@@ -1,0 +1,9 @@
+.env
+state/
+media/
+.upstream/
+.tools/
+/.impeccable/review/
+dist/
+__pycache__/
+*.pyc

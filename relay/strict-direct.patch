@@ -1,0 +1,1187 @@
+diff --git a/internal/constant/constant.go b/internal/constant/constant.go
+index 85133e2..d2c6e06 100644
+--- a/internal/constant/constant.go
++++ b/internal/constant/constant.go
+@@ -40,6 +40,7 @@ const (
+ 
+ 	Reg_Root      = `(?i)^/$`
+ 	Reg_IndexHtml = `(?i)^/web/index\.html`
++	Reg_WebAssets = `(?i)^/(emby/)?web/`
+ 
+ 	Reg_OpenlistLocalTreeUpdatePrefix = `^(/[^/\\]+)+$`
+ 
+diff --git a/internal/service/emby/auth.go b/internal/service/emby/auth.go
+index 1ca14a1..1df3653 100644
+--- a/internal/service/emby/auth.go
++++ b/internal/service/emby/auth.go
+@@ -1,145 +1,176 @@
+ package emby
+ 
+ import (
++	"context"
++	"encoding/json"
+ 	"io"
+ 	"net/http"
+-	"path/filepath"
++	"net/url"
++	"path"
+ 	"regexp"
+ 	"strings"
+-	"sync"
++	"time"
+ 
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
++	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist"
++	mediapath "github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/path"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/strs"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/urls"
+-
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+-// AuthUri 鉴权地址
+-//
+-// 通过此 uri, 可以判断出客户端传递的 api_key 是否是被 emby 服务器认可的
+-const AuthUri = "/emby/Auth/Keys"
+-
+-// validApiKeys 已经校验通过的 api_key, 下次就不再校验
+-//
+-// 这个 map 不会进行大小限制, 考虑到 emby 原服务器中合法的 api_key 个数不是无限个
+-// 所以这里也不用限制太多
+-var validApiKeys = sync.Map{}
+-
+-// ApiKeyType 标记 emby 支持的不同种 api_key 传递方式
+ type ApiKeyType string
+ 
+ const (
+-	Query  ApiKeyType = "query"  // query 参数中的 api_key
+-	Header ApiKeyType = "header" // 请求头中的 Authorization
+-)
+-
+-const (
+-	QueryApiKeyName    = "api_key"
+-	QueryTokenName     = "X-Emby-Token"
+-	HeaderAuthName     = "Authorization"
+-	HeaderFullAuthName = "X-Emby-Authorization"
++	Query              ApiKeyType = "query"
++	Header             ApiKeyType = "header"
++	QueryApiKeyName               = "api_key"
++	QueryTokenName                = "X-Emby-Token"
++	HeaderAuthName                = "Authorization"
++	HeaderFullAuthName            = "X-Emby-Authorization"
+ )
+ 
+-const UnauthorizedResp = "Access token is invalid or expired."
+-
+-// AuthorizationTokenExtractReg 匹配 Authorization 头中 Token 字段
+ var AuthorizationTokenExtractReg = regexp.MustCompile(`(?i)token="([^"]+)"`)
++var playbackItemRoute = regexp.MustCompile(`(?i)^/.*(?:videos|audio|items)/([a-z0-9-]+)(?:/|$)`)
++var validItemID = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
++var authorizationClient = &http.Client{
++	Timeout:       5 * time.Second,
++	CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
++}
+ 
+-// subtitleExt 记录字幕文件扩展名, 不对字幕请求进行拦截
+-var subtitleExt = map[string]struct{}{
+-	".ass": {},
+-	".srt": {},
+-	".sub": {},
+-	".ssa": {},
+-	".vtt": {},
++// IsWebAssetPath keeps Emby's UI namespace separate from similarly named media APIs.
++func IsWebAssetPath(raw string) bool {
++	p := strings.ToLower(raw)
++	return p == path.Clean(p) && !strings.Contains(p, "\\") &&
++		(strings.HasPrefix(p, "/web/") || strings.HasPrefix(p, "/emby/web/"))
+ }
+ 
+-// ApiKeyChecker 对指定的 api 进行鉴权
+-//
+-// 该中间件会将客户端传递的 api_key 发送给 emby 服务器, 如果 emby 返回 401 异常
+-// 说明这个 api_key 是客户端伪造的, 阻断客户端的请求
++// ApiKeyChecker rechecks the caller with Emby for this item before the response cache.
++// Authorization decisions are never cached locally.
+ func ApiKeyChecker() gin.HandlerFunc {
+-
+-	patterns := []*regexp.Regexp{
+-		regexp.MustCompile(constant.Reg_ResourceStream),
+-		regexp.MustCompile(constant.Reg_PlaybackInfo),
+-		regexp.MustCompile(constant.Reg_ItemDownload),
+-		regexp.MustCompile(constant.Reg_ItemSyncDownload),
+-		regexp.MustCompile(constant.Reg_ProxyPlaylist),
+-		regexp.MustCompile(constant.Reg_ProxyTs),
+-		regexp.MustCompile(constant.Reg_ProxySubtitle),
+-		regexp.MustCompile(constant.Reg_ShowEpisodes),
+-		regexp.MustCompile(constant.Reg_UserItems),
+-	}
+-
+ 	return func(c *gin.Context) {
+-		// 1 取出 api_key
+-		kType, kName, apiKey := getApiKey(c)
+-
+-		// 2 如果该 key 已经是被信任的, 跳过校验
+-		if _, ok := validApiKeys.Load(apiKey); ok {
++		route := strings.ToLower(c.Request.URL.Path)
++		if IsWebAssetPath(route) {
+ 			return
+ 		}
+-
+-		// 3 判断当前请求的 uri 是否需要被校验
+-		needCheck := false
+-		for _, pattern := range patterns {
+-			if pattern.MatchString(c.Request.RequestURI) {
+-				needCheck = true
+-				break
+-			}
++		isProxy := strings.Contains(route, "/videos/proxy_")
++		match := playbackItemRoute.FindStringSubmatch(c.Request.URL.Path)
++		// Upstream route regexes also inspect RequestURI; reject query-injected media routes.
++		routingURI := strings.ToLower(c.Request.RequestURI)
++		needsAuth := strings.Contains(routingURI, "/videos/") || strings.Contains(routingURI, "/audio/") ||
++			(len(match) > 0 && (strings.HasSuffix(route, "/playbackinfo") || strings.HasSuffix(route, "/download"))) ||
++			strings.Contains(routingURI, "/sync/jobitems/")
++		if !needsAuth {
++			return
+ 		}
+ 
+-		// 排除字幕文件
+-		ext := strings.ToLower(filepath.Ext(c.Request.RequestURI))
+-		if queryStartIdx := strings.Index(ext, "?"); queryStartIdx != -1 {
+-			ext = ext[:queryStartIdx]
++		_, _, token := getApiKey(c)
++		// getApiKey returns a complete header for unquoted Authorization values; those are not session tokens.
++		if token == "" || strings.ContainsAny(token, " \"\r\n") {
++			c.AbortWithStatus(http.StatusUnauthorized)
++			return
+ 		}
+-		if _, ok := subtitleExt[ext]; ok {
+-			needCheck = false
++		itemID := ""
++		if isProxy {
++			itemID = c.Query("item_id")
++		} else if len(match) > 0 {
++			itemID = match[1]
+ 		}
+-
+-		if !needCheck {
++		if !validItemID.MatchString(itemID) {
++			c.AbortWithStatus(http.StatusForbidden)
+ 			return
+ 		}
+-
+-		// 4 发出请求, 验证 api_key
+-		u := config.C.Emby.Host + AuthUri
+-		var header http.Header
+-		if kType == Query {
+-			u = urls.AppendArgs(u, kName, apiKey)
+-		} else {
+-			header = make(http.Header)
+-			header.Set(kName, apiKey)
++		var info struct {
++			ErrorCode    string
++			MediaSources []struct {
++				Path   string
++				ItemID string `json:"ItemId"`
++			}
+ 		}
+-		resp, err := https.Get(u).Header(header).Do()
+-		if err != nil {
+-			logs.Error("鉴权失败: %v", err)
+-			c.Abort()
++		// Use Emby's actual playback API; Users/Me is not an Emby API.
++		uri := "/Items/" + url.PathEscape(itemID) + "/PlaybackInfo?IsPlayback=false&AutoOpenLiveStream=false"
++		if status := authorizationJSON(c.Request.Context(), uri, token, &info); status != http.StatusOK {
++			c.AbortWithStatus(status)
+ 			return
+ 		}
+-		defer resp.Body.Close()
+-		bodyBytes, err := io.ReadAll(resp.Body)
++		if info.ErrorCode != "" || len(info.MediaSources) == 0 {
++			c.AbortWithStatus(http.StatusForbidden)
++			return
++		}
++		// Emby returns alternate versions with their own ItemIds in this authorized group.
++		ownsSource := false
++		for _, source := range info.MediaSources {
++			if source.ItemID == "" || source.ItemID == itemID {
++				ownsSource = true
++				break
++			}
++		}
++		if !ownsSource {
++			c.AbortWithStatus(http.StatusForbidden)
++			return
++		}
++		// Client-supplied cloud paths must belong to the item Emby just authorized.
++		cloudPath := c.Query("openlist_path")
++		ms, err := resolveMediaSourceId(getRequestMediaSourceId(c))
+ 		if err != nil {
+-			logs.Error("鉴权中间件读取源服务器响应失败: %v", err)
+-			bodyBytes = []byte(UnauthorizedResp)
++			c.AbortWithStatus(http.StatusBadRequest)
++			return
+ 		}
+-		respBody := strings.TrimSpace(string(bodyBytes))
+-
+-		// 5 判断是否被源服务器拒绝
+-		if resp.StatusCode == http.StatusUnauthorized && respBody == UnauthorizedResp {
+-			c.String(http.StatusUnauthorized, "鉴权失败")
+-			c.Abort()
++		if cloudPath == "" {
++			cloudPath = ms.OpenlistPath
++		}
++		if isProxy && cloudPath == "" {
++			c.AbortWithStatus(http.StatusForbidden)
+ 			return
+ 		}
++		if cloudPath != "" {
++			cloudPath = openlist.PathDecode(cloudPath)
++			allowed := false
++			for _, source := range info.MediaSources {
++				if source.Path != "" && mediapath.Emby2Openlist(source.Path).Path == cloudPath {
++					allowed = true
++				}
++			}
++			if !allowed {
++				c.AbortWithStatus(http.StatusForbidden)
++				return
++			}
++			if ms.OpenlistPath != "" && openlist.PathDecode(ms.OpenlistPath) != cloudPath {
++				c.AbortWithStatus(http.StatusForbidden)
++				return
++			}
++		}
++		c.Set("authorizedItemID", itemID)
++	}
++}
+ 
+-		// 6 校验通过, 加入信任集合
+-		validApiKeys.Store(apiKey, struct{}{})
++func authorizationJSON(ctx context.Context, uri, token string, result any) int {
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(config.C.Emby.Host, "/")+uri, nil)
++	if err != nil {
++		return http.StatusBadGateway
++	}
++	req.Header.Set(QueryTokenName, token)
++	req.Header.Set("Accept", "application/json")
++	resp, err := authorizationClient.Do(req)
++	if err != nil {
++		return http.StatusBadGateway
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		if resp.StatusCode == http.StatusUnauthorized {
++			return http.StatusUnauthorized
++		}
++		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
++			return http.StatusForbidden
++		}
++		return http.StatusBadGateway
++	}
++	if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "application/json") {
++		return http.StatusBadGateway
++	}
++	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(result); err != nil {
++		return http.StatusBadGateway
+ 	}
++	return http.StatusOK
+ }
+ 
+ // getApiKey 获取请求中的 api_key 信息
+diff --git a/internal/service/emby/download.go b/internal/service/emby/download.go
+index f5e729f..c1e3700 100644
+--- a/internal/service/emby/download.go
++++ b/internal/service/emby/download.go
+@@ -10,7 +10,6 @@ import (
+ 
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/jsons"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
+ 	"github.com/gin-gonic/gin"
+@@ -137,9 +136,7 @@ func DownloadStrategyChecker() gin.HandlerFunc {
+ 		}
+ 
+ 		if strategy == config.DlStrategyOrigin {
+-			if err := https.ProxyPass(c.Request, c.Writer, config.C.Emby.Host); err != nil {
+-				logs.Error("下载接口代理失败: %v", err)
+-			}
++			ProxyOrigin(c)
+ 		}
+ 
+ 	}
+diff --git a/internal/service/emby/emby.go b/internal/service/emby/emby.go
+index ff7acca..f8d5219 100644
+--- a/internal/service/emby/emby.go
++++ b/internal/service/emby/emby.go
+@@ -93,9 +93,9 @@ var imageProcessingParams = map[string]struct{}{
+ 	"height":               {},
+ 	"quality":              {},
+ 	"format":               {},
+-	"cropwhitespace":        {},
++	"cropwhitespace":       {},
+ 	"enableimageenhancers": {},
+-	"addplayedindicator":    {},
++	"addplayedindicator":   {},
+ 	"percentplayed":        {},
+ 	"unplayedcount":        {},
+ 	"blur":                 {},
+@@ -108,15 +108,53 @@ func ProxyOrigin(c *gin.Context) {
+ 	if c == nil {
+ 		return
+ 	}
+-	origin := config.C.Emby.Host
+-
+-	// 传递客户端 IP 到 emby
++	if blocksOriginPath(c.Request.URL.Path) {
++		c.AbortWithStatus(http.StatusForbidden)
++		return
++	}
+ 	c.Request.Header.Set("X-Forwarded-For", c.ClientIP())
+ 	c.Request.Header.Set("X-Real-IP", c.ClientIP())
++	resp, err := https.ProxyRequest(c.Request, config.C.Emby.Host)
++	if err != nil {
++		c.AbortWithStatus(http.StatusBadGateway)
++		return
++	}
++	defer resp.Body.Close()
++	// Inspect headers before streaming any origin body, including unknown/new media routes.
++	if blocksOriginResponse(resp.Header) {
++		c.AbortWithStatus(http.StatusForbidden)
++		return
++	}
++	https.CloneHeader(c.Writer, resp.Header)
++	c.Status(resp.StatusCode)
++	_, _ = io.Copy(c.Writer, resp.Body)
++}
++
++func blocksOriginPath(raw string) bool {
++	if IsWebAssetPath(raw) {
++		return false
++	}
++	p := strings.ToLower(raw)
++	if strings.Contains(p, "/subtitles/") {
++		return !(strings.HasSuffix(p, ".vtt") || strings.HasSuffix(p, ".srt") || strings.HasSuffix(p, ".ass") || strings.HasSuffix(p, ".ssa"))
++	}
++	return strings.Contains(p, "/videos/") || strings.Contains(p, "/audio/") ||
++		strings.Contains(p, "/livetv/") || strings.HasSuffix(p, "/download") ||
++		(strings.Contains(p, "/sync/jobitems/") && strings.HasSuffix(p, "/file"))
++}
+ 
+-	if err := https.ProxyPass(c.Request, c.Writer, origin); err != nil {
+-		logs.Error("代理异常: %v", err)
++func blocksOriginResponse(h http.Header) bool {
++	ct := strings.ToLower(strings.TrimSpace(strings.Split(h.Get("Content-Type"), ";")[0]))
++	disposition := strings.ToLower(h.Get("Content-Disposition"))
++	if strings.Contains(disposition, "attachment") {
++		return true
++	}
++	if ct == "application/vnd.apple.mpegurl" || ct == "application/x-mpegurl" || ct == "audio/x-mpegurl" {
++		return false
+ 	}
++	return strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "audio/") ||
++		ct == "application/octet-stream" || ct == "application/mp4" || ct == "application/ogg" ||
++		ct == "application/x-matroska"
+ }
+ 
+ // TestProxyUri 用于测试的代理,
+diff --git a/internal/service/emby/episode.go b/internal/service/emby/episode.go
+index 7488fcc..82ca76b 100644
+--- a/internal/service/emby/episode.go
++++ b/internal/service/emby/episode.go
+@@ -21,7 +21,7 @@ import (
+ func ResortEpisodes(c *gin.Context) {
+ 	// 1 检查配置是否开启
+ 	if !config.C.Emby.EpisodesUnplayPrior {
+-		checkErr(c, https.ProxyPass(c.Request, c.Writer, config.C.Emby.Host))
++		ProxyOrigin(c)
+ 		return
+ 	}
+ 
+diff --git a/internal/service/emby/media.go b/internal/service/emby/media.go
+index 2bb6868..233b085 100644
+--- a/internal/service/emby/media.go
++++ b/internal/service/emby/media.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/path"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/jsons"
+-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/randoms"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/strs"
+ 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/urls"
+@@ -162,23 +161,9 @@ func findVideoPreviewInfos(source *jsons.Item, clientApiKey string, resChan chan
+ 		}
+ 	}
+ 
+-	// 首次请求失败, 遍历 openlist 所有根目录, 重新请求
+ 	if !firstFetchSuccess {
+-		paths, err := openlistPathRes.Range()
+-		if err != nil {
+-			logs.Error("转换 openlist 路径异常: %v", err)
+-			resChan <- nil
+-			return
+-		}
+-
+-		for _, path := range paths {
+-			res := openlist.FetchFsOther(path, nil)
+-			if res.Code == http.StatusOK {
+-				transcodingList = res.Data.VideoPreviewPlayInfo.LiveTranscodingTaskList
+-				subtitleList = res.Data.VideoPreviewPlayInfo.LiveTranscodingSubtitleTaskList
+-				break
+-			}
+-		}
++		resChan <- nil
++		return
+ 	}
+ 
+ 	if len(transcodingList) == 0 {
+@@ -218,6 +203,7 @@ func findVideoPreviewInfos(source *jsons.Item, clientApiKey string, resChan chan
+ 			tu, _ := url.Parse(strings.ReplaceAll(MasterM3U8UrlTemplate, "${itemId}", itemId))
+ 			q := tu.Query()
+ 			q.Set("openlist_path", openlist.PathEncode(openlistPathRes.Path))
++			q.Set("item_id", itemId)
+ 			q.Set("template_id", transcode.TemplateId)
+ 			q.Set(QueryApiKeyName, clientApiKey)
+ 			tu.RawQuery = q.Encode()
+@@ -290,6 +276,7 @@ func addSubtitles2MediaStreams(source *jsons.Item, subtitleList []openlist.Trans
+ 		u, _ := url.Parse(fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/0/Stream.vtt", itemId, fakeId, idx))
+ 		q := u.Query()
+ 		q.Set("openlist_path", openlist.PathEncode(openlistPath))
++		q.Set("item_id", itemId)
+ 		q.Set("template_id", templateId)
+ 		q.Set("sub_name", subName)
+ 		q.Set(QueryApiKeyName, clientApiKey)
+@@ -483,6 +470,9 @@ func getRequestMediaSourceId(c *gin.Context) string {
+ 	}
+ 
+ 	// 2 从请求体中获取
++	if c.Request.Body == nil {
++		return ""
++	}
+ 	bodyBytes, err := io.ReadAll(c.Request.Body)
+ 	if err != nil {
+ 		return ""
+diff --git a/internal/service/emby/redirect.go b/internal/service/emby/redirect.go
+index 093a90d..928383d 100644
+--- a/internal/service/emby/redirect.go
++++ b/internal/service/emby/redirect.go
+@@ -4,7 +4,6 @@ import (
+ 	"fmt"
+ 	"net/http"
+ 	"net/url"
+-	"slices"
+ 	"strings"
+ 	"time"
+ 
+@@ -46,9 +45,10 @@ func Redirect2Transcode(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	tu, _ := url.Parse(https.ClientRequestHost(c.Request) + "/videos/proxy_playlist")
++	tu, _ := url.Parse("/videos/proxy_playlist")
+ 	q := tu.Query()
+ 	q.Set("openlist_path", openlistPath)
++	q.Set("item_id", c.GetString("authorizedItemID"))
+ 	q.Set(QueryApiKeyName, apiKey)
+ 	q.Set("template_id", templateId)
+ 	tu.RawQuery = q.Encode()
+@@ -79,6 +79,7 @@ func Redirect2OpenlistLink(c *gin.Context) {
+ 		q.Set("template_id", itemInfo.MsInfo.TemplateId)
+ 		q.Set(QueryApiKeyName, itemInfo.ApiKey)
+ 		q.Set("openlist_path", itemInfo.MsInfo.OpenlistPath)
++		q.Set("item_id", itemInfo.Id)
+ 		u.RawQuery = q.Encode()
+ 		logs.Success("重定向 playlist: %s", u.String())
+ 		c.Redirect(http.StatusTemporaryRedirect, u.String())
+@@ -107,17 +108,7 @@ func Redirect2OpenlistLink(c *gin.Context) {
+ 
+ 	// 5 如果是本地地址
+ 	if config.C.Emby.IsLocalMediaPath(embyPath) {
+-		if shouldRedirectDirectly(c, config.C.Emby.Host) {
+-			logs.Info("本地媒体: %s, 检测到 Emby 服务端与 ge2o 同源: %s, 重定向处理", embyPath, config.C.Emby.Host)
+-			c.Redirect(http.StatusTemporaryRedirect, config.C.Emby.Host+c.Request.RequestURI)
+-			return
+-		}
+-		// 如果是外网，由于无法直连内网端口，我们返回原有的 original 路径进行代理回源播放
+-		// （因为有底层的 Context 机制保护，所以即使代理也不会发生内存暴涨）
+-		logs.Info("本地媒体: %s, 代理回源", embyPath)
+-		newUri := strings.Replace(c.Request.RequestURI, "stream", "original", 1)
+-		newUri = strings.Replace(newUri, "universal", "original", 1)
+-		c.Redirect(http.StatusTemporaryRedirect, newUri)
++		c.AbortWithStatus(http.StatusForbidden)
+ 		return
+ 	}
+ 
+@@ -151,11 +142,12 @@ func Redirect2OpenlistLink(c *gin.Context) {
+ 		}
+ 
+ 		// 代理转码 m3u
+-		u, _ := url.Parse(https.ClientRequestHost(c.Request) + "/videos/proxy_playlist")
++		u, _ := url.Parse("/videos/proxy_playlist")
+ 		q := u.Query()
+ 		q.Set("template_id", itemInfo.MsInfo.TemplateId)
+ 		q.Set(QueryApiKeyName, itemInfo.ApiKey)
+ 		q.Set("openlist_path", openlist.PathEncode(path))
++		q.Set("item_id", itemInfo.Id)
+ 		u.RawQuery = q.Encode()
+ 		c.Redirect(http.StatusTemporaryRedirect, u.String())
+ 		return true
+@@ -164,15 +156,6 @@ func Redirect2OpenlistLink(c *gin.Context) {
+ 	if openlistPathRes.Success && handleOpenlistResource(openlistPathRes.Path) {
+ 		return
+ 	}
+-	paths, err := openlistPathRes.Range()
+-	if checkErr(c, err) {
+-		return
+-	}
+-	if slices.ContainsFunc(paths, func(path string) bool {
+-		return handleOpenlistResource(path)
+-	}) {
+-		return
+-	}
+ 
+ 	checkErr(c, fmt.Errorf("获取直链失败: %s", allErrors.String()))
+ }
+@@ -196,16 +179,10 @@ func ProxyOriginalResource(c *gin.Context) {
+ 
+ 	// 如果是本地媒体
+ 	if config.C.Emby.IsLocalMediaPath(embyPath) {
+-		if shouldRedirectDirectly(c, config.C.Emby.Host) {
+-			logs.Info("本地媒体: %s, 检测到 Emby 服务端与 ge2o 同源: %s, 重定向处理", embyPath, config.C.Emby.Host)
+-			c.Redirect(http.StatusTemporaryRedirect, config.C.Emby.Host+c.Request.RequestURI)
+-			return
+-		}
+-		// 外网请求，执行代理回源
+-		logs.Info("本地媒体: %s, 代理回源", embyPath)
+-		ProxyOrigin(c)
++		c.AbortWithStatus(http.StatusForbidden)
+ 		return
+ 	}
++
+ 	Redirect2OpenlistLink(c)
+ }
+ 
+@@ -264,47 +241,3 @@ func getFinalRedirectLink(originLink string, header http.Header) string {
+ 
+ 	return finalLink
+ }
+-
+-// shouldRedirectDirectly 判断客户端请求的主机名是否与配置的 Emby 服务器主机名一致
+-func shouldRedirectDirectly(c *gin.Context, rawEmbyHost string) bool {
+-	// 1. 提取客户端请求的 Hostname（优先处理反向代理头）
+-	clientHost := c.GetHeader("X-Forwarded-Host")
+-	if clientHost == "" {
+-		clientHost = c.Request.Host
+-	}
+-
+-	// 清理客户端 Host 中的端口号（如 "192.168.1.100:8080" -> "192.168.1.100"）
+-	if idx := strings.Index(clientHost, ":"); idx != -1 {
+-		clientHost = clientHost[:idx]
+-	}
+-	clientHost = strings.TrimSpace(clientHost)
+-
+-	// 2. 提取配置中 Emby Host 的 Hostname（如 "http://192.168.1.100:8096" -> "192.168.1.100"）
+-	embyHost := extractHostname(rawEmbyHost)
+-
+-	if clientHost == "" || embyHost == "" {
+-		return false
+-	}
+-
+-	// 3. 忽略大小写比对两者 Hostname
+-	return strings.EqualFold(clientHost, embyHost)
+-}
+-
+-// extractHostname 安全解析 url 格式的主机名
+-func extractHostname(rawUrl string) string {
+-	if rawUrl == "" {
+-		return ""
+-	}
+-
+-	// 若配置未带协议前缀（如仅填了 "192.168.1.100:8096"），补全便于 net/url 解析
+-	if !strings.HasPrefix(rawUrl, "http://") && !strings.HasPrefix(rawUrl, "https://") {
+-		rawUrl = "http://" + rawUrl
+-	}
+-
+-	u, err := url.Parse(rawUrl)
+-	if err != nil {
+-		return ""
+-	}
+-
+-	return u.Hostname()
+-}
+diff --git a/internal/service/emby/strict_direct_test.go b/internal/service/emby/strict_direct_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/service/emby/strict_direct_test.go
+@@ -0,0 +1,246 @@
++package emby
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"testing"
++
++	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
++	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist"
++	"github.com/gin-gonic/gin"
++)
++
++func TestStrictAuthorization(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	original := config.C
++	t.Cleanup(func() { config.C = original })
++	status := 200
++	errorCode, itemID, calls := "", "42", 0
++	invalidJSON, empty := false, false
++	alternate := false
++	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls++
++		if r.Header.Get("X-Emby-Token") != "session" {
++			w.WriteHeader(401)
++			return
++		}
++		if r.URL.Path != "/Items/42/PlaybackInfo" || r.URL.Query().Get("AutoOpenLiveStream") != "false" {
++			w.WriteHeader(404)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(status)
++		if invalidJSON {
++			_, _ = w.Write([]byte("{"))
++			return
++		}
++		sources := []map[string]string{{"ItemId": itemID, "Path": "/index/ali/Movie.mp4"}}
++		if alternate {
++			sources = append(sources, map[string]string{"ItemId": "99", "Path": "/index/ali/Alternate.mp4"})
++		}
++		if empty {
++			sources = nil
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"ErrorCode": errorCode, "MediaSources": sources})
++	}))
++	defer origin.Close()
++	config.C = &config.Config{Emby: &config.Emby{Host: origin.URL, MountPath: "/index"}, Path: &config.Path{}}
++	_ = config.C.Path.Init()
++	engine := gin.New()
++	engine.Use(ApiKeyChecker())
++	engine.Any("/*path", func(c *gin.Context) { c.Status(204) })
++	request := func(path, token string) int {
++		r := httptest.NewRequest("GET", path, nil)
++		if token != "" {
++			r.Header.Set("X-Emby-Token", token)
++		}
++		w := httptest.NewRecorder()
++		engine.ServeHTTP(w, r)
++		return w.Code
++	}
++	if got := request("/Videos/42/stream", ""); got != 401 {
++		t.Fatalf("missing token: %d", got)
++	}
++	if calls != 0 {
++		t.Fatal("missing tokens should not reach origin")
++	}
++	if got := request("/Videos/42/stream", "session"); got != 204 {
++		t.Fatalf("valid: %d", got)
++	}
++	status = 401
++	if got := request("/Videos/42/stream", "session"); got != 401 {
++		t.Fatalf("revoked token was cached: %d", got)
++	}
++	status = 403
++	if got := request("/Videos/42/stream", "session"); got != 403 {
++		t.Fatalf("403 accepted: %d", got)
++	}
++	status = 500
++	if got := request("/Videos/42/stream", "session"); got != 502 {
++		t.Fatalf("500 accepted: %d", got)
++	}
++	status = 200
++	errorCode = "NotAllowed"
++	if got := request("/Videos/42/stream", "session"); got != 403 {
++		t.Fatalf("playback not allowed: %d", got)
++	}
++	errorCode = ""
++	empty = true
++	if got := request("/Videos/42/stream", "session"); got != 403 {
++		t.Fatalf("empty sources accepted: %d", got)
++	}
++	empty = false
++	invalidJSON = true
++	if got := request("/Videos/42/stream", "session"); got != 502 {
++		t.Fatalf("invalid json: %d", got)
++	}
++	invalidJSON = false
++	status = 403
++	if got := request("/Videos/42/stream", "session"); got != 403 {
++		t.Fatalf("hidden item: %d", got)
++	}
++	status = 200
++	itemID = "99"
++	if got := request("/Videos/42/stream", "session"); got != 403 {
++		t.Fatalf("wrong item: %d", got)
++	}
++
++	itemID = "42"
++	alternate = true
++	for _, path := range []string{"/Items/42/PlaybackInfo", "/Videos/42/stream?MediaSourceId=mediasource_99", "/videos/proxy_ts?item_id=42&openlist_path=/ali/Alternate.mp4"} {
++		if got := request(path, "session"); got != 204 {
++			t.Fatalf("Emby-linked version rejected %s: %d", path, got)
++		}
++	}
++	if got := request("/videos/proxy_ts?item_id=42&openlist_path=/ali/Private.mp4", "session"); got != 403 {
++		t.Fatalf("unrelated path accepted in a version group: %d", got)
++	}
++	alternate = false
++	if got := request("/web?fake=/videos/proxy_ts&item_id=42&openlist_path=/ali/Movie.mp4", "session"); got != 403 {
++		t.Fatalf("query-injected media route: %d", got)
++	}
++	if got := request("/prefix/videos/proxy_ts?item_id=42&openlist_path=/ali/Private.mp4", "session"); got != 403 {
++		t.Fatalf("prefixed media route: %d", got)
++	}
++	for _, endpoint := range []string{"proxy_playlist", "proxy_ts", "proxy_subtitle"} {
++		path := "/videos/" + endpoint + "?item_id=42&openlist_path=" + url.QueryEscape(openlist.PathEncode("/ali/Movie.mp4"))
++		if got := request(path, "session"); got != 204 {
++			t.Fatalf("authorized %s: %d", endpoint, got)
++		}
++		if got := request(strings.Replace(path, "item_id=42&", "", 1), "session"); got != 403 {
++			t.Fatalf("missing item %s: %d", endpoint, got)
++		}
++		path = "/videos/" + endpoint + "?item_id=42&openlist_path=" + url.QueryEscape(openlist.PathEncode("/ali/Private.mp4"))
++		if got := request(path, "session"); got != 403 {
++			t.Fatalf("forged path %s: %d", endpoint, got)
++		}
++	}
++	forged := "origin[[_]]FHD[[_]]1920x1080[[_]]" + openlist.PathEncode("/ali/Private.mp4")
++	if got := request("/videos/42/stream?MediaSourceId="+url.QueryEscape(forged), "session"); got != 403 {
++		t.Fatalf("forged media source: %d", got)
++	}
++	if got := request("/Users/AuthenticateByName", ""); got != 204 {
++		t.Fatalf("login route blocked: %d", got)
++	}
++}
++
++func TestStrictOrigin(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	original := config.C
++	t.Cleanup(func() { config.C = original })
++	calls := 0
++	mime, disposition := "application/json", ""
++	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls++
++		w.Header().Set("Content-Type", mime)
++		w.Header().Set("Content-Disposition", disposition)
++		_, _ = w.Write([]byte("origin-body"))
++	}))
++	defer origin.Close()
++	config.C = &config.Config{Emby: &config.Emby{Host: origin.URL}}
++	engine := gin.New()
++	engine.Any("/*path", ProxyOrigin)
++	request := func(path string) *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		engine.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
++		return w
++	}
++	for _, path := range []string{"/Videos/42/stream", "/emby/Videos/42/original.mkv", "/Videos/42/master.m3u8", "/Videos/42/new-route/0.ts", "/Audio/42/stream", "/Items/42/download", "/Sync/JobItems/42/file", "/LiveTv/LiveStreamFiles/42/stream.ts"} {
++		if w := request(path); w.Code != 403 || strings.Contains(w.Body.String(), "origin-body") {
++			t.Fatalf("origin media leaked %s: %d", path, w.Code)
++		}
++	}
++	if calls != 0 {
++		t.Fatalf("media request reached origin: %d", calls)
++	}
++	for _, mime = range []string{"video/mp4", "audio/mpeg", "application/octet-stream", "application/mp4", "application/x-matroska"} {
++		if w := request("/unknown-future-stream"); w.Code != 403 || w.Body.Len() != 0 {
++			t.Fatalf("unknown media MIME leaked %s: %d", mime, w.Code)
++		}
++	}
++	mime = "text/plain"
++	disposition = "attachment; filename=movie.mkv"
++	if w := request("/unknown-download"); w.Code != 403 {
++		t.Fatalf("attachment leaked: %d", w.Code)
++	}
++	disposition = ""
++	for _, tc := range []struct{ path, mime string }{{"/System/Info", "application/json"}, {"/web/index.html", "text/html"}, {"/Videos/42/x/Subtitles/0/0/Stream.vtt", "text/vtt"}, {"/list", "application/vnd.apple.mpegurl"}} {
++		mime = tc.mime
++		if w := request(tc.path); w.Code != 200 || w.Body.String() != "origin-body" {
++			t.Fatalf("control route blocked %s: %d", tc.path, w.Code)
++		}
++	}
++}
++
++func TestStrictPlaylistRedirectSameOrigin(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	original := config.C
++	t.Cleanup(func() { config.C = original })
++	sourceID := "0123456789abcdef0123456789abcdef"
++	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		switch r.URL.Path {
++		case "/Items/42/PlaybackInfo":
++			_ = json.NewEncoder(w).Encode(map[string]any{"MediaSources": []map[string]string{{"Id": sourceID, "Path": "/index/ali/Movie.mp4"}}})
++		case "/api/fs/other":
++			_, _ = w.Write([]byte(`{"code":200,"data":{"video_preview_play_info":{"live_transcoding_task_list":[{"template_id":"FHD","url":"https://cloud.example/master.m3u8"}]}}}`))
++		default:
++			w.WriteHeader(404)
++		}
++	}))
++	defer origin.Close()
++	config.C = &config.Config{Emby: &config.Emby{Host: origin.URL, MountPath: "/index", Strm: &config.Strm{}}, Path: &config.Path{}, Openlist: &config.Openlist{Host: origin.URL, Token: "test"}}
++	_ = config.C.Path.Init()
++	publicOrigin, _ := url.Parse("https://movie.example")
++	cases := []struct {
++		path    string
++		handler gin.HandlerFunc
++	}{
++		{"/videos/42/master.m3u8?template_id=FHD&openlist_path=/ali/Movie.mp4&api_key=session", Redirect2Transcode},
++		{"/videos/42/stream?api_key=session&MediaSourceId=" + url.QueryEscape(sourceID+"[[_]]FHD"), Redirect2OpenlistLink},
++	}
++	for _, tc := range cases {
++		w := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(w)
++		// TLS terminates at Caddy; the relay request is plain HTTP with untrusted forwarded headers.
++		c.Request = httptest.NewRequest("GET", "http://relay:8095"+tc.path, nil)
++		c.Request.Header.Set("X-Forwarded-Proto", "http")
++		c.Request.Header.Set("X-Forwarded-Host", "attacker.example")
++		c.Set("authorizedItemID", "42")
++		tc.handler(c)
++		u, err := url.Parse(w.Header().Get("Location"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		if w.Code != http.StatusTemporaryRedirect || u.IsAbs() || u.Host != "" || u.Path != "/videos/proxy_playlist" || u.Query().Get("item_id") != "42" {
++			t.Fatalf("unsafe playlist redirect: status=%d location=%s", w.Code, u)
++		}
++		resolved := publicOrigin.ResolveReference(u)
++		if resolved.Scheme != "https" || resolved.Host != "movie.example" {
++			t.Fatalf("mixed content: %s", resolved)
++		}
++	}
++}
+diff --git a/internal/service/m3u8/info.go b/internal/service/m3u8/info.go
+index 170308a..4aa0dd7 100644
+--- a/internal/service/m3u8/info.go
++++ b/internal/service/m3u8/info.go
+@@ -118,7 +118,7 @@ func (i *Info) GetTsLink(idx int) (string, bool) {
+ // Deprecated: MasterFunc 获取变体 m3u8
+ //
+ // 当 info 包含有字幕时, 需要调用这个方法返回
+-func (i *Info) MasterFunc(cntMapper func() string, clientApiKey string) string {
++func (i *Info) MasterFunc(cntMapper func() string, clientApiKey, itemID string) string {
+ 	sb := strings.Builder{}
+ 	sb.WriteString("#EXTM3U\n")
+ 	sb.WriteString("#EXT-X-VERSION:3\n")
+@@ -130,6 +130,7 @@ func (i *Info) MasterFunc(cntMapper func() string, clientApiKey string) string {
+ 		q.Set("template_id", i.TemplateId)
+ 		q.Set("sub_name", urls.ResolveResourceName(subInfo.Url))
+ 		q.Set(emby.QueryApiKeyName, clientApiKey)
++		q.Set("item_id", itemID)
+ 		u.RawQuery = q.Encode()
+ 		cmt := fmt.Sprintf(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="%s",LANGUAGE="%s",URI="%s"`, subInfo.Lang, subInfo.Lang, u.String())
+ 		sb.WriteString(cmt + "\n")
+@@ -170,7 +171,7 @@ func (i *Info) ContentFunc(tsMapper func(int, string) string) string {
+ }
+ 
+ // ProxyContent 将 i 转换为 m3u8 本地代理文本
+-func (i *Info) ProxyContent(main bool, routePrefix, clientApiKey string) string {
++func (i *Info) ProxyContent(main bool, routePrefix, clientApiKey, itemID string) string {
+ 	baseRoute := strings.Builder{}
+ 	if routePrefix != "" {
+ 		baseRoute.WriteString(routePrefix)
+@@ -186,10 +187,11 @@ func (i *Info) ProxyContent(main bool, routePrefix, clientApiKey string) string
+ 			q.Set("openlist_path", openlist.PathEncode(i.OpenlistPath))
+ 			q.Set("template_id", i.TemplateId)
+ 			q.Set(emby.QueryApiKeyName, clientApiKey)
++			q.Set("item_id", itemID)
+ 			q.Set("type", "main")
+ 			u.RawQuery = q.Encode()
+ 			return u.String()
+-		}, clientApiKey)
++		}, clientApiKey, itemID)
+ 	}
+ 
+ 	baseRoute.WriteString("proxy_ts")
+@@ -200,6 +202,7 @@ func (i *Info) ProxyContent(main bool, routePrefix, clientApiKey string) string
+ 		q.Set("openlist_path", openlist.PathEncode(i.OpenlistPath))
+ 		q.Set("template_id", i.TemplateId)
+ 		q.Set(emby.QueryApiKeyName, clientApiKey)
++		q.Set("item_id", itemID)
+ 		u.RawQuery = q.Encode()
+ 		return u.String()
+ 	})
+diff --git a/internal/service/m3u8/info_test.go b/internal/service/m3u8/info_test.go
+index eefc931..45cf5a2 100644
+--- a/internal/service/m3u8/info_test.go
++++ b/internal/service/m3u8/info_test.go
+@@ -410,7 +410,7 @@ func TestConvert(t *testing.T) {
+ 	// log.Println(info.Content())
+ 	info.OpenlistPath = "/电视剧/xxx"
+ 	info.TemplateId = "FHD"
+-	log.Println(info.ProxyContent(true, "", ""))
++	log.Println(info.ProxyContent(true, "", "", ""))
+ }
+ 
+ func TestUpdateContent(t *testing.T) {
+diff --git a/internal/service/m3u8/m3u8.go b/internal/service/m3u8/m3u8.go
+index a64aa1f..14ac948 100644
+--- a/internal/service/m3u8/m3u8.go
++++ b/internal/service/m3u8/m3u8.go
+@@ -19,12 +19,15 @@ const (
+ 	PreChanSize = 1000
+ )
+ 
++var playlistReady = make(chan struct{})
++
+ func init() {
+ 	go loopMaintainPlaylist()
++	<-playlistReady
+ }
+ 
+ // GetPlaylist 获取 m3u 播放列表, 返回 m3u 文本
+-var GetPlaylist func(openlistPath, templateId string, proxy, main bool, routePrefix, clientApiKey string) (string, bool)
++var GetPlaylist func(openlistPath, templateId string, proxy, main bool, routePrefix, clientApiKey, itemID string) (string, bool)
+ 
+ // GetTsLink 获取 m3u 播放列表中的某个 ts 链接
+ var GetTsLink func(openlistPath, templateId string, idx int) (string, bool)
+@@ -142,13 +145,13 @@ func loopMaintainPlaylist() {
+ 		return nil
+ 	}
+ 
+-	GetPlaylist = func(openlistPath, templateId string, proxy, main bool, routePrefix, clientApiKey string) (string, bool) {
++	GetPlaylist = func(openlistPath, templateId string, proxy, main bool, routePrefix, clientApiKey, itemID string) (string, bool) {
+ 		info := queryInfo(openlistPath, templateId)
+ 		if info == nil {
+ 			return "", false
+ 		}
+ 		if proxy {
+-			return info.ProxyContent(main, routePrefix, clientApiKey), true
++			return info.ProxyContent(main, routePrefix, clientApiKey, itemID), true
+ 		}
+ 		return info.Content(), true
+ 	}
+@@ -175,6 +178,9 @@ func loopMaintainPlaylist() {
+ 		return "", false
+ 	}
+ 
++	// Publish the callbacks before callers can use or replace them.
++	close(playlistReady)
++
+ 	// removeInfo 删除内存中的 info 信息
+ 	removeInfo := func(key string) {
+ 		info, ok := infoMap[key]
+diff --git a/internal/service/m3u8/m3u8_test.go b/internal/service/m3u8/m3u8_test.go
+index 4288a8b..90dcbc0 100644
+--- a/internal/service/m3u8/m3u8_test.go
++++ b/internal/service/m3u8/m3u8_test.go
+@@ -19,7 +19,7 @@ func TestPlaylistCache(t *testing.T) {
+ 	m3u8.PushPlaylistAsync(info)
+ 
+ 	// 获取 playlist
+-	m3uContent, ok := m3u8.GetPlaylist(info.OpenlistPath, info.TemplateId, true, true, "", "")
++	m3uContent, ok := m3u8.GetPlaylist(info.OpenlistPath, info.TemplateId, true, true, "", "", "")
+ 	if !ok {
+ 		log.Fatal("获取 m3u 失败")
+ 	}
+diff --git a/internal/service/m3u8/proxy.go b/internal/service/m3u8/proxy.go
+index a1998ee..7b52f7f 100644
+--- a/internal/service/m3u8/proxy.go
++++ b/internal/service/m3u8/proxy.go
+@@ -49,8 +49,8 @@ func ProxyPlaylist(c *gin.Context) {
+ 		c.String(http.StatusOK, content)
+ 	}
+ 
+-	routePrefix := https.ClientRequestHost(c.Request) + "/videos"
+-	m3uContent, ok := GetPlaylist(params.OpenlistPath, params.TemplateId, true, true, routePrefix, params.ApiKey)
++	routePrefix := "/videos"
++	m3uContent, ok := GetPlaylist(params.OpenlistPath, params.TemplateId, true, true, routePrefix, params.ApiKey, c.Query("item_id"))
+ 	if ok {
+ 		okContent(m3uContent)
+ 		return
+@@ -60,7 +60,7 @@ func ProxyPlaylist(c *gin.Context) {
+ 	PushPlaylistAsync(Info{OpenlistPath: params.OpenlistPath, TemplateId: params.TemplateId})
+ 
+ 	// 重新获取一次
+-	m3uContent, ok = GetPlaylist(params.OpenlistPath, params.TemplateId, true, true, routePrefix, params.ApiKey)
++	m3uContent, ok = GetPlaylist(params.OpenlistPath, params.TemplateId, true, true, routePrefix, params.ApiKey, c.Query("item_id"))
+ 	if ok {
+ 		okContent(m3uContent)
+ 		return
+diff --git a/internal/service/m3u8/strict_direct_test.go b/internal/service/m3u8/strict_direct_test.go
+new file mode 100644
+index 0000000..e19fa29
+--- /dev/null
++++ b/internal/service/m3u8/strict_direct_test.go
+@@ -0,0 +1,80 @@
++package m3u8
++
++import (
++	"github.com/gin-gonic/gin"
++	"net/http/httptest"
++	"net/url"
++	"strings"
++	"testing"
++)
++
++func TestStrictPlaylistItemBinding(t *testing.T) {
++	info, err := NewByContent("https://cloud.example/", strings.NewReader("#EXTM3U\n#EXTINF:6,\n0.ts\n#EXTINF:6,\n1.ts\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	info.OpenlistPath = "/ali/Movie.mp4"
++	info.TemplateId = "FHD"
++	content := info.ProxyContent(true, "https://movie.example/videos", "session", "42")
++	count := 0
++	for _, line := range strings.Split(content, "\n") {
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		u, err := url.Parse(line)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if u.Query().Get("item_id") != "42" || u.Query().Get("api_key") != "session" || u.Path != "/videos/proxy_ts" {
++			t.Fatalf("segment lost item binding: %s", line)
++		}
++		count++
++	}
++	if count != 2 {
++		t.Fatalf("segment count %d", count)
++	}
++}
++
++func TestStrictPlaylistSegmentsSameOrigin(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	original := GetPlaylist
++	t.Cleanup(func() { GetPlaylist = original })
++	info, err := NewByContent("https://cloud.example/", strings.NewReader("#EXTM3U\n#EXTINF:6,\n0.ts\n"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	GetPlaylist = func(cloudPath, template string, proxy, main bool, prefix, token, itemID string) (string, bool) {
++		if prefix != "/videos" {
++			t.Errorf("playlist embeds relay origin: %s", prefix)
++		}
++		return info.ProxyContent(main, prefix, token, itemID), true
++	}
++	w := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(w)
++	c.Request = httptest.NewRequest("GET", "http://relay:8095/videos/proxy_playlist?openlist_path=/ali/Movie.mp4&template_id=FHD&api_key=session&item_id=42", nil)
++	c.Request.Header.Set("X-Forwarded-Proto", "http")
++	c.Request.Header.Set("X-Forwarded-Host", "attacker.example")
++	ProxyPlaylist(c)
++	publicOrigin, _ := url.Parse("https://movie.example")
++	if w.Code != 200 {
++		t.Fatalf("playlist status %d", w.Code)
++	}
++	count := 0
++	for _, line := range strings.Split(w.Body.String(), "\n") {
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		u, err := url.Parse(line)
++		if err != nil {
++			t.Fatal(err)
++		}
++		resolved := publicOrigin.ResolveReference(u)
++		if u.IsAbs() || u.Host != "" || resolved.Scheme != "https" || resolved.Host != "movie.example" {
++			t.Fatalf("unsafe segment URL: %s", line)
++		}
++		count++
++	}
++	if count != 1 {
++		t.Fatalf("segment count %d", count)
++	}
++}
+diff --git a/internal/web/route.go b/internal/web/route.go
+index f29be8b..f05cd31 100644
+--- a/internal/web/route.go
++++ b/internal/web/route.go
+@@ -19,6 +19,11 @@ var rules [][2]any
+ func initRulePatterns() {
+ 	logs.Info("正在初始化路由规则...")
+ 	rules = compileRules([][2]any{
++		// Web module names and query strings must never dispatch as media APIs.
++		{constant.Reg_VideoModWebDefined, emby.ChangeBaseVideoModuleCorsDefined},
++		{constant.Reg_IndexHtml, emby.ProxyIndexHtml},
++		{constant.Reg_WebAssets, emby.ProxyOrigin},
++
+ 		// websocket
+ 		{constant.Reg_Socket, emby.ProxySocket()},
+ 
+@@ -69,11 +74,6 @@ func initRulePatterns() {
+ 		// 处理图片请求
+ 		{constant.Reg_Images, emby.HandleImages},
+ 
+-		// web cors 处理
+-		{constant.Reg_VideoModWebDefined, emby.ChangeBaseVideoModuleCorsDefined},
+-
+-		// 代理首页, 注入自定义脚本
+-		{constant.Reg_IndexHtml, emby.ProxyIndexHtml},
+ 		// 响应自定义脚本
+ 		{constant.Route_CustomJs, emby.ProxyCustomJs},
+ 		// 响应自定义样式
+diff --git a/internal/web/web_assets_test.go b/internal/web/web_assets_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/web/web_assets_test.go
+@@ -0,0 +1,52 @@
++package web
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
++	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/emby"
++	"github.com/gin-gonic/gin"
++)
++
++func TestStrictWebAssets(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	original := config.C
++	t.Cleanup(func() { config.C = original })
++	mime, calls := "application/javascript", 0
++	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls++
++		w.Header().Set("Content-Type", mime)
++		_, _ = w.Write([]byte("asset-body"))
++	}))
++	defer origin.Close()
++	config.C = &config.Config{Emby: &config.Emby{Host: origin.URL}, Ge2o: &config.Ge2o{Web: &config.Web{Disable: true}}}
++	initRulePatterns()
++	router := gin.New()
++	router.Use(emby.ApiKeyChecker())
++	router.Any("/*path", globalDftHandler)
++	request := func(path string) *httptest.ResponseRecorder {
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
++		return w
++	}
++	for _, path := range []string{"/web/videos/videos.js?v=4.10.2.0", "/web/modules/audio/player.js", "/web/modules/websocket.js", "/emby/web/videos/videos.js", "/web/videos/proxy_ts.js?fake=/videos/proxy_ts"} {
++		if w := request(path); w.Code != 200 || w.Body.String() != "asset-body" {
++			t.Fatalf("static asset blocked or dispatched as media: %s: %d", path, w.Code)
++		}
++	}
++	before := calls
++	for _, path := range []string{"/Videos/42/stream", "/Audio/42/stream", "/web/../Videos/42/stream", "/web?fake=/videos/proxy_ts"} {
++		if w := request(path); w.Code != 401 {
++			t.Fatalf("unauthenticated media accepted: %s: %d", path, w.Code)
++		}
++	}
++	if calls != before {
++		t.Fatal("unauthenticated media reached origin")
++	}
++	mime = "video/mp4"
++	if w := request("/web/videos/stream.js"); w.Code != 403 || w.Body.Len() != 0 {
++		t.Fatal("static namespace bypassed the media response guard")
++	}
++}
