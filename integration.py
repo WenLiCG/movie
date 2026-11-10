@@ -99,8 +99,8 @@ def emby_defaults(client):
     """Apply the cloud-library preset without replacing existing item metadata."""
     libraries = client.json('GET', '/Library/VirtualFolders/Query')['Items']
     plans = []
-    defaults = dict(PreferredMetadataLanguage='zh', MetadataCountryCode='CN',
-                    EnableRealtimeMonitor=True, SaveLocalMetadata=False, MetadataSavers=[],
+    optional_defaults = dict(PreferredMetadataLanguage='zh', MetadataCountryCode='CN')
+    defaults = dict(EnableRealtimeMonitor=True, SaveLocalMetadata=False, MetadataSavers=[],
                     SaveLocalThumbnailSets=False, DownloadImagesInAdvance=True,
                     EnableChapterImageExtraction=False, ExtractChapterImagesDuringLibraryScan=False,
                     EnableMarkerDetection=False, EnableMarkerDetectionDuringLibraryScan=False)
@@ -120,6 +120,7 @@ def emby_defaults(client):
         if not defaults.keys() <= options.keys():
             raise ValueError('Emby 媒体库字段与核查版本不符，停止应用推荐设置。')
         options.update(copy.deepcopy(defaults))
+        options.update({key: value for key, value in optional_defaults.items() if key in options})
         if not options.get('SubtitleDownloadLanguages'):
             if not subtitle_defaults.keys() <= options.keys():
                 raise ValueError('Emby 字幕字段与核查版本不符，停止应用推荐设置。')
@@ -150,6 +151,7 @@ def emby_defaults(client):
     for _, _, _, path, options in plans:
         library = next(lib for lib in libraries if path in [p.rstrip('/') for p in lib['Locations']])
         expected = {key: options[key] for key in (*defaults, *subtitle_defaults, 'SubtitleFetcherOrder', 'TypeOptions')}
+        expected.update({key: options[key] for key in optional_defaults if key in options})
         if any(library['LibraryOptions'].get(key) != value for key, value in expected.items()):
             raise ValueError('Emby 尚未确认推荐设置，请重新应用。')
         client.request('POST', '/Items/' + library['ItemId'] + '/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=FullRefresh&ReplaceAllMetadata=false&ReplaceAllImages=false')
