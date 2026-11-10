@@ -1,0 +1,214 @@
+{
+  "_meta": {
+    "emby_version": "4.10.2.0",
+    "image": "emby/embyserver@sha256:7082c63b10a2fcb3805a7eaebba407d5723bc57c085c9f0b29b7d0a702765cc1",
+    "request": "GET /Libraries/AvailableOptions?LibraryContentType=movies&IsNewLibrary=false (Accept: application/json, X-Emby-Token admin, same as integration.py:117)",
+    "captured": "2026-11-10 ~15:49 Asia/Shanghai, Debian A movie-emby-1 (host loopback port 18002)",
+    "redactions": []
+  },
+  "response": {
+    "MetadataSavers": [
+      {
+        "Name": "Nfo",
+        "DefaultEnabled": false,
+        "Features": []
+      }
+    ],
+    "MetadataReaders": [
+      {
+        "Name": "Nfo",
+        "DefaultEnabled": true,
+        "Features": [
+          "Collections"
+        ]
+      }
+    ],
+    "SubtitleFetchers": [
+      {
+        "Name": "Open Subtitles",
+        "DefaultEnabled": true,
+        "Features": [
+          "RequiredSetup"
+        ]
+      }
+    ],
+    "LyricsFetchers": [],
+    "TypeOptions": [
+      {
+        "Type": "Movie",
+        "MetadataFetchers": [
+          {
+            "Name": "TheMovieDb",
+            "DefaultEnabled": true,
+            "Features": [
+              "Adult",
+              "Collections"
+            ]
+          },
+          {
+            "Name": "TheTVDB",
+            "DefaultEnabled": true,
+            "Features": []
+          },
+          {
+            "Name": "The Open Movie Database",
+            "DefaultEnabled": false,
+            "Features": []
+          }
+        ],
+        "ImageFetchers": [
+          {
+            "Name": "TheTVDB",
+            "DefaultEnabled": true,
+            "Features": []
+          },
+          {
+            "Name": "TheMovieDb",
+            "DefaultEnabled": true,
+            "Features": []
+          },
+          {
+            "Name": "FanArt",
+            "DefaultEnabled": true,
+            "Features": []
+          },
+          {
+            "Name": "The Open Movie Database",
+            "DefaultEnabled": false,
+            "Features": []
+          },
+          {
+            "Name": "Image Capture",
+            "DefaultEnabled": true,
+            "Features": []
+          }
+        ],
+        "SupportedImageTypes": [
+          "Primary",
+          "Banner",
+          "Backdrop",
+          "Logo",
+          "Art",
+          "Thumb",
+          "Disc"
+        ],
+        "DefaultImageOptions": [
+          {
+            "Type": "Backdrop",
+            "Limit": 1,
+            "MinWidth": 1280
+          },
+          {
+            "Type": "Art",
+            "Limit": 0,
+            "MinWidth": 0
+          },
+          {
+            "Type": "Disc",
+            "Limit": 0,
+            "MinWidth": 0
+          },
+          {
+            "Type": "Primary",
+            "Limit": 1,
+            "MinWidth": 0
+          },
+          {
+            "Type": "Banner",
+            "Limit": 0,
+            "MinWidth": 0
+          },
+          {
+            "Type": "Thumb",
+            "Limit": 1,
+            "MinWidth": 0
+          },
+          {
+            "Type": "Logo",
+            "Limit": 1,
+            "MinWidth": 0
+          }
+        ]
+      }
+    ],
+    "DefaultLibraryOptions": {
+      "EnableArchiveMediaFiles": false,
+      "EnablePhotos": true,
+      "EnableRealtimeMonitor": true,
+      "EnableMarkerDetection": false,
+      "EnableMarkerDetectionDuringLibraryScan": false,
+      "IntroDetectionFingerprintLength": 10,
+      "EnableChapterImageExtraction": false,
+      "ExtractChapterImagesDuringLibraryScan": false,
+      "DownloadImagesInAdvance": false,
+      "CacheImages": false,
+      "ExcludeFromSearch": false,
+      "EnablePlexIgnore": false,
+      "PathInfos": [],
+      "IgnoreHiddenFiles": false,
+      "IgnoreFileExtensions": [],
+      "SaveLocalMetadata": false,
+      "SaveMetadataHidden": false,
+      "SaveLocalThumbnailSets": false,
+      "ImportPlaylists": true,
+      "EnableAutomaticSeriesGrouping": true,
+      "ShareEmbeddedMusicAlbumImages": true,
+      "EnableEmbeddedTitles": false,
+      "EnableAudioResume": false,
+      "AutoGenerateChapters": true,
+      "MergeTopLevelFolders": false,
+      "AutoGenerateChapterIntervalMinutes": 5,
+      "AutomaticRefreshIntervalDays": 0,
+      "PlaceholderMetadataRefreshIntervalDays": 0,
+      "ContentType": "movies",
+      "MetadataSavers": [],
+      "DisabledLocalMetadataReaders": [],
+      "DisabledLyricsFetchers": [],
+      "SaveLyricsWithMedia": true,
+      "LyricsDownloadMaxAgeDays": 180,
+      "LyricsFetcherOrder": [],
+      "LyricsDownloadLanguages": [],
+      "DisabledSubtitleFetchers": [],
+      "SubtitleFetcherOrder": [],
+      "SkipSubtitlesIfEmbeddedSubtitlesPresent": false,
+      "SkipSubtitlesIfAudioTrackMatches": false,
+      "SubtitleDownloadLanguages": [],
+      "SubtitleDownloadMaxAgeDays": 180,
+      "RequirePerfectSubtitleMatch": true,
+      "SaveSubtitlesWithMedia": true,
+      "ForcedSubtitlesOnly": false,
+      "HearingImpairedSubtitlesOnly": false,
+      "TypeOptions": [
+        {
+          "Type": "Movie",
+          "MetadataFetchers": [
+            "TheMovieDb",
+            "TheTVDB"
+          ],
+          "MetadataFetcherOrder": [],
+          "ImageFetchers": [
+            "TheTVDB",
+            "TheMovieDb",
+            "FanArt",
+            "Image Capture"
+          ],
+          "ImageFetcherOrder": [],
+          "ImageOptions": []
+        }
+      ],
+      "CollapseSingleItemFolders": false,
+      "ForceCollapseSingleItemFolders": false,
+      "EnableAdultMetadata": false,
+      "ImportCollections": false,
+      "EnableMultiVersionByFiles": true,
+      "EnableMultiVersionByMetadata": true,
+      "EnableMultiPartItems": true,
+      "MinCollectionItems": 2,
+      "MinResumePct": 2,
+      "MaxResumePct": 90,
+      "MinResumeDurationSeconds": 120,
+      "ThumbnailImagesIntervalSeconds": -1,
+      "SampleIgnoreSize": 314572800
+    }
+  }
+}

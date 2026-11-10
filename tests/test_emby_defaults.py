@@ -1,9 +1,11 @@
 """Run: python -m unittest discover -s tests -p test_emby_defaults.py"""
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 from integration import emby_defaults
 from portal.server import App
 
@@ -45,7 +47,113 @@ class Emby:
             next(lib for lib in self.libraries if lib['ItemId'] == body['Id'])['LibraryOptions'] = copy.deepcopy(body['LibraryOptions'])
 
 
+class Emby4102(Emby):
+    def __init__(self):
+        super().__init__()
+        self.schemas = {
+            kind: json.loads((Path(__file__).parent / 'fixtures' /
+                              f'emby-4.10.2-default-options-{kind}.json').read_text())['response']
+            for kind in ('movies', 'tvshows')
+        }
+
+    def json(self, method, path, body=None):
+        if urlsplit(path).path == '/Libraries/AvailableOptions':
+            self.calls.append((method, path, body))
+            kind = parse_qs(urlsplit(path).query)['LibraryContentType'][0]
+            return copy.deepcopy(self.schemas[kind])
+        return super().json(method, path, body)
+
+
 class DefaultsTests(unittest.TestCase):
+    def test_4102_creates_libraries_without_optional_metadata_fields(self):
+        api = Emby4102()
+        emby_defaults(api)
+        self.assertEqual([lib['Name'] for lib in api.libraries], ['电影', '电视剧'])
+        self.assertEqual([lib['CollectionType'] for lib in api.libraries], ['movies', 'tvshows'])
+        submissions = [body['LibraryOptions'] for method, path, body in api.calls
+                       if method == 'POST' and path == '/Library/VirtualFolders']
+        self.assertEqual(len(submissions), 2)
+        recommended = {
+            'EnableRealtimeMonitor': True,
+            'SaveLocalMetadata': False,
+            'MetadataSavers': [],
+            'SaveLocalThumbnailSets': False,
+            'DownloadImagesInAdvance': True,
+            'EnableChapterImageExtraction': False,
+            'ExtractChapterImagesDuringLibraryScan': False,
+            'EnableMarkerDetection': False,
+            'EnableMarkerDetectionDuringLibraryScan': False,
+        }
+        for kind, options in zip(('movies', 'tvshows'), submissions):
+            with self.subTest(kind=kind):
+                self.assertNotIn('PreferredMetadataLanguage', options)
+                self.assertNotIn('MetadataCountryCode', options)
+                self.assertEqual({key: options[key] for key in recommended}, recommended)
+                self.assertEqual(options.keys(), api.schemas[kind]['DefaultLibraryOptions'].keys())
+                for item in options['TypeOptions']:
+                    self.assertEqual(item['MetadataFetchers'][0], 'TheMovieDb')
+                    self.assertEqual(item['ImageFetchers'][0], 'TheMovieDb')
+        self.assertEqual(sum(path.startswith('/Items/') for _, path, _ in api.calls), 2)
+
+    def test_optional_metadata_fields_are_independent_after_merging(self):
+        for present, initial, expected, absent in (
+            ('PreferredMetadataLanguage', 'en', 'zh', 'MetadataCountryCode'),
+            ('MetadataCountryCode', 'US', 'CN', 'PreferredMetadataLanguage'),
+        ):
+            for source in ('default', 'existing'):
+                with self.subTest(present=present, source=source):
+                    api = Emby4102()
+                    if source == 'default':
+                        for schema in api.schemas.values():
+                            schema['DefaultLibraryOptions'][present] = initial
+                    else:
+                        api.libraries = [
+                            {'Name': '电影', 'CollectionType': 'movies',
+                             'Locations': ['/library/aliyun/Movies'], 'ItemId': '1',
+                             'LibraryOptions': {present: initial, 'CustomOption': 'manual'}}
+                        ]
+                    emby_defaults(api)
+                    self.assertEqual(api.libraries[0]['LibraryOptions'][present], expected)
+                    for library in api.libraries:
+                        self.assertNotIn(absent, library['LibraryOptions'])
+                    if source == 'existing':
+                        self.assertEqual(api.libraries[0]['LibraryOptions']['CustomOption'], 'manual')
+                        self.assertNotIn(present, api.libraries[1]['LibraryOptions'])
+                    else:
+                        self.assertEqual(api.libraries[1]['LibraryOptions'][present], expected)
+
+    def test_4102_missing_required_fields_fail_before_any_post(self):
+        for kind in ('movies', 'tvshows'):
+            for key in (
+                'EnableRealtimeMonitor', 'SaveLocalMetadata', 'MetadataSavers',
+                'SaveLocalThumbnailSets', 'DownloadImagesInAdvance',
+                'EnableChapterImageExtraction', 'ExtractChapterImagesDuringLibraryScan',
+                'EnableMarkerDetection', 'EnableMarkerDetectionDuringLibraryScan',
+            ):
+                with self.subTest(kind=kind, key=key):
+                    api = Emby4102()
+                    del api.schemas[kind]['DefaultLibraryOptions'][key]
+                    with self.assertRaisesRegex(ValueError, 'Emby 媒体库字段与核查版本不符，停止应用推荐设置。'):
+                        emby_defaults(api)
+                    self.assertFalse(any(method == 'POST' for method, _, _ in api.calls))
+
+    def test_4102_server_must_confirm_required_preferences(self):
+        api = Emby4102()
+        original = api.json
+
+        def altered_readback(method, path, body=None):
+            result = original(method, path, body)
+            if path == '/Library/VirtualFolders/Query':
+                for library in result['Items']:
+                    library['LibraryOptions']['DownloadImagesInAdvance'] = False
+            return result
+
+        api.json = altered_readback
+        with self.assertRaisesRegex(ValueError, 'Emby 尚未确认推荐设置，请重新应用。'):
+            emby_defaults(api)
+        self.assertEqual(sum(path == '/Library/VirtualFolders' for _, path, _ in api.calls), 2)
+        self.assertFalse(any(path.startswith('/Items/') for _, path, _ in api.calls))
+
     def test_first_login_initializes_once_across_restart_and_manual_restore_still_works(self):
         with tempfile.TemporaryDirectory() as temp, patch('portal.server.emby_defaults') as apply:
             native = Mock()
