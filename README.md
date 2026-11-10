@@ -54,7 +54,7 @@ bash install.sh status
 - 独立剧集／综艺：定制页“下载此资源”只下载所选资源，不操作追剧；分类 `cinema-tv`，保存到 `/media/downloads/tv-manual`，校验后归档 TV。
 - 删除追剧：停止监控并从列表移除，保留文件及正在进行的下载。
 - 自动追剧：在 Sonarr 添加、监控并搜索，剧库 `/media/library/tv`；qB 分类 `sonarr-tv`，保留 `/media/downloads/tv` 做种副本。
-- 上传程序只处理上述已完成视频；第一版不处理外置字幕、NFO、海报或蓝光目录，不增加电影自动改名/升级服务。
+- 上传程序处理上述已完成视频，并把同目录中与视频匹配的外挂字幕（.srt、.ass、.ssa）随该视频归档；字幕尚未发布时不发布视频。不处理 NFO、海报或蓝光目录，不增加电影自动改名/升级服务。
 - 上传先隔离到 `/aliyun/.cinema-upload`，明确成功并校验后才移到 `/aliyun/Movies` 或 `/aliyun/TV`。默认 7 天后只清理已归档且复核通过的本地源及做种任务；云端成品和失败暂存不自动删除。
 - **Movies/TV 必须仅由这一个上传程序写入。** OpenList 阿里移动接口缺少原子同名保护；程序会检查已有冲突，但不能与人工、CloudDrive 或其他同步器并发整理同一目录。
 - 断线但没有成功凭证的暂存文件不会发布；下一次会新建尝试目录，旧暂存可能占空间，核查后人工清理。发布请求结果不明时先查任务，不能靠清空 SQLite 强制重来。
@@ -88,4 +88,4 @@ node tests/watch-handoff.test.cjs
 node tests/task-controls.test.cjs
 ```
 
-验证涵盖目录保护、私有文件权限、原生接口接线逻辑、HTTP 流式上传与失败恢复、单文件安全解包、Bash 语法、Compose 配置解析、中文刮削配置和搜索导航。120 项回归在 Debian 12 执行平台适用项通过；Windows 通过刮削、登录、安装包和任务界面相关检查。镜像构建、网关配置及浏览器交互通过。真实生成资源验证了上传取消、重启恢复、字幕、归档和本地保留期清理。另一台全新 VPS、长时间播放及磁盘压力测试尚未执行。失败恢复和播放边界见 [docs/SETUP.md](docs/SETUP.md)，版本及许可见 [SOURCES.md](SOURCES.md)。
+验证涵盖目录保护、私有文件权限、原生接口接线逻辑、HTTP 流式上传与失败恢复、单文件安全解包、Bash 语法、Compose 配置解析、中文刮削配置和搜索导航。Python 回归检查是 `python3 -m unittest discover -s tests -p 'test_*.py'`，项数以该命令当次打印的结果为准。Windows 通过刮削、登录、安装包和任务界面相关检查。镜像构建、网关配置及浏览器交互通过。真实生成资源验证了上传取消、重启恢复、字幕、归档和本地保留期清理。另一台全新 VPS、长时间播放及磁盘压力测试尚未执行。失败恢复和播放边界见 [docs/SETUP.md](docs/SETUP.md)，版本及许可见 [SOURCES.md](SOURCES.md)。
