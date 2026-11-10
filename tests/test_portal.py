@@ -72,26 +72,28 @@ class PortalTests(unittest.TestCase):
             self.assertFalse(app.status()['configured'])
 
     def test_episode_download_targets_only_selected_ids_and_never_changes_monitoring(self):
-        app = App()
-        native = Mock()
-        native.json.side_effect = lambda method,path,body=None: ({'tvdbId':42} if path=='/api/v3/series/9' else {'records':[]} if '/queue?' in path else [{'id':i,'seriesId':9,'seasonNumber':1,'episodeNumber':i,'hasFile':i==3} for i in (1,2,3)] if method=='GET' else {})
-        app.client = lambda name: native
-        app.require_version = Mock(return_value={})
-        app.download_episodes({'series_id':9,'episode_ids':[2]})
-        native.json.assert_called_with('POST','/api/v3/command',{'name':'EpisodeSearch','episodeIds':[2]})
-        self.assertFalse(any(call.args[0] == 'PUT' for call in native.json.call_args_list))
-        for ids in ([1,1], [3], [999], [], ['2']):
-            with self.assertRaises(ValueError): app.download_episodes({'series_id':9,'episode_ids':ids})
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            native = Mock()
+            native.json.side_effect = lambda method,path,body=None: ({'tvdbId':42} if path=='/api/v3/series/9' else {'records':[]} if '/queue?' in path else [{'id':i,'seriesId':9,'seasonNumber':1,'episodeNumber':i,'hasFile':i==3} for i in (1,2,3)] if method=='GET' else {})
+            app.client = lambda name: native
+            app.require_version = Mock(return_value={})
+            app.download_episodes({'series_id':9,'episode_ids':[2]})
+            native.json.assert_called_with('POST','/api/v3/command',{'name':'EpisodeSearch','episodeIds':[2]})
+            self.assertFalse(any(call.args[0] == 'PUT' for call in native.json.call_args_list))
+            for ids in ([1,1], [3], [999], [], ['2']):
+                with self.assertRaises(ValueError): app.download_episodes({'series_id':9,'episode_ids':ids})
 
     def test_prepare_existing_series_keeps_monitoring_and_quality(self):
-        app = App()
-        native = Mock()
-        native.json.side_effect = lambda method, path, body=None: ([{'id':9,'tvdbId':42,'monitored':True,'qualityProfileId':77}] if path == '/api/v3/series' else ([] if path == '/api/v3/tag' else ({'records':[]} if '/queue?' in path else {'tvdbId':42} if path=='/api/v3/series/9' else [{'id':2,'seasonNumber':1,'episodeNumber':2}])))
-        app.client = lambda name: native
-        app.require_version = Mock(return_value={})
-        result = app.episodes({'series':{'42':{'tvdbId':42}}}, {'id':'42'})
-        self.assertEqual(result['series_id'],9)
-        self.assertTrue(all(call.args[0] == 'GET' for call in native.json.call_args_list))
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            native = Mock()
+            native.json.side_effect = lambda method, path, body=None: ([{'id':9,'tvdbId':42,'monitored':True,'qualityProfileId':77}] if path == '/api/v3/series' else ([] if path == '/api/v3/tag' else ({'records':[]} if '/queue?' in path else {'tvdbId':42} if path=='/api/v3/series/9' else [{'id':2,'seasonNumber':1,'episodeNumber':2}])))
+            app.client = lambda name: native
+            app.require_version = Mock(return_value={})
+            result = app.episodes({'series':{'42':{'tvdbId':42}}}, {'id':'42'})
+            self.assertEqual(result['series_id'],9)
+            self.assertTrue(all(call.args[0] == 'GET' for call in native.json.call_args_list))
     def test_title_tags_and_host_cpu_deltas(self):
         self.assertEqual(tags('Title.2160p.HEVC'), ('4K', 'H.265'))
         self.assertEqual(tags('Title 1080p H264'), ('1080p', 'H.264'))
@@ -218,23 +220,24 @@ class PortalTests(unittest.TestCase):
             connect.assert_called_once()
 
     def test_new_series_is_unmonitored_until_a_version_is_saved(self):
-        app = App()
-        native = Mock()
-        def call(method,path,body=None):
-            if path == '/api/v3/series': return [] if method == 'GET' else {'id':10}
-            if path == '/api/v3/qualityprofile/schema': return {'items':[{'quality':{'id':1,'name':'WEBDL-1080p'}}]}
-            if path == '/api/v3/qualityprofile': return [] if method == 'GET' else {'id':5}
-            return {}
-        native.json.side_effect=call
-        app.client=lambda name:native
-        session={'series':{'42':{'tvdbId':42,'title':'Example','seasons':[{'seasonNumber':1}]}}}
-        with self.assertRaises(ValueError):app.follow(session,{'id':'42','mode':'all'})
-        app.follow(session,{'id':'42','mode':'manual'})
-        added=next(c.args[2] for c in native.json.call_args_list if c.args[:2]==('POST','/api/v3/series'))
-        self.assertFalse(added['monitored'])
-        self.assertFalse(added['addOptions']['searchForMissingEpisodes'])
-        self.assertEqual(added['addOptions']['monitor'],'none')
-        self.assertFalse(any(c.args[:2]==('POST','/api/v3/command') for c in native.json.call_args_list))
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            native = Mock()
+            def call(method,path,body=None):
+                if path == '/api/v3/series': return [] if method == 'GET' else {'id':10}
+                if path == '/api/v3/qualityprofile/schema': return {'items':[{'quality':{'id':1,'name':'WEBDL-1080p'}}]}
+                if path == '/api/v3/qualityprofile': return [] if method == 'GET' else {'id':5}
+                return {}
+            native.json.side_effect=call
+            app.client=lambda name:native
+            session={'series':{'42':{'tvdbId':42,'title':'Example','seasons':[{'seasonNumber':1}]}}}
+            with self.assertRaises(ValueError):app.follow(session,{'id':'42','mode':'all'})
+            app.follow(session,{'id':'42','mode':'manual'})
+            added=next(c.args[2] for c in native.json.call_args_list if c.args[:2]==('POST','/api/v3/series'))
+            self.assertFalse(added['monitored'])
+            self.assertFalse(added['addOptions']['searchForMissingEpisodes'])
+            self.assertEqual(added['addOptions']['monitor'],'none')
+            self.assertFalse(any(c.args[:2]==('POST','/api/v3/command') for c in native.json.call_args_list))
 
 
 if __name__ == '__main__':
