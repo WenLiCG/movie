@@ -181,7 +181,7 @@ sudo bash install.sh public
 | 探活 | `GET /System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
 | 剧集墙 | `GET /Shows/{id}`、`/Episodes`、`/Seasons`、`/NextUp` | 电视剧电影墙读取 |
 | 网页静态资源 | `GET /web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |
-| 播放直链 | `GET`/`HEAD /openlist/d/…?sign=…` | 将 relay 发出的 307 Location 改写为相对路径 `/openlist/d/…`（随请求 Host，不写死管理域名）；签名由 OpenList 校验，失败时网关把上游 401 转为 403 |
+| 播放直链 | `GET`/`HEAD /openlist/d/…?sign=…` | 将 relay 发出的 307 Location 改写为相对路径 `/openlist/d/…`（随请求 Host，不写死管理域名）；3xx 响应清空正文并校正 Content-Length，避免 HTML 里残留 movie2 或其它绝对地址；签名由 OpenList 校验，失败时网关把上游 401 转为 403 |
 
 **明确不放行、记入 MV-11 待 App 实测后再逐条补进白名单（不改回黑名单）的项：**
 

@@ -1342,7 +1342,8 @@ class _RedirectStub(BaseHTTPRequestHandler):
             return
         if '/stream' in path.lower() or path.lower().startswith('/videos/'):
             loc = 'https://movie2.g60.net/openlist/p/aliyun/Movies/X.mkv?sign=good'
-            body = b'redirect'
+            # Same shape as Go net/http and the live relay 307 body (QA D6).
+            body = ('<a href="%s">Temporary Redirect</a>.' % loc).encode('utf-8')
             self.send_response(307)
             self.send_header('Location', loc)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -1441,6 +1442,9 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
         self.assertEqual(len(locs), 1, locs)
         self.assertIn('movie2.g60.net', locs[0])
         self.assertIn('/openlist/p/', locs[0])
+        # D6 must not touch this site: the HTML body still carries the absolute href.
+        self.assertIn(b'https://movie2.g60.net/openlist/p/', body)
+        self.assertEqual(header_values(hdrs, 'Content-Length'), [str(len(body))])
 
     def test_d4_openlist_401_from_upstream_becomes_gateway_403(self):
         # Tampered/wrong sign reaches OpenList as 401; public site must surface 403.
@@ -1450,6 +1454,67 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
         self.assertEqual(status, 403, 'body=%r' % body[:200])
         self.assertEqual(body.strip(), b'Forbidden')
         self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
+    def _assert_3xx_clean(self, status, hdrs, body, method, expect_location=None):
+        """QA D6: 3xx headers and body have no movie2, /openlist/p/, or absolute URLs.
+
+        Content-Length must equal the actual received body length (empty for
+        HEAD after the body is cleared).
+        """
+        self.assertIn(status, range(300, 400), '%s status=%s body=%r' % (method, status, body[:200]))
+        # Every header value.
+        pairs = []
+        if hasattr(hdrs, 'items'):
+            pairs = list(hdrs.items())
+        else:
+            pairs = list(hdrs)
+        for key, value in pairs:
+            lower = '%s: %s' % (key, value)
+            self.assertNotIn('movie2', lower.lower(), '%s header leaks movie2: %s' % (method, lower))
+            self.assertNotRegex(value, r'(?i)/openlist/p/', '%s header still /openlist/p/: %s' % (method, lower))
+            self.assertNotRegex(value, r'(?i)https?://', '%s header has absolute URL: %s' % (method, lower))
+        # Body (HEAD must be empty).
+        if 'HEAD' in method:
+            self.assertEqual(body, b'', '%s must have an empty body, got %r' % (method, body[:200]))
+        self.assertNotIn(b'movie2', body.lower(), '%s body leaks movie2: %r' % (method, body[:200]))
+        self.assertNotRegex(body, rb'(?i)/openlist/p/', '%s body still /openlist/p/: %r' % (method, body[:200]))
+        self.assertNotRegex(body, rb'(?i)https?://', '%s body has absolute URL: %r' % (method, body[:200]))
+        cl = header_values(hdrs, 'Content-Length')
+        self.assertEqual(len(cl), 1, '%s Content-Length missing or repeated: %s' % (method, cl))
+        self.assertEqual(int(cl[0]), len(body),
+                         '%s Content-Length=%s != actual body length %s' % (method, cl[0], len(body)))
+        self.assertEqual(cache_control_values(hdrs), [NO_STORE], cache_control_values(hdrs))
+        if expect_location is not None:
+            locs = header_values(hdrs, 'Location')
+            self.assertEqual(len(locs), 1, locs)
+            loc = locs[0]
+            self.assertRegex(loc, expect_location)
+            self.assertFalse(loc.lower().startswith('http://') or loc.lower().startswith('https://'), loc)
+            self.assertNotIn('movie2', loc.lower())
+            self.assertNotRegex(loc, r'(?i)/openlist/p/')
+
+    def test_d6_emby_307_get_headers_and_body_have_no_movie2_or_absolute_url(self):
+        status, hdrs, body = request_https(
+            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true', method='GET')
+        self._assert_3xx_clean(
+            status, hdrs, body, 'GET',
+            expect_location=r'(?i)^/openlist/d/aliyun/Movies/X\.mkv\?sign=good$')
+
+    def test_d6_emby_307_head_headers_and_body_have_no_movie2_or_absolute_url(self):
+        status, hdrs, body = request_https(
+            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true', method='HEAD')
+        self._assert_3xx_clean(
+            status, hdrs, body, 'HEAD',
+            expect_location=r'(?i)^/openlist/d/aliyun/Movies/X\.mkv\?sign=good$')
+
+    def test_d6_emby_root_302_get_and_head_are_also_clean(self):
+        """All 3xx on the emby site, including the gateway's own root redirect."""
+        for method in ('GET', 'HEAD'):
+            status, hdrs, body = request_https(self.emby_port, '/', method=method)
+            self._assert_3xx_clean(
+                status, hdrs, body, 'root-%s' % method,
+                expect_location=r'(?i)^/web/index\.html$')
+
 
 
 

@@ -100,7 +100,11 @@
 
     @root path /
     handle @root {
-        redir * /web/index.html 302
+        # Empty body and explicit Content-Length 0 so GET and HEAD 3xx
+        # cannot carry an absolute URL (QA D6 also covers this site-local redirect).
+        header Location "/web/index.html"
+        header Content-Length 0
+        respond "" 302
     }
 
     # Signed OpenList direct links for public playback. GET/HEAD only, sign
@@ -230,9 +234,22 @@
         reverse_proxy relay:8095 {
             header_down -Cache-Control
             header_down Cache-Control "private, no-store"
-            header_down Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
-            header_down Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
-            header_down Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+            # QA D6: rewrite Location (as in D4) and drop the upstream HTML body,
+            # which still contains https://movie2…/openlist/p/…. Movie2 site is
+            # unchanged. Any leftover absolute Location is reduced to a path.
+            @emby_redir status 300 301 302 303 307 308
+            handle_response @emby_redir {
+                header Cache-Control "private, no-store"
+                header Referrer-Policy "no-referrer"
+                header Location "{http.reverse_proxy.header.Location}"
+                header Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+(/.*)$" "$1"
+                header Content-Length 0
+                header -Content-Type
+                respond "" {http.reverse_proxy.status_code}
+            }
         }
     }
 
