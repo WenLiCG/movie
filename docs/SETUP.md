@@ -62,7 +62,7 @@ Prowlarr 与 Sonarr 都启用登录认证。Prowlarr 建议选表单认证，认
 
 阿里 refresh token 只保存在 OpenList。其他组件使用 OpenList Token，不复制阿里凭据。服务端 Token 可能有较大权限，仅保存于安装目录私有配置，不放进浏览器脚本、跳转链接或公开日志。这个独立 OpenList 实例只挂载影院所需存储。
 
-在 OpenList 后台「设置 → 全局」将「链接过期时间」（`link_expiration`，单位小时，0 表示永不过期）设为 6，`sign_all` 保持开启。修改只影响之后签发的链接；此前签发的永不过期链接（`sign` 以 `:0` 结尾）仍有效，要作废需重置 OpenList 令牌。重置后须重新运行 `setup`（即 `install.sh setup`，内部使用 `configure.py --connect`），让 relay、uploader 使用新令牌。已配置过的安装不能靠 `configure.py --token` 换令牌。网关对站点处理器的响应以及 Caddy 自己生成的错误响应加 `Cache-Control: private, no-store`（80 端口自动 HTTPS 跳转除外），CDN 不得缓存本站。
+在 OpenList 后台「设置 → 全局」将「链接过期时间」（`link_expiration`，单位小时，0 表示永不过期）设为 6，`sign_all` 保持开启。修改只影响之后签发的链接；此前签发的永不过期链接（`sign` 以 `:0` 结尾）仍有效，要作废需重置 OpenList 令牌。重置后须重新运行 `setup`（即 `install.sh setup`，内部使用 `configure.py --connect`），让 relay、uploader 使用新令牌。已配置过的安装不能靠 `configure.py --token` 换令牌。网关对站点处理器的响应以及 Caddy 自己生成的错误响应加 `Cache-Control: private, no-store`（80 端口自动 HTTPS 跳转除外），CDN 不得缓存本站。这是 `MOVIE_DOMAIN` 站点的规则。`EMBY_DOMAIN` 站点默认同样使用 `private, no-store`，但对不带登录凭据、带版本号的 `/web/` 静态资源允许公共缓存，对不带凭据的条目图片允许短时私有缓存，详见第 9 节。
 
 ## 4. Emby 向导与媒体库
 
@@ -148,13 +148,49 @@ sudo bash install.sh public
 
 按提示输入 Emby 管理员用户名和密码。此步骤临时登录、读取全部用户（包括隐藏用户），拒绝存在无密码或允许免密的启用账号，然后注销检查会话；不保存本次 Emby 密码。只完成首次向导不能证明每个账号都有密码，因此需要此检查。
 
-- `https://movie.example.com`：Emby 登录、电影墙和播放，经过严格直连 relay。
+- `https://movie.example.com`（环境变量 `MOVIE_DOMAIN`）：管理入口、找片页、Prowlarr/Sonarr/qB/OpenList，以及仍走 Cloudflare Access 的 Emby 管理。电影墙也可以走这个域名（原有行为不变）。
+- `https://emby.example.com`（环境变量 `EMBY_DOMAIN`，例如 `emby.g60.net`）：只提供电影墙与播放，反代 `relay:8095`，**不经过 Cloudflare Access**。管理功能只留在 `MOVIE_DOMAIN`，继续走 Access。此域名按下面的白名单放行接口；其余 API 返回 403，管理页面路径返回 404。网关按路径拦截，管理员 token 在此域名下同样被挡住。
 - `https://movie.example.com/search/`：Prowlarr 站点管理和手动搜索，**仅管理员使用**。
 - `https://movie.example.com/sonarr/`：追剧管理。
 - `https://movie.example.com/qb/`：下载与做种管理。
 - `https://movie.example.com/openlist/`：云盘授权与存储管理。
 
-域名以安装时填写值为准。`public` 还会检查 Sonarr 登录、OpenList 初始化及游客禁用、qB 匿名 API 被拒绝。原始服务端口继续只绑定回环地址；Emby 管理也可从根路径进入。普通观看用户不应获得管理账号或 PT Cookie。
+域名以安装时填写值为准。开启公网入口前，在 `app/.env` 中同时设置 `MOVIE_DOMAIN` 和 `EMBY_DOMAIN`（例如 `MOVIE_DOMAIN=movie2.example.com` 与 `EMBY_DOMAIN=emby.example.com`）。`compose.yaml` 会把这两个变量传给 gateway 容器；未设置 `EMBY_DOMAIN` 时默认 `emby.invalid`，该站点不会收到真实流量。`public` 还会检查 Sonarr 登录、OpenList 初始化及游客禁用、qB 匿名 API 被拒绝。原始服务端口继续只绑定回环地址；Emby 管理也可从 `MOVIE_DOMAIN` 根路径进入。普通观看用户不应获得管理账号或 PT Cookie。不要把 `EMBY_DOMAIN` 配进 Cloudflare Access。开放公网 DNS 之前，先在测试机用 `curl --resolve` 验证，并由独立审查通过。
+
+### 公网 Emby 站点（`EMBY_DOMAIN`）白名单与缓存
+
+此站点只反代 relay 的播放与电影墙接口，采用**白名单**，并且**按 HTTP 方法限制**：默认只放行 GET 和 HEAD；写方法一律由网关返回 403，只有下面列出的播放必需 POST 例外。未列出的 API 一律 403。`/emby/` 与 `/mediabrowser/` 两种前缀、大小写变体都按同一套规则匹配。路径中（问号之前）的 URL 编码斜杠（`%2F`）、编码点号（`%2e`）、反斜杠（`%5c`）、字面量 `%25`（覆盖 `%252e` 这类双重或多重编码）、分号（`;`）或双斜杠（`//`）一律 403，不转给 relay；依据是 Caddy 的 path 匹配会先解码 `%2F`/`%2e` 并整理 `..`，这些写法既可能造成歧义，也不是官方客户端的正常请求。普通客户端使用字面量斜杠即可。字母本身的百分号编码（如 `U` 写成 `%55`）按解码后的路径匹配，合法白名单路径仍会放行。
+
+管理页面路径返回 404：`/discover`、`/search`、`/sonarr`、`/qb`、`/ge2o` 及其子路径，以及 `/web/dashboard*`、`/web/configurationpage*`。`/openlist` 不再整段 404：仅签名直链 `GET`/`HEAD` `/openlist/d/…`（必须带非空 `sign` 查询参数，Range 原样透传）会反代 OpenList；页面、`/openlist/api`、`/openlist/p/`、根路径和其他方法一律 403。Emby 网页后台大量使用 `#!/dashboard` 这种 hash 路由，路径规则拦不住 `/web/index.html#!/dashboard`；真正的保护靠下面的 API 白名单，以及不要把管理员账号发给普通用户。
+
+白名单如下（均含可选的 `/emby/`、`/mediabrowser/` 前缀；除标明 POST 的以外，只允许 GET/HEAD）：
+
+| 用途 | 放行的路径与方法 | 说明 |
+| --- | --- | --- |
+| 站点入口 | `GET /` | 302 到 `/web/index.html` |
+| 登录 | `POST /Users/AuthenticateByName` | 普通用户登录。不放行 `/Users/Authenticate` |
+| 当前用户 | `GET /Users/Me`、`GET /Users/{GUID}` | `{GUID}` 仅为 32 位十六进制或带连字符的 UUID，因此 `/Users`、`/Users/New`、`/Users/Public` 不会被误放。对这些路径的 POST/DELETE/PUT/PATCH 由网关 403 |
+| 电影墙读取 | `GET /Users/Me/Items`、`GET /Users/{GUID}/Items`（含 Latest、Resume 等子路径）、`GET /Users/…/Views` | 用户自己的条目与视图 |
+| 条目 | `GET /Items/{id}` | 条目详情；`/Items/Delete` 无论方法都 403 |
+| 图片 | `GET /Items/{id}/Images` 及其子路径 | 海报等；POST/DELETE 图片由网关 403 |
+| 播放信息 | `GET` 与 `POST /Items/{id}/PlaybackInfo` | PlaybackInfo |
+| 视频流 | `GET /Videos/{id}/stream`、`stream.*`、`master.m3u8`、`hls*`、`Subtitles/*` | 不含 `/Videos/{id}/Delete` 及其他子路径 |
+| 音频流 | `GET /Audio/{id}/stream*` | 播放音轨 |
+| 进度上报 | `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`、`/Sessions/Playing/Ping` | 播放进度 |
+| 公开服务信息 | `GET /System/Info/Public` | 明确要求放行；`/System/Info`（非 Public）仍为 403 |
+| 探活 | `GET /System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
+| 剧集墙 | `GET /Shows/{id}`、`/Episodes`、`/Seasons`、`/NextUp` | 电视剧电影墙读取 |
+| 网页静态资源 | `GET /web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |
+| 播放直链 | `GET`/`HEAD /openlist/d/…?sign=…` | 将 relay 发出的 307 Location 改写为相对路径 `/openlist/d/…`（随请求 Host，不写死管理域名）；3xx 响应清空正文并校正 Content-Length，避免 HTML 里残留 movie2 或其它绝对地址；签名由 OpenList 校验，失败时网关把上游 401 转为 403 |
+
+**明确不放行、记入 MV-11 待 App 实测后再逐条补进白名单（不改回黑名单）的项：**
+
+- `/Users/Public`：会枚举登录页可见的用户名和头像，公网域名上属于用户枚举，故先 403。Web 与 App 仍可用 `AuthenticateByName` 输入用户名登录。若 App 启动必须靠此接口展示选人页，再在 MV-11 补入。
+- WebSocket（`/embywebsocket` 以及任何 `Upgrade: websocket`）：默认 403。是否为官方 App 所需，由 MV-11 实测确认。
+- `/Sessions`（列出全部会话）、`/Sessions/Capabilities`、`/Sessions/Logout`、`/Users/Authenticate`（非 ByName）、`/DisplayPreferences`、`/Branding`、改密接口等：当前没有「播放必需」的实测证据，先 403。挡住了再按需补。
+
+缓存：默认以及全部 4xx/5xx（网关自己的 403/404 和上游错误，含 502）为 `Cache-Control: private, no-store`，`Referrer-Policy: no-referrer`（延迟写入，覆盖上游，响应里只出现一次）。带 token、`Authorization`、`Cookie` 或查询参数 `api_key` / `X-Emby-Token` 的响应一律 `private, no-store`。仅不依赖登录状态、带 `v` 或 `version` 查询参数、并且上游返回 2xx/304 的 `/web/` 静态资源（js/css/字体/常见图片扩展名，不含 HTML）可为 `public, max-age=31536000, immutable`。不带凭据且上游 2xx/304 的条目图片可为 `private, max-age=300`；带凭据或任何错误响应仍为 `no-store`，不会 public。默认响应带 `Vary: Authorization, Cookie, X-Emby-Token`；可公共缓存的静态资源改用 `Vary: Accept-Encoding`。Cloudflare 层的缓存与规则须在开放公网之后另测，不在本机 `--resolve` 验证范围内。
+
 
 电影墙“找片 / 追剧”进入 `/discover/`，使用 Emby 管理员登录；Prowlarr 保留为站点和高级搜索管理入口，各应用分别认证。
 
