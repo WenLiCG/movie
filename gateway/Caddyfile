@@ -7,6 +7,7 @@
 {$MOVIE_DOMAIN} {
     encode zstd gzip
     header Referrer-Policy "no-referrer"
+    header >Cache-Control "private, no-store"
     redir /search /search/ 308
     redir /discover /discover/ 308
     redir /sonarr /sonarr/ 308
@@ -45,6 +46,9 @@
     respond @management "Not found" 404
     handle {
         reverse_proxy relay:8095
+    }
+    handle_errors {
+        header Cache-Control "private, no-store"
     }
 }
 

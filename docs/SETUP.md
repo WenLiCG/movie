@@ -62,6 +62,8 @@ Prowlarr 与 Sonarr 都启用登录认证。Prowlarr 建议选表单认证，认
 
 阿里 refresh token 只保存在 OpenList。其他组件使用 OpenList Token，不复制阿里凭据。服务端 Token 可能有较大权限，仅保存于安装目录私有配置，不放进浏览器脚本、跳转链接或公开日志。这个独立 OpenList 实例只挂载影院所需存储。
 
+在 OpenList 后台「设置 → 全局」将「链接过期时间」（`link_expiration`，单位小时，0 表示永不过期）设为 6，`sign_all` 保持开启。修改只影响之后签发的链接；此前签发的永不过期链接（`sign` 以 `:0` 结尾）仍有效，要作废需重置 OpenList 令牌。重置后须重新运行 `setup`（即 `install.sh setup`，内部使用 `configure.py --connect`），让 relay、uploader 使用新令牌。已配置过的安装不能靠 `configure.py --token` 换令牌。网关对站点处理器的响应以及 Caddy 自己生成的错误响应加 `Cache-Control: private, no-store`（80 端口自动 HTTPS 跳转除外），CDN 不得缓存本站。
+
 ## 4. Emby 向导与媒体库
 
 在 `http://127.0.0.1:8096` 完成管理员向导。首次用 Emby 管理员登录找片页时自动建立以下媒体库并配置中文刮削，无需额外点击或逐项勾选。成功后仅初始化一次，后续登录及重启保留手动配置；失败时设置页显示黄色提示，可点击“应用推荐刮削设置”重试：
