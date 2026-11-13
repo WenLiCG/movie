@@ -47,5 +47,8 @@
     handle {
         reverse_proxy relay:8095
     }
+    handle_errors {
+        header Cache-Control "private, no-store"
+    }
 }
 
