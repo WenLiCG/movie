@@ -452,9 +452,7 @@ PUBLIC_STATIC_PREFIX = 'public,'
 # Whitelist: one row per public-interface behaviour, exercised live against Caddy.
 # Prefixes /emby/ and /mediabrowser/ are additional cases, not a substitute for the bare path.
 ALLOW_CASES = [
-    ('login AuthenticateByName GET', 'GET', '/Users/AuthenticateByName'),
     ('login AuthenticateByName POST', 'POST', '/Users/AuthenticateByName'),
-    ('login Authenticate POST', 'POST', '/Users/Authenticate'),
     ('current user Me', 'GET', '/Users/Me'),
     ('current user Me trailing slash', 'GET', '/Users/Me/'),
     ('current user by hex id', 'GET', '/Users/' + USER_ID),
@@ -482,7 +480,6 @@ ALLOW_CASES = [
     ('progress Progress POST', 'POST', '/Sessions/Playing/Progress'),
     ('progress Stopped POST', 'POST', '/Sessions/Playing/Stopped'),
     ('progress Ping POST', 'POST', '/Sessions/Playing/Ping'),
-    ('logout', 'POST', '/Sessions/Logout'),
     ('System/Info/Public', 'GET', '/System/Info/Public'),
     ('System/Info/Public trailing slash', 'GET', '/System/Info/Public/'),
     ('System/Ping', 'GET', '/System/Ping'),
@@ -548,7 +545,15 @@ DENY_403_CASES = [
     ('dot-dot to Plugins via web', 'GET', '/web/../Plugins'),
     ('Items Download', 'GET', '/Items/' + ITEM_ID + '/Download'),
     ('Items remote search (admin)', 'GET', '/Items/' + ITEM_ID + '/RemoteSearch'),
+    ('Users/Authenticate (not ByName)', 'POST', '/Users/Authenticate'),
+    ('Sessions/Logout', 'POST', '/Sessions/Logout'),
+    ('openlist root', 'GET', '/openlist'),
+    ('openlist slash', 'GET', '/openlist/'),
+    ('openlist api', 'GET', '/openlist/api'),
+    ('openlist p with sign', 'GET', '/openlist/p/aliyun/Movies/x.mkv?sign=x'),
+    ('prefix emby openlist', 'GET', '/emby/openlist/'),
 ]
+
 
 DENY_404_CASES = [
     '/discover',
@@ -560,8 +565,6 @@ DENY_404_CASES = [
     '/sonarr/',
     '/qb',
     '/qb/',
-    '/openlist',
-    '/openlist/',
     '/ge2o',
     '/ge2o/',
     '/ge2o/custom.js',
@@ -576,7 +579,6 @@ DENY_404_CASES = [
     '/DISCOVER',
     '/WEB/DASHBOARD',
     '/Search/foo',
-    '/emby/openlist/',
     '/mediabrowser/sonarr/',
 ]
 
@@ -666,8 +668,16 @@ class EmbyPublicGatewayDocTests(unittest.TestCase):
     def test_emby_site_does_not_expose_management_apps(self):
         block = handle_block(self.config, '{$EMBY_DOMAIN}')
         for upstream in ('portal:8097', 'prowlarr:9696', 'sonarr:8989',
-                         'openlist:5244', 'qbittorrent:8080'):
+                         'qbittorrent:8080'):
             self.assertNotIn(upstream, block)
+        # D4: only the signed GET/HEAD /openlist/d/ handle may proxy openlist.
+        self.assertIn('openlist:5244', block)
+        self.assertIn('path_regexp ol_direct', block)
+        self.assertNotIn('forward_auth', block)
+        self.assertNotIn('import cinema_admin', block)
+        # /openlist/api and /openlist/p are not given their own proxy handle.
+        self.assertNotRegex(block, r'(?m)^\s*handle /openlist/api')
+        self.assertNotRegex(block, r'(?m)^\s*handle /openlist/p')
 
     def test_movie_domain_site_still_present(self):
         block = handle_block(self.config, '{$MOVIE_DOMAIN}')
@@ -1037,6 +1047,410 @@ class EmbyPublicLiveError502Tests(unittest.TestCase):
         self.assertEqual(status, 502, body[:200])
         self.assertEqual(cache_control_values(headers), [NO_STORE])
         self.assertEqual(header_values(headers, 'Referrer-Policy'), ['no-referrer'])
+
+
+
+# --- MV-9 fix1: QA D1/D2/D3/D5/D4 assertions (written first; must fail on tree 904d7002) ---
+
+WRITE_DENIED_CASES = [
+    ('DELETE user by id', 'DELETE', '/Users/' + USER_ID),
+    ('POST user by id', 'POST', '/Users/' + USER_ID),
+    ('PUT user by id', 'PUT', '/Users/' + USER_ID),
+    ('PATCH user by id', 'PATCH', '/Users/' + USER_ID),
+    ('DELETE item by id', 'DELETE', '/Items/' + ITEM_ID),
+    ('POST item by id', 'POST', '/Items/' + ITEM_ID),
+    ('PUT item by id', 'PUT', '/Items/' + ITEM_ID),
+    ('PATCH item by id', 'PATCH', '/Items/' + ITEM_ID),
+    ('POST item image', 'POST', '/Items/' + ITEM_ID + '/Images/Primary'),
+    ('DELETE item image', 'DELETE', '/Items/' + ITEM_ID + '/Images/Primary'),
+    ('POST Items/Delete', 'POST', '/Items/Delete'),
+    ('POST Videos/Delete', 'POST', '/Videos/' + VIDEO_ID + '/Delete'),
+    ('DELETE Videos id', 'DELETE', '/Videos/' + VIDEO_ID),
+    ('DELETE video stream', 'DELETE', '/Videos/' + VIDEO_ID + '/stream'),
+    ('prefix emby DELETE user', 'DELETE', '/emby/Users/' + USER_ID),
+    ('prefix mediabrowser POST Items/Delete', 'POST', '/mediabrowser/Items/Delete'),
+]
+
+ALLOWED_POST_CASES = [
+    ('login AuthenticateByName', '/Users/AuthenticateByName'),
+    ('PlaybackInfo', '/Items/' + ITEM_ID + '/PlaybackInfo'),
+    ('Sessions/Playing', '/Sessions/Playing'),
+    ('Sessions/Playing/Progress', '/Sessions/Playing/Progress'),
+    ('Sessions/Playing/Stopped', '/Sessions/Playing/Stopped'),
+    ('Sessions/Playing/Ping', '/Sessions/Playing/Ping'),
+    ('prefix emby login', '/emby/Users/AuthenticateByName'),
+    ('prefix mediabrowser PlaybackInfo', '/mediabrowser/Items/' + ITEM_ID + '/PlaybackInfo'),
+]
+
+DOUBLE_ENCODED_RAW = [
+    '/web/%252e%252e/Plugins',
+    '/web/%252E%252E/Plugins',
+    '/web/%252e%252e%252fPlugins',
+    '/emby/%252e%252e/Plugins',
+    '/Users/Me%252fPolicy',
+    '/web/%25%32%65%25%32%65/Plugins',
+    '/web/%252f%252e%252e/x',
+    '/foo/%255c%255c/x',
+    '/web/%252E%252e/%252FPlugins',
+]
+
+WS_HEADERS = {
+    'Connection': 'Upgrade',
+    'Upgrade': 'websocket',
+    'Sec-WebSocket-Version': '13',
+    'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+}
+
+
+class EmbyPublicLiveFix1DenyTests(_EmbyLiveBase):
+    """QA D1/D2/D3/D5: 403/4xx must be no-store; write methods 403; double encoding blocked."""
+
+    def test_d1_double_slash_versioned_js_403_is_no_store_not_public(self):
+        # QA C17: GET /web//apploader.js?v=… is gateway 403, must not be public immutable.
+        status, hdrs, body = self._call('/web//apploader.js?v=4.10.2.0', raw=True)
+        self.assertEqual(status, 403, 'body=%r' % body[:200])
+        cc = cache_control_values(hdrs)
+        self.assertEqual(cc, [NO_STORE], 'D1: 403 carried %s' % cc)
+        self.assertFalse(any('public' in v.lower() for v in cc), cc)
+        self.assertEqual(self._stub_hits(), [])
+        self._assert_no_store_and_single_referrer(hdrs, status)
+
+    def test_d1_websocket_on_versioned_js_403_is_no_store_not_public(self):
+        # QA W08
+        status, hdrs, body = self._call('/web/apploader.js?v=4.10.2.0', headers=WS_HEADERS)
+        self.assertNotEqual(status, 101)
+        self.assertEqual(status, 403, 'body=%r' % body[:200])
+        cc = cache_control_values(hdrs)
+        self.assertEqual(cc, [NO_STORE], 'D1: WS 403 carried %s' % cc)
+        self.assertFalse(any('public' in v.lower() for v in cc), cc)
+        self.assertEqual(self._stub_hits(), [])
+
+    def test_d2_websocket_on_image_403_is_no_store(self):
+        # QA W09
+        status, hdrs, body = self._call(
+            '/Items/' + ITEM_ID + '/Images/Primary', headers=WS_HEADERS)
+        self.assertEqual(status, 403, 'body=%r' % body[:200])
+        cc = cache_control_values(hdrs)
+        self.assertEqual(cc, [NO_STORE], 'D2: image WS 403 carried %s' % cc)
+        self.assertNotIn('max-age=300', ''.join(cc))
+        self.assertEqual(self._stub_hits(), [])
+
+    def test_d3_named_write_methods_are_403_and_never_reach_relay(self):
+        for name, method, path in WRITE_DENIED_CASES:
+            with self.subTest(name=name, method=method, path=path):
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method=method)
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method=method, headers=ADMIN_HEADERS)
+
+    def test_d3_allowed_posts_reach_upstream(self):
+        for name, path in ALLOWED_POST_CASES:
+            with self.subTest(name=name, path=path):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._assert_allowed(path, method='POST')
+                self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
+    def test_d3_get_delete_named_paths_are_403(self):
+        """Items/Delete and Videos/.../Delete must not be treated as an item id / stream subpath."""
+        for path in ('/Items/Delete', '/Videos/' + VIDEO_ID + '/Delete',
+                     '/emby/Items/Delete'):
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method='GET')
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method='POST')
+
+    def test_d5_double_encoding_is_blocked_and_never_reaches_relay(self):
+        for path in DOUBLE_ENCODED_RAW:
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._call(path, raw=True)
+                self.assertIn(status, (400, 403),
+                              'D5: path=%r status=%s body=%r hits=%s' % (
+                                  path, status, body[:200], self._stub_hits()))
+                self.assertEqual(self._stub_hits(), [],
+                                 'D5: relay saw %s for %r' % (self._stub_hits(), path))
+                if status == 403:
+                    self._assert_no_store_and_single_referrer(hdrs, status)
+                    cc = cache_control_values(hdrs)
+                    self.assertFalse(any('public' in v.lower() for v in cc), cc)
+
+
+class EmbyPublicLiveFix1OpenlistTests(_EmbyLiveBase):
+    """QA D4: /openlist/d with sign is GET/HEAD only; everything else 403; no-store."""
+
+    def test_d4_openlist_d_with_sign_reaches_upstream_no_store(self):
+        path = '/openlist/d/aliyun/Movies/MV4-Test-Long/MV4-Test-Long.mkv?sign=test-sign'
+        for method in ('GET', 'HEAD'):
+            with self.subTest(method=method):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._call(path, method=method)
+                self.assertEqual(status, 200, 'body=%r hits=%s' % (body[:200], self._stub_hits()))
+                if method == 'GET':
+                    self.assertTrue(body.startswith(b'UPSTREAM:'), body[:200])
+                self.assertEqual(len(self._stub_hits()), 1, self._stub_hits())
+                self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+                rp = header_values(hdrs, 'Referrer-Policy')
+                self.assertEqual(rp, ['no-referrer'], rp)
+
+    def test_d4_openlist_d_without_or_empty_sign_is_403(self):
+        for path in (
+                '/openlist/d/aliyun/Movies/MV4-Test-Long/MV4-Test-Long.mkv',
+                '/openlist/d/aliyun/Movies/MV4-Test-Long/MV4-Test-Long.mkv?sign=',
+                '/openlist/d/aliyun/Movies/x.mkv?foo=1',
+        ):
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method='GET')
+
+    def test_d4_openlist_other_paths_and_methods_are_403(self):
+        cases = [
+            ('GET', '/openlist'),
+            ('GET', '/openlist/'),
+            ('GET', '/openlist/api'),
+            ('GET', '/openlist/api/fs/list'),
+            ('GET', '/openlist/p/aliyun/Movies/x.mkv?sign=test-sign'),
+            ('POST', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
+            ('PUT', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
+            ('DELETE', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
+            ('GET', '/OPENLIST/api'),
+        ]
+        for method, path in cases:
+            with self.subTest(method=method, path=path):
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, method=method)
+
+
+class _ImageErrorStub(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def do_GET(self):
+        body = b'bad image'
+        self.send_response(400)
+        self.send_header('Cache-Control', 'public, max-age=999')
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class EmbyPublicLiveFix1ImageUpstreamErrorTests(unittest.TestCase):
+    """QA D2 C10: upstream 4xx on an image path must be no-store, not private max-age=300."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.caddy = find_caddy()
+        if not cls.caddy:
+            raise unittest.SkipTest(
+                'caddy binary not found; set CADDY or add caddy to PATH')
+        source = CADDYFILE.read_text(encoding='utf-8')
+        if '{$EMBY_DOMAIN}' not in source:
+            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        cls._tmpdir = tempfile.TemporaryDirectory(prefix='movie-emby-img4xx-')
+        workdir = Path(cls._tmpdir.name)
+        cert, key = make_self_signed(workdir)
+        cls.movie_port = free_port()
+        cls.emby_port = free_port()
+        cls._stub = ThreadingHTTPServer(('127.0.0.1', 0), _ImageErrorStub)
+        cls._thread = threading.Thread(target=cls._stub.serve_forever, daemon=True)
+        cls._thread.start()
+        upstream = '127.0.0.1:%d' % cls._stub.server_address[1]
+        config = local_caddyfile(
+            source,
+            '127.0.0.1:%d' % cls.movie_port,
+            upstream, cert, key,
+            emby_site='127.0.0.1:%d' % cls.emby_port,
+        )
+        config_path = workdir / 'Caddyfile'
+        config_path.write_text(config, encoding='utf-8')
+        cls._caddy_cm = CaddyProcess(cls.caddy, config_path, cls.emby_port, workdir)
+        cls._caddy_cm.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, '_caddy_cm', None) is not None:
+            cls._caddy_cm.__exit__(None, None, None)
+        if getattr(cls, '_stub', None) is not None:
+            cls._stub.shutdown()
+            cls._stub.server_close()
+        if getattr(cls, '_thread', None) is not None:
+            cls._thread.join(timeout=5)
+        if getattr(cls, '_tmpdir', None) is not None:
+            cls._tmpdir.cleanup()
+
+    def test_d2_upstream_400_on_image_is_no_store(self):
+        status, hdrs, body = request_https(
+            self.emby_port, '/Items/' + ITEM_ID + '/Images/Primary')
+        self.assertEqual(status, 400, body[:200])
+        cc = cache_control_values(hdrs)
+        self.assertEqual(cc, [NO_STORE], 'D2: upstream 400 carried %s' % cc)
+        self.assertNotIn('max-age=300', ''.join(cc))
+        self.assertFalse(any('public' in v.lower() for v in cc), cc)
+        rp = header_values(hdrs, 'Referrer-Policy')
+        self.assertEqual(rp, ['no-referrer'], rp)
+
+
+class _RedirectStub(BaseHTTPRequestHandler):
+    """Simulate relay's 307 to movie2 /openlist/p with a sign, or OpenList 401."""
+    protocol_version = 'HTTP/1.1'
+
+    def do_GET(self):
+        self._go()
+
+    def do_HEAD(self):
+        self._go(write_body=False)
+
+    def do_POST(self):
+        self._go()
+
+    def _go(self, write_body=True):
+        path = self.path
+        if path.lower().startswith('/openlist/'):
+            # Missing/bad sign is the gateway's job; if a request arrives here
+            # without being a valid /d/ proxy we still answer 401 like OpenList.
+            qs = path.split('?', 1)
+            q = qs[1] if len(qs) > 1 else ''
+            if 'sign=good' in q and '/openlist/d/' in path.lower():
+                data = b'OL-OK'
+                self.send_response(206)
+                self.send_header('Content-Range', 'bytes 0-5/100')
+                self.send_header('Content-Type', 'video/x-matroska')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                if write_body:
+                    self.wfile.write(data)
+                return
+            data = b'unauthorized'
+            self.send_response(401)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            if write_body:
+                self.wfile.write(data)
+            return
+        if '/stream' in path.lower() or path.lower().startswith('/videos/'):
+            loc = 'https://movie2.g60.net/openlist/p/aliyun/Movies/X.mkv?sign=good'
+            body = b'redirect'
+            self.send_response(307)
+            self.send_header('Location', loc)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            if write_body:
+                self.wfile.write(body)
+            return
+        data = b'UPSTREAM-OK'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        if write_body:
+            self.wfile.write(data)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
+    """QA D4: Location from relay is rewritten off movie2 onto this site's /openlist/d."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.caddy = find_caddy()
+        if not cls.caddy:
+            raise unittest.SkipTest(
+                'caddy binary not found; set CADDY or add caddy to PATH')
+        source = CADDYFILE.read_text(encoding='utf-8')
+        if '{$EMBY_DOMAIN}' not in source:
+            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        cls._tmpdir = tempfile.TemporaryDirectory(prefix='movie-emby-redir-')
+        workdir = Path(cls._tmpdir.name)
+        cert, key = make_self_signed(workdir)
+        cls.movie_port = free_port()
+        cls.emby_port = free_port()
+        cls._stub = ThreadingHTTPServer(('127.0.0.1', 0), _RedirectStub)
+        cls._thread = threading.Thread(target=cls._stub.serve_forever, daemon=True)
+        cls._thread.start()
+        upstream = '127.0.0.1:%d' % cls._stub.server_address[1]
+        config = local_caddyfile(
+            source,
+            '127.0.0.1:%d' % cls.movie_port,
+            upstream, cert, key,
+            emby_site='127.0.0.1:%d' % cls.emby_port,
+        )
+        config_path = workdir / 'Caddyfile'
+        config_path.write_text(config, encoding='utf-8')
+        cls._caddy_cm = CaddyProcess(cls.caddy, config_path, cls.emby_port, workdir)
+        cls._caddy_cm.__enter__()
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            try:
+                with socket.create_connection(('127.0.0.1', cls.movie_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            cls._caddy_cm.__exit__(None, None, None)
+            raise TimeoutError('movie site did not listen')
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, '_caddy_cm', None) is not None:
+            cls._caddy_cm.__exit__(None, None, None)
+        if getattr(cls, '_stub', None) is not None:
+            cls._stub.shutdown()
+            cls._stub.server_close()
+        if getattr(cls, '_thread', None) is not None:
+            cls._thread.join(timeout=5)
+        if getattr(cls, '_tmpdir', None) is not None:
+            cls._tmpdir.cleanup()
+
+    def test_d4_stream_location_leaves_movie2_and_uses_openlist_d(self):
+        status, hdrs, body = request_https(
+            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true')
+        self.assertEqual(status, 307, body[:200])
+        locs = header_values(hdrs, 'Location')
+        self.assertEqual(len(locs), 1, locs)
+        loc = locs[0]
+        self.assertNotIn('movie2', loc.lower(), 'D4: Location still mentions movie2: %s' % loc)
+        self.assertNotIn('g60.net', loc.lower(), loc)
+        # relative or same-host /openlist/d/…?sign=
+        self.assertRegex(loc, r'(?i)(/openlist/d/)')
+        self.assertNotRegex(loc, r'(?i)/openlist/p/')
+        self.assertIn('sign=good', loc)
+        self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
+    def test_d4_movie2_site_does_not_rewrite_location(self):
+        """Admin domain playback redirects stay as the upstream sent them."""
+        status, hdrs, body = request_https(
+            self.movie_port, '/Videos/' + VIDEO_ID + '/stream?static=true')
+        self.assertEqual(status, 307, body[:200])
+        locs = header_values(hdrs, 'Location')
+        self.assertEqual(len(locs), 1, locs)
+        self.assertIn('movie2.g60.net', locs[0])
+        self.assertIn('/openlist/p/', locs[0])
+
+    def test_d4_openlist_401_from_upstream_becomes_gateway_403(self):
+        # Tampered/wrong sign reaches OpenList as 401; public site must surface 403.
+        status, hdrs, body = request_https(
+            self.emby_port,
+            '/openlist/d/aliyun/Movies/X.mkv?sign=tampered')
+        self.assertEqual(status, 403, 'body=%r' % body[:200])
+        self.assertEqual(body.strip(), b'Forbidden')
+        self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
 
 
 if __name__ == '__main__':

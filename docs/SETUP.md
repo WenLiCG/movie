@@ -159,37 +159,37 @@ sudo bash install.sh public
 
 ### 公网 Emby 站点（`EMBY_DOMAIN`）白名单与缓存
 
-此站点只反代 relay 的播放与电影墙接口，采用**白名单**：未列出的 API 一律 403。`/emby/` 与 `/mediabrowser/` 两种前缀、大小写变体都按同一套规则匹配。路径中的 URL 编码斜杠（`%2F`）、编码点号（`%2e`）、反斜杠（`%5c`）、分号（`;`）或双斜杠（`//`）一律 403，不转给 relay；依据是 Caddy 的 path 匹配会先解码 `%2F`/`%2e` 并整理 `..`，这些写法既可能造成歧义，也不是官方客户端的正常请求。普通客户端使用字面量斜杠即可。字母本身的百分号编码（如 `U` 写成 `%55`）按解码后的路径匹配，合法白名单路径仍会放行。
+此站点只反代 relay 的播放与电影墙接口，采用**白名单**，并且**按 HTTP 方法限制**：默认只放行 GET 和 HEAD；写方法一律由网关返回 403，只有下面列出的播放必需 POST 例外。未列出的 API 一律 403。`/emby/` 与 `/mediabrowser/` 两种前缀、大小写变体都按同一套规则匹配。路径中（问号之前）的 URL 编码斜杠（`%2F`）、编码点号（`%2e`）、反斜杠（`%5c`）、字面量 `%25`（覆盖 `%252e` 这类双重或多重编码）、分号（`;`）或双斜杠（`//`）一律 403，不转给 relay；依据是 Caddy 的 path 匹配会先解码 `%2F`/`%2e` 并整理 `..`，这些写法既可能造成歧义，也不是官方客户端的正常请求。普通客户端使用字面量斜杠即可。字母本身的百分号编码（如 `U` 写成 `%55`）按解码后的路径匹配，合法白名单路径仍会放行。
 
-管理页面路径返回 404：`/discover`、`/search`、`/sonarr`、`/qb`、`/openlist`、`/ge2o` 及其子路径，以及 `/web/dashboard*`、`/web/configurationpage*`。Emby 网页后台大量使用 `#!/dashboard` 这种 hash 路由，路径规则拦不住 `/web/index.html#!/dashboard`；真正的保护靠下面的 API 白名单，以及不要把管理员账号发给普通用户。
+管理页面路径返回 404：`/discover`、`/search`、`/sonarr`、`/qb`、`/ge2o` 及其子路径，以及 `/web/dashboard*`、`/web/configurationpage*`。`/openlist` 不再整段 404：仅签名直链 `GET`/`HEAD` `/openlist/d/…`（必须带非空 `sign` 查询参数，Range 原样透传）会反代 OpenList；页面、`/openlist/api`、`/openlist/p/`、根路径和其他方法一律 403。Emby 网页后台大量使用 `#!/dashboard` 这种 hash 路由，路径规则拦不住 `/web/index.html#!/dashboard`；真正的保护靠下面的 API 白名单，以及不要把管理员账号发给普通用户。
 
-白名单如下（均含可选的 `/emby/`、`/mediabrowser/` 前缀）：
+白名单如下（均含可选的 `/emby/`、`/mediabrowser/` 前缀；除标明 POST 的以外，只允许 GET/HEAD）：
 
-| 用途 | 放行的路径 | 说明 |
+| 用途 | 放行的路径与方法 | 说明 |
 | --- | --- | --- |
-| 站点入口 | `/` | 302 到 `/web/index.html` |
-| 登录 | `/Users/AuthenticateByName`、`/Users/Authenticate` | 登录 |
-| 当前用户 | `/Users/Me`、`/Users/{GUID}` | `{GUID}` 仅为 32 位十六进制或带连字符的 UUID，因此 `/Users`、`/Users/New`、`/Users/Public` 不会被误放 |
-| 电影墙读取 | `/Users/Me/Items`、`/Users/{GUID}/Items`（含 Latest、Resume 等子路径）、`/Users/…/Views` | 用户自己的条目与视图 |
-| 条目 | `/Items/{id}` | 条目详情 |
-| 图片 | `/Items/{id}/Images` 及其子路径 | 海报等 |
-| 播放信息 | `/Items/{id}/PlaybackInfo` | PlaybackInfo |
-| 视频流 | `/Videos/{id}` 及其子路径（`stream`、HLS `m3u8`/`ts`、字幕） | 含 HLS |
-| 音频流 | `/Audio/{id}/stream*` | 播放音轨 |
-| 进度上报 | `/Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`、`/Sessions/Playing/Ping` | 播放进度 |
-| 退出登录 | `/Sessions/Logout` | 结束当前会话 |
-| 公开服务信息 | `/System/Info/Public` | 明确要求放行；`/System/Info`（非 Public）仍为 403 |
-| 探活 | `/System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
-| 剧集墙 | `/Shows/{id}`、`/Shows/{id}/Episodes`、`/Shows/{id}/Seasons`、`/Shows/{id}/NextUp` | 电视剧电影墙读取 |
-| 网页静态资源 | `/web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |
+| 站点入口 | `GET /` | 302 到 `/web/index.html` |
+| 登录 | `POST /Users/AuthenticateByName` | 普通用户登录。不放行 `/Users/Authenticate` |
+| 当前用户 | `GET /Users/Me`、`GET /Users/{GUID}` | `{GUID}` 仅为 32 位十六进制或带连字符的 UUID，因此 `/Users`、`/Users/New`、`/Users/Public` 不会被误放。对这些路径的 POST/DELETE/PUT/PATCH 由网关 403 |
+| 电影墙读取 | `GET /Users/Me/Items`、`GET /Users/{GUID}/Items`（含 Latest、Resume 等子路径）、`GET /Users/…/Views` | 用户自己的条目与视图 |
+| 条目 | `GET /Items/{id}` | 条目详情；`/Items/Delete` 无论方法都 403 |
+| 图片 | `GET /Items/{id}/Images` 及其子路径 | 海报等；POST/DELETE 图片由网关 403 |
+| 播放信息 | `GET` 与 `POST /Items/{id}/PlaybackInfo` | PlaybackInfo |
+| 视频流 | `GET /Videos/{id}/stream`、`stream.*`、`master.m3u8`、`hls*`、`Subtitles/*` | 不含 `/Videos/{id}/Delete` 及其他子路径 |
+| 音频流 | `GET /Audio/{id}/stream*` | 播放音轨 |
+| 进度上报 | `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`、`/Sessions/Playing/Ping` | 播放进度 |
+| 公开服务信息 | `GET /System/Info/Public` | 明确要求放行；`/System/Info`（非 Public）仍为 403 |
+| 探活 | `GET /System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
+| 剧集墙 | `GET /Shows/{id}`、`/Episodes`、`/Seasons`、`/NextUp` | 电视剧电影墙读取 |
+| 网页静态资源 | `GET /web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |
+| 播放直链 | `GET`/`HEAD /openlist/d/…?sign=…` | 将 relay 发出的 307 Location 改写为相对路径 `/openlist/d/…`（随请求 Host，不写死管理域名）；签名由 OpenList 校验，失败时网关把上游 401 转为 403 |
 
 **明确不放行、记入 MV-11 待 App 实测后再逐条补进白名单（不改回黑名单）的项：**
 
 - `/Users/Public`：会枚举登录页可见的用户名和头像，公网域名上属于用户枚举，故先 403。Web 与 App 仍可用 `AuthenticateByName` 输入用户名登录。若 App 启动必须靠此接口展示选人页，再在 MV-11 补入。
 - WebSocket（`/embywebsocket` 以及任何 `Upgrade: websocket`）：默认 403。是否为官方 App 所需，由 MV-11 实测确认。
-- `/Sessions`（列出全部会话）、`/Sessions/Capabilities`、`/DisplayPreferences`、`/Branding`、改密接口等：当前电影墙路径未列入需求，先 403。挡住了再按需补。
+- `/Sessions`（列出全部会话）、`/Sessions/Capabilities`、`/Sessions/Logout`、`/Users/Authenticate`（非 ByName）、`/DisplayPreferences`、`/Branding`、改密接口等：当前没有「播放必需」的实测证据，先 403。挡住了再按需补。
 
-缓存：默认以及全部错误响应（403、404、502 等）为 `Cache-Control: private, no-store`，`Referrer-Policy: no-referrer`（延迟写入，覆盖上游，响应里只出现一次）。带 token、`Authorization`、`Cookie` 或查询参数 `api_key` / `X-Emby-Token` 的响应一律 `private, no-store`。仅不依赖登录状态、带 `v` 或 `version` 查询参数的 `/web/` 静态资源（js/css/字体/常见图片扩展名，不含 HTML）可为 `public, max-age=31536000, immutable`。不带凭据的条目图片可为 `private, max-age=300`；带凭据则仍为 `no-store`，不会 public。默认响应带 `Vary: Authorization, Cookie, X-Emby-Token`；可公共缓存的静态资源改用 `Vary: Accept-Encoding`。Cloudflare 层的缓存与规则须在开放公网之后另测，不在本机 `--resolve` 验证范围内。
+缓存：默认以及全部 4xx/5xx（网关自己的 403/404 和上游错误，含 502）为 `Cache-Control: private, no-store`，`Referrer-Policy: no-referrer`（延迟写入，覆盖上游，响应里只出现一次）。带 token、`Authorization`、`Cookie` 或查询参数 `api_key` / `X-Emby-Token` 的响应一律 `private, no-store`。仅不依赖登录状态、带 `v` 或 `version` 查询参数、并且上游返回 2xx/304 的 `/web/` 静态资源（js/css/字体/常见图片扩展名，不含 HTML）可为 `public, max-age=31536000, immutable`。不带凭据且上游 2xx/304 的条目图片可为 `private, max-age=300`；带凭据或任何错误响应仍为 `no-store`，不会 public。默认响应带 `Vary: Authorization, Cookie, X-Emby-Token`；可公共缓存的静态资源改用 `Vary: Accept-Encoding`。Cloudflare 层的缓存与规则须在开放公网之后另测，不在本机 `--resolve` 验证范围内。
 
 
 电影墙“找片 / 追剧”进入 `/discover/`，使用 Emby 管理员登录；Prowlarr 保留为站点和高级搜索管理入口，各应用分别认证。
