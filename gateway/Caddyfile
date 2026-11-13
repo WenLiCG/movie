@@ -55,21 +55,170 @@
     }
 }
 
-# Public movie-wall / playback site. Set EMBY_DOMAIN (for example emby.example.com).
-# This site is not covered by Cloudflare Access. Management stays on {$MOVIE_DOMAIN}.
-# Requests are filtered by path and method: an admin token does not grant extra APIs here.
-{$EMBY_DOMAIN} {
+# Public movie-wall / playback site on MOVIE3_DOMAIN (for example movie3.example.com).
+# Replaces the earlier EMBY_DOMAIN site. This site is not covered by Cloudflare Access.
+# Management UIs stay on {$MOVIE_DOMAIN}. Requests are filtered by path and method:
+# an admin token does not grant extra APIs here. movie3 does not issue or accept
+# the portal cinema Cookie; /discover/api management endpoints are gateway 403.
+#
+# Shared Emby-wall rules, imported twice (under handle_path /movie/* after the
+# prefix is stripped, and at the domain root for /emby, /mediabrowser and
+# /embywebsocket). Matcher and regexp names are suffixed with {args[0]} so the
+# two imports do not collide.
+(emby_wall) {
+    # WebSocket is allowed only on /embywebsocket (optional /emby or
+    # /mediabrowser prefix, after /movie is stripped). Any other Upgrade is 403.
+    @emby_ws_{args[0]} {
+        method GET HEAD
+        path_regexp emby_ws_{args[0]} (?i)^(/emby|/mediabrowser)?/embywebsocket/?$
+    }
+    handle @emby_ws_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            header_down Cache-Control "private, no-store"
+        }
+    }
+    @websocket_{args[0]} {
+        expression "{http.request.header.Upgrade}.matches('(?i)websocket')"
+    }
+    handle @websocket_{args[0]} {
+        respond "Forbidden" 403
+    }
+
+    @blocked_pages_{args[0]} {
+        path_regexp blocked_pages_{args[0]} (?i)^(/emby|/mediabrowser)?/((discover|search|sonarr|qb|ge2o|openlist)(/.*)?|web/(dashboard|configurationpage).*)
+    }
+    handle @blocked_pages_{args[0]} {
+        respond "Not found" 404
+    }
+
+    @versioned_public_req_{args[0]} {
+        method GET HEAD
+        path_regexp verpub_{args[0]} (?i)^(/emby|/mediabrowser)?/web/.+\.(js|css|woff2?|ttf|otf|map|png|svg|ico|webp|jpe?g|gif)$
+        expression "{http.request.uri.query}.matches('(?i)(^|&)(v|version)=') && {http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
+    }
+    handle @versioned_public_req_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            @ok_static_{args[0]} status 200 304
+            handle_response @ok_static_{args[0]} {
+                copy_response_headers {
+                    include Content-Type Content-Length Content-Range Accept-Ranges Etag Last-Modified Content-Encoding
+                }
+                copy_response
+                header Cache-Control "public, max-age=31536000, immutable"
+                header Vary "Accept-Encoding"
+            }
+            @err_static_{args[0]} status 4xx 5xx
+            handle_response @err_static_{args[0]} {
+                copy_response_headers {
+                    include Content-Type Content-Length
+                }
+                copy_response
+                header Cache-Control "private, no-store"
+            }
+            header_down Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
+            header_down Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
+            header_down Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+        }
+    }
+
+    @images_anon_req_{args[0]} {
+        method GET HEAD
+        path_regexp imganon_{args[0]} (?i)^(/emby|/mediabrowser)?/Items/[^/]+/Images
+        expression "{http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
+    }
+    handle @images_anon_req_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            @ok_img_{args[0]} status 200 304
+            handle_response @ok_img_{args[0]} {
+                copy_response_headers {
+                    include Content-Type Content-Length Content-Range Accept-Ranges Etag Last-Modified Content-Encoding
+                }
+                copy_response
+                header Cache-Control "private, max-age=300"
+            }
+            @err_img_{args[0]} status 4xx 5xx
+            handle_response @err_img_{args[0]} {
+                copy_response_headers {
+                    include Content-Type Content-Length
+                }
+                copy_response
+                header Cache-Control "private, no-store"
+            }
+        }
+    }
+
+    @allowed_post_{args[0]} {
+        method POST
+        path_regexp allow_post_{args[0]} (?i)^(/emby|/mediabrowser)?/(Users/AuthenticateByName/?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Sessions/Playing(/Progress|/Stopped|/Ping)?/?$|Sessions/Capabilities(/Full)?/?$)
+    }
+    handle @allowed_post_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            header_down Cache-Control "private, no-store"
+        }
+    }
+
+    @reserved_item_ops_{args[0]} {
+        path_regexp reserved_{args[0]} (?i)^(/emby|/mediabrowser)?/Items/Delete(/.*)?$
+    }
+    handle @reserved_item_ops_{args[0]} {
+        respond "Forbidden" 403
+    }
+
+    @allowed_get_{args[0]} {
+        method GET HEAD
+        path_regexp allow_get_{args[0]} (?i)^(/emby|/mediabrowser)?/(Users/Me/?$|Users/Me/(Items|Views|HomeSections|Sections)(/.*)?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(Items|Views|HomeSections|Sections)(/.*)?$|Items/[A-Za-z0-9._-]+/?$|Items/[A-Za-z0-9._-]+/Images(/.*)?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Videos/[A-Za-z0-9._-]+/(stream(\.[A-Za-z0-9]+)?|master\.m3u8|hls[0-9]+/.*|Subtitles/.*)$|Audio/[A-Za-z0-9._-]+/stream.*$|Users/Public/?$|UserSettings/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Items/[A-Za-z0-9._-]+/(Similar|ThemeMedia)/?$|System/Info/Public/?$|System/Info/?$|System/Endpoint/?$|System/Ping/?$|Branding(/.*)?$|Shows/[A-Za-z0-9._-]+(/(Episodes|Seasons|NextUp))?/?$|web/?$|web/.*$)
+    }
+    handle @allowed_get_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            header_down Cache-Control "private, no-store"
+            # QA D6: rewrite Location and drop the upstream HTML body,
+            # which still contains https://movie2…/openlist/p/…. Movie2 site is
+            # unchanged. Any leftover absolute Location is reduced to a path.
+            @emby_redir_{args[0]} status 300 301 302 303 307 308
+            handle_response @emby_redir_{args[0]} {
+                header Cache-Control "private, no-store"
+                header Referrer-Policy "no-referrer"
+                header Location "{http.reverse_proxy.header.Location}"
+                header Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+(/.*)$" "$1"
+                header Content-Length 0
+                header -Content-Type
+                respond "" {http.reverse_proxy.status_code}
+            }
+        }
+    }
+
+    handle {
+        respond "Forbidden" 403
+    }
+}
+
+{$MOVIE3_DOMAIN} {
     encode zstd gzip
     header >Referrer-Policy "no-referrer"
     header Cache-Control "private, no-store"
     header >Vary "Authorization, Cookie, X-Emby-Token"
 
+    # movie3 neither accepts nor issues the portal cinema Cookie.
+    request_header Cookie "(?i)(^|;\s*)cinema=[^;]*" ""
+    request_header Cookie "(?i)^;\s*" ""
+    header >Set-Cookie "(?i)^cinema=.*" ""
+
     # Defense in depth: reject raw request-targets whose path (before '?')
     # contains encoded slashes/dots/backslashes, a literal %25 (double or
-    # multiple encoding), semicolons, or '//' .
+    # multiple encoding, e.g. %252e), semicolons, or '//' .
     # Caddy's path matcher decodes %2F/%2e and cleans '..' before matching;
     # rejecting these encodings on the raw URI closes bypasses and avoids
     # sending ambiguous targets to relay. Ordinary clients use literal slashes.
+    # This matcher looks at {http.request.uri} (the original URI) and is
+    # evaluated before handle_path strips /movie.
     @dangerous {
         expression "{http.request.uri}.matches('(?i)^[^?]*((%2f)|(%2e)|(%5c)|(%25)|;|//)')"
     }
@@ -77,40 +226,83 @@
         respond "Forbidden" 403
     }
 
-    # Management UIs and the sibling apps stay on MOVIE_DOMAIN. /openlist is
-    # no longer a blanket 404: signed GET/HEAD /openlist/d/… is allowed below,
-    # every other /openlist path is 403 (see @openlist_direct / fallback).
-    # Hash routes such as /web/index.html#!/dashboard cannot be blocked by
-    # path; the API whitelist below is the real control.
-    @blocked_pages {
-        path_regexp blocked_pages (?i)^(/emby|/mediabrowser)?/((discover|search|sonarr|qb|ge2o)(/.*)?|web/(dashboard|configurationpage).*)
-    }
-    handle @blocked_pages {
-        respond "Not found" 404
-    }
-
-    # WebSocket is denied by default (MV-11 will confirm whether the official
-    # Emby App needs /embywebsocket). Any Upgrade: websocket is also denied.
-    @websocket {
-        expression "{http.request.header.Upgrade}.matches('(?i)websocket') || {http.request.uri.path}.matches('(?i)(^|/)embywebsocket')"
-    }
-    handle @websocket {
-        respond "Forbidden" 403
-    }
-
     @root path /
     handle @root {
-        # Empty body and explicit Content-Length 0 so GET and HEAD 3xx
-        # cannot carry an absolute URL (QA D6 also covers this site-local redirect).
-        header Location "/web/index.html"
+        header Location "/movie/"
         header Content-Length 0
         respond "" 302
     }
 
-    # Signed OpenList direct links for public playback. GET/HEAD only, sign
-    # required, Range passed through, always no-store. OpenList 401 (bad or
-    # reused sign) is surfaced as a gateway 403. Pages, /api, /p, and the
-    # root fall through to the 403 handler.
+    @movie_exact path /movie
+    handle @movie_exact {
+        header Location "/movie/"
+        header Content-Length 0
+        respond "" 308
+    }
+
+    # Emby HTML/JS emits root-absolute /web/…; bounce those back under /movie.
+    # No response-body rewriting (no replace_response / sub_filter).
+    @web_at_root {
+        path /web /web/*
+    }
+    handle @web_at_root {
+        header Location "/movie{http.request.uri}"
+        header Content-Length 0
+        respond "" 308
+    }
+
+    @discover_slash path /discover
+    handle @discover_slash {
+        header Location "/discover/"
+        header Content-Length 0
+        respond "" 308
+    }
+
+    # Every /discover/api path is a management endpoint (see portal/server.py
+    # and docs/SETUP.md). Gateway 403; the request never reaches portal.
+    @discover_api {
+        path_regexp discover_api (?i)^/discover/api(/.*)?$
+    }
+    handle @discover_api {
+        respond "Forbidden" 403
+    }
+
+    handle /discover/* {
+        # Matching uses the cleaned path, but reverse_proxy would otherwise
+        # forward the raw request-target (e.g. /movie/../discover/) and the
+        # real portal would 404. Collapse literal '..' so the upstream URI
+        # equals a direct /discover/ request. Encoded '%2e' is rejected
+        # earlier on the raw URI. Not a response-body rewrite.
+        uri path_regexp ^(?:/.*)?/\.\./discover(.*)$ /discover$1
+        reverse_proxy portal:8097 {
+            header_up Cookie "(?i)(^|;\s*)cinema=[^;]*" ""
+            header_up Cookie "(?i)^;\s*" ""
+            header_down Set-Cookie "(?i)^cinema=.*" ""
+            header_down -Cache-Control
+            header_down Cache-Control "private, no-store"
+        }
+    }
+
+    # /search, /sonarr, /qb, /ge2o stay on MOVIE_DOMAIN. /openlist management
+    # pages are 404; signed GET/HEAD /openlist/d/… is allowed below.
+    @blocked_mgmt {
+        path_regexp blocked_mgmt (?i)^/(search|sonarr|qb|ge2o)(/.*)?$
+    }
+    handle @blocked_mgmt {
+        respond "Not found" 404
+    }
+
+    @openlist_ui {
+        path /openlist /openlist/ /openlist/*
+        not path /openlist/d /openlist/d/*
+    }
+    handle @openlist_ui {
+        respond "Not found" 404
+    }
+
+    # Signed OpenList direct links for public playback, at the domain root.
+    # GET/HEAD only, sign required, Range passed through, always no-store.
+    # OpenList 401 (bad or reused sign) is surfaced as a gateway 403.
     @openlist_direct {
         method GET HEAD
         path_regexp ol_direct (?i)^/openlist/d/.+
@@ -137,120 +329,24 @@
         }
     }
 
-    # Public cache only for successful (2xx/304) versioned /web/ static
-    # assets with no credentials. Gateway 403/404 and upstream 4xx/5xx keep
-    # the site-level private, no-store (this handle never runs for 403s
-    # generated by earlier handlers).
-    @versioned_public_req {
-        method GET HEAD
-        path_regexp verpub (?i)^(/emby|/mediabrowser)?/web/.+\.(js|css|woff2?|ttf|otf|map|png|svg|ico|webp|jpe?g|gif)$
-        expression "{http.request.uri.query}.matches('(?i)(^|&)(v|version)=') && {http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
-    }
-    handle @versioned_public_req {
-        reverse_proxy relay:8095 {
-            header_down -Cache-Control
-            @ok_static status 200 304
-            handle_response @ok_static {
-                copy_response_headers {
-                    include Content-Type Content-Length Content-Range Accept-Ranges Etag Last-Modified Content-Encoding
-                }
-                copy_response
-                header Cache-Control "public, max-age=31536000, immutable"
-                header Vary "Accept-Encoding"
-            }
-            @err_static status 4xx 5xx
-            handle_response @err_static {
-                copy_response_headers {
-                    include Content-Type Content-Length
-                }
-                copy_response
-                header Cache-Control "private, no-store"
-            }
-            header_down Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
-            header_down Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
-            header_down Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+    # Browser entry: strip /movie, then apply the same wall rules used at
+    # /emby on the domain root. /movie/ (empty remainder) goes to the web UI.
+    handle_path /movie/* {
+        @movie_subroot path /
+        handle @movie_subroot {
+            header Location "/movie/web/index.html"
+            header Content-Length 0
+            respond "" 302
         }
+        import emby_wall movie
     }
 
-    # Anonymous item images may use a short private cache only on 2xx/304;
-    # any token or Cookie, and any 4xx/5xx, stay no-store.
-    @images_anon_req {
-        method GET HEAD
-        path_regexp imganon (?i)^(/emby|/mediabrowser)?/Items/[^/]+/Images
-        expression "{http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
+    # Official apps and Emby Web root-absolute /emby/… and /embywebsocket.
+    @emby_client {
+        path /emby /emby/* /mediabrowser /mediabrowser/* /embywebsocket /embywebsocket/*
     }
-    handle @images_anon_req {
-        reverse_proxy relay:8095 {
-            header_down -Cache-Control
-            @ok_img status 200 304
-            handle_response @ok_img {
-                copy_response_headers {
-                    include Content-Type Content-Length Content-Range Accept-Ranges Etag Last-Modified Content-Encoding
-                }
-                copy_response
-                header Cache-Control "private, max-age=300"
-            }
-            @err_img status 4xx 5xx
-            handle_response @err_img {
-                copy_response_headers {
-                    include Content-Type Content-Length
-                }
-                copy_response
-                header Cache-Control "private, no-store"
-            }
-        }
-    }
-
-    # POST whitelist: only playback-essential write endpoints, each backed
-    # by an mv4viewer observation (AuthenticateByName login, PlaybackInfo,
-    # Sessions/Playing*). Other POST/PUT/PATCH/DELETE is 403.
-    @allowed_post {
-        method POST
-        path_regexp allow_post (?i)^(/emby|/mediabrowser)?/(Users/AuthenticateByName/?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Sessions/Playing(/Progress|/Stopped|/Ping)?/?$)
-    }
-    handle @allowed_post {
-        reverse_proxy relay:8095 {
-            header_down -Cache-Control
-            header_down Cache-Control "private, no-store"
-        }
-    }
-
-    # "Delete" matches the item-id character class; reject it by name first.
-    @reserved_item_ops {
-        path_regexp reserved (?i)^(/emby|/mediabrowser)?/Items/Delete(/.*)?$
-    }
-    handle @reserved_item_ops {
-        respond "Forbidden" 403
-    }
-
-    # GET/HEAD whitelist. User ids are Emby GUIDs (32 hex or hyphenated UUID).
-    # /Users, /Users/New, /Users/Public and /Users/{id}/Policy are not listed.
-    # Videos are limited to stream / HLS / subtitles (not /Delete).
-    @allowed_get {
-        method GET HEAD
-        path_regexp allow_get (?i)^(/emby|/mediabrowser)?/(Users/Me/?$|Users/Me/(Items|Views)(/.*)?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(Items|Views)(/.*)?$|Items/[A-Za-z0-9._-]+/?$|Items/[A-Za-z0-9._-]+/Images(/.*)?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Videos/[A-Za-z0-9._-]+/(stream(\.[A-Za-z0-9]+)?|master\.m3u8|hls[0-9]+/.*|Subtitles/.*)$|Audio/[A-Za-z0-9._-]+/stream.*$|System/Info/Public/?$|System/Ping/?$|Shows/[A-Za-z0-9._-]+(/(Episodes|Seasons|NextUp))?/?$|web/?$|web/.*$)
-    }
-    handle @allowed_get {
-        reverse_proxy relay:8095 {
-            header_down -Cache-Control
-            header_down Cache-Control "private, no-store"
-            # QA D6: rewrite Location (as in D4) and drop the upstream HTML body,
-            # which still contains https://movie2…/openlist/p/…. Movie2 site is
-            # unchanged. Any leftover absolute Location is reduced to a path.
-            @emby_redir status 300 301 302 303 307 308
-            handle_response @emby_redir {
-                header Cache-Control "private, no-store"
-                header Referrer-Policy "no-referrer"
-                header Location "{http.reverse_proxy.header.Location}"
-                header Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
-                header Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
-                header Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
-                header Location "(?i)^https?://[^/]+(/.*)$" "$1"
-                header Content-Length 0
-                header -Content-Type
-                respond "" {http.reverse_proxy.status_code}
-            }
-        }
+    handle @emby_client {
+        import emby_wall embyroot
     }
 
     handle {

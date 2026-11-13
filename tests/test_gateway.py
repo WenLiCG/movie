@@ -79,15 +79,68 @@ def cache_control_values(headers):
     return [value for name, value in headers.items() if name.lower() == 'cache-control']
 
 
+PUBLIC_SITE_PLACEHOLDERS = ('{$MOVIE3_DOMAIN}', '{$EMBY_DOMAIN}')
+
+
+def public_site_placeholder(source):
+    """Return the public-site Caddy placeholder present in the Caddyfile."""
+    for var in PUBLIC_SITE_PLACEHOLDERS:
+        if var in source:
+            return var
+    raise AssertionError('public site placeholder missing (expected MOVIE3_DOMAIN)')
+
+
+def public_movie_path(path):
+    """Map a bare Emby path onto the movie3 /movie prefix.
+
+    Leaves /movie itself, client prefixes (/emby, /mediabrowser, /embywebsocket),
+    /openlist (signed download stays at the domain root), /discover, management
+    UI paths, and the site root unchanged. Lookalikes such as /movies are not
+    treated as already prefixed.
+    """
+    if not path or path == '/':
+        return path
+    lower = path.lower()
+
+    def exact_or_child(candidate, prefix):
+        return (
+            candidate == prefix
+            or candidate.startswith(prefix + '/')
+            or candidate.startswith(prefix + '?')
+        )
+
+    if (
+        exact_or_child(lower, '/movie')
+        or exact_or_child(lower, '/emby')
+        or exact_or_child(lower, '/mediabrowser')
+        or exact_or_child(lower, '/openlist')
+        or exact_or_child(lower, '/discover')
+        or exact_or_child(lower, '/search')
+        or exact_or_child(lower, '/sonarr')
+        or exact_or_child(lower, '/qb')
+        or exact_or_child(lower, '/ge2o')
+        or exact_or_child(lower, '/embywebsocket')
+    ):
+        return path
+    if path.startswith('/'):
+        return '/movie' + path
+    return '/movie/' + path
+
+
 def local_caddyfile(source, site, upstream, cert, key, emby_site=None):
     text = source
     for host in UPSTREAMS:
         text = text.replace(host, upstream)
     text = text.replace('{$MOVIE_DOMAIN}', site)
-    if '{$EMBY_DOMAIN}' in text:
+    placeholder = None
+    for var in PUBLIC_SITE_PLACEHOLDERS:
+        if var in text:
+            placeholder = var
+            break
+    if placeholder is not None:
         if emby_site is None:
             emby_site = '127.0.0.1:%d' % free_port()
-        text = text.replace('{$EMBY_DOMAIN}', emby_site)
+        text = text.replace(placeholder, emby_site)
     tls_line = '    tls %s %s\n' % (cert, key)
     addresses = [site]
     if emby_site is not None:
@@ -482,7 +535,19 @@ ALLOW_CASES = [
     ('progress Ping POST', 'POST', '/Sessions/Playing/Ping'),
     ('System/Info/Public', 'GET', '/System/Info/Public'),
     ('System/Info/Public trailing slash', 'GET', '/System/Info/Public/'),
+    ('System/Info (web client after login)', 'GET', '/System/Info'),
+    ('System/Endpoint', 'GET', '/System/Endpoint'),
     ('System/Ping', 'GET', '/System/Ping'),
+    ('Users/Public login picker', 'GET', '/Users/Public'),
+    ('UserSettings by id', 'GET', '/UserSettings/' + USER_ID),
+    ('HomeSections by id', 'GET', '/Users/' + USER_ID + '/HomeSections'),
+    ('home Section items', 'GET', '/Users/' + USER_ID + '/Sections/latestmedia_5/Items'),
+    ('Branding Css', 'GET', '/Branding/Css'),
+    ('Branding Configuration', 'GET', '/Branding/Configuration'),
+    ('item Similar', 'GET', '/Items/' + ITEM_ID + '/Similar'),
+    ('item ThemeMedia', 'GET', '/Items/' + ITEM_ID + '/ThemeMedia'),
+    ('Sessions/Capabilities/Full POST', 'POST', '/Sessions/Capabilities/Full'),
+    ('Sessions/Capabilities POST', 'POST', '/Sessions/Capabilities'),
     ('TV show episodes', 'GET', '/Shows/' + SHOW_ID + '/Episodes'),
     ('TV show seasons', 'GET', '/Shows/' + SHOW_ID + '/Seasons'),
     ('TV show NextUp', 'GET', '/Shows/' + SHOW_ID + '/NextUp'),
@@ -508,11 +573,8 @@ DENY_403_CASES = [
     ('list all users', 'GET', '/Users'),
     ('list all users trailing slash', 'GET', '/Users/'),
     ('create user New', 'GET', '/Users/New'),
-    ('Users/Public enumeration', 'GET', '/Users/Public'),
     ('user Policy', 'GET', '/Users/' + USER_ID + '/Policy'),
     ('Me Policy', 'GET', '/Users/Me/Policy'),
-    ('System/Info (not Public)', 'GET', '/System/Info'),
-    ('System/Info trailing slash', 'GET', '/System/Info/'),
     ('System/Configuration', 'GET', '/System/Configuration'),
     ('System/Logs', 'GET', '/System/Logs'),
     ('Plugins', 'GET', '/Plugins'),
@@ -529,9 +591,6 @@ DENY_403_CASES = [
     ('Encoding', 'GET', '/Encoding'),
     ('list Sessions', 'GET', '/Sessions'),
     ('Sessions/Capabilities', 'GET', '/Sessions/Capabilities'),
-    ('embywebsocket', 'GET', '/embywebsocket'),
-    ('emby/embywebsocket', 'GET', '/emby/embywebsocket'),
-    ('mediabrowser/embywebsocket', 'GET', '/mediabrowser/embywebsocket'),
     ('case list users', 'GET', '/users'),
     ('case New', 'GET', '/USERS/NEW'),
     ('prefix emby list users', 'GET', '/emby/Users'),
@@ -540,25 +599,17 @@ DENY_403_CASES = [
     ('case EMBY PLUGINS', 'GET', '/EMBY/PLUGINS'),
     ('Plugins with api_key', 'GET', '/Plugins?api_key=ADMIN'),
     ('Users with api_key', 'GET', '/Users?api_key=ADMIN'),
-    ('System/Info with api_key', 'GET', '/System/Info?api_key=ADMIN'),
-    ('dot-dot to System/Info', 'GET', '/System/Info/Public/../Info'),
+    ('System/Logs with api_key', 'GET', '/System/Logs?api_key=ADMIN'),
+    ('dot-dot to System/Logs', 'GET', '/System/Info/Public/../Logs'),
     ('dot-dot to Plugins via web', 'GET', '/web/../Plugins'),
     ('Items Download', 'GET', '/Items/' + ITEM_ID + '/Download'),
     ('Items remote search (admin)', 'GET', '/Items/' + ITEM_ID + '/RemoteSearch'),
     ('Users/Authenticate (not ByName)', 'POST', '/Users/Authenticate'),
     ('Sessions/Logout', 'POST', '/Sessions/Logout'),
-    ('openlist root', 'GET', '/openlist'),
-    ('openlist slash', 'GET', '/openlist/'),
-    ('openlist api', 'GET', '/openlist/api'),
-    ('openlist p with sign', 'GET', '/openlist/p/aliyun/Movies/x.mkv?sign=x'),
-    ('prefix emby openlist', 'GET', '/emby/openlist/'),
 ]
 
 
 DENY_404_CASES = [
-    '/discover',
-    '/discover/',
-    '/discover/foo',
     '/search',
     '/search/',
     '/sonarr',
@@ -574,9 +625,10 @@ DENY_404_CASES = [
     '/web/dashboard/foo',
     '/web/configurationpage',
     '/emby/discover',
+    '/emby/openlist',
+    '/emby/openlist/',
     '/emby/web/dashboard',
     '/mediabrowser/ge2o',
-    '/DISCOVER',
     '/WEB/DASHBOARD',
     '/Search/foo',
     '/mediabrowser/sonarr/',
@@ -656,26 +708,32 @@ class EmbyPublicGatewayDocTests(unittest.TestCase):
         self.config = CADDYFILE.read_text(encoding='utf-8')
 
     def test_emby_site_block_exists_and_uses_env_domain(self):
-        block = handle_block(self.config, '{$EMBY_DOMAIN}')
+        block = handle_block(self.config, '{$MOVIE3_DOMAIN}')
         self.assertTrue(block.strip())
-        self.assertIn('reverse_proxy relay:8095', block)
+        # relay is reached via the shared (emby_wall) snippet imported in the site.
+        self.assertIn('import emby_wall', block)
+        self.assertIn('reverse_proxy relay:8095', self.config)
+        self.assertIn('reverse_proxy relay:8095', handle_block(self.config, '(emby_wall)'))
         self.assertNotIn('forward_auth', block)
         self.assertNotIn('import cinema_admin', block)
-        # Domain is not hard-coded.
+        self.assertIn('handle_path /movie/*', block)
+        # Domain is not hard-coded; EMBY_DOMAIN site is replaced, not kept.
         self.assertNotIn('g60.net', self.config)
         self.assertNotIn('emby.g60', self.config)
+        self.assertNotIn('{$EMBY_DOMAIN}', self.config)
 
     def test_emby_site_does_not_expose_management_apps(self):
-        block = handle_block(self.config, '{$EMBY_DOMAIN}')
-        for upstream in ('portal:8097', 'prowlarr:9696', 'sonarr:8989',
-                         'qbittorrent:8080'):
+        block = handle_block(self.config, '{$MOVIE3_DOMAIN}')
+        # Management UIs stay off movie3: Prowlarr/Sonarr/qB are not proxied.
+        # portal:8097 is used only for public /discover static pages; /discover/api
+        # management endpoints are gateway-403 and cinema_admin is not imported.
+        for upstream in ('prowlarr:9696', 'sonarr:8989', 'qbittorrent:8080'):
             self.assertNotIn(upstream, block)
-        # D4: only the signed GET/HEAD /openlist/d/ handle may proxy openlist.
+        self.assertIn('portal:8097', block)
         self.assertIn('openlist:5244', block)
         self.assertIn('path_regexp ol_direct', block)
         self.assertNotIn('forward_auth', block)
         self.assertNotIn('import cinema_admin', block)
-        # /openlist/api and /openlist/p are not given their own proxy handle.
         self.assertNotRegex(block, r'(?m)^\s*handle /openlist/api')
         self.assertNotRegex(block, r'(?m)^\s*handle /openlist/p')
 
@@ -687,17 +745,19 @@ class EmbyPublicGatewayDocTests(unittest.TestCase):
 
     def test_setup_docs_describe_emby_domain_and_whitelist(self):
         docs = SETUP.read_text(encoding='utf-8')
-        self.assertIn('EMBY_DOMAIN', docs)
+        self.assertIn('MOVIE3_DOMAIN', docs)
+        self.assertIn('/movie', docs)
         self.assertIn('白名单', docs)
         self.assertRegex(docs, r'不经过.*Access|不走 Access')
         self.assertIn('AuthenticateByName', docs)
         self.assertIn('System/Info/Public', docs)
         self.assertIn('System/Ping', docs)
         self.assertIn('Users/Public', docs)
-        self.assertIn('MV-11', docs)
         self.assertIn('/Sessions/Playing', docs)
         self.assertIn('embywebsocket', docs)
         self.assertRegex(docs, r'#!/dashboard|hash 路由')
+        self.assertIn('cinema', docs)
+        self.assertIn('handle_path', docs)
 
     def test_caddyfile_validates_with_official_binary(self):
         caddy = find_caddy()
@@ -705,7 +765,7 @@ class EmbyPublicGatewayDocTests(unittest.TestCase):
             self.skipTest('caddy binary not found; set CADDY or add caddy to PATH')
         env = os.environ.copy()
         env['MOVIE_DOMAIN'] = 'movie.example.com'
-        env['EMBY_DOMAIN'] = 'emby.example.com'
+        env['MOVIE3_DOMAIN'] = 'movie3.example.com'
         result = subprocess.run(
             [caddy, 'validate', '--config', str(CADDYFILE), '--adapter', 'caddyfile'],
             capture_output=True, text=True, env=env,
@@ -725,8 +785,7 @@ class _EmbyLiveBase(unittest.TestCase):
             raise unittest.SkipTest(
                 'caddy binary not found; set CADDY or add caddy to PATH')
         source = CADDYFILE.read_text(encoding='utf-8')
-        if '{$EMBY_DOMAIN}' not in source:
-            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        public_site_placeholder(source)
         cls._tmpdir = tempfile.TemporaryDirectory(prefix='movie-emby-gw-')
         workdir = Path(cls._tmpdir.name)
         cert, key = make_self_signed(workdir)
@@ -779,6 +838,10 @@ class _EmbyLiveBase(unittest.TestCase):
 
     def _call(self, path, method='GET', headers=None, raw=False, port=None, body=None):
         port = self.emby_port if port is None else port
+        # On the public movie3 site, bare Emby paths live under /movie.
+        # movie2 (self.movie_port) is never rewritten.
+        if port == self.emby_port:
+            path = public_movie_path(path)
         return request_https(
             port, path, method=method, headers=headers, body=body,
             raw_path=path if raw else None,
@@ -833,7 +896,9 @@ class EmbyPublicLiveAllowTests(_EmbyLiveBase):
         self.assertIn(status, (301, 302, 307, 308), 'status=%s body=%r' % (status, body[:200]))
         location = hdrs.get('Location') or hdrs.get('location')
         self.assertIsNotNone(location)
-        self.assertRegex(location, r'/web/')
+        self.assertRegex(location, r'(?i)^/movie/?$')
+        self.assertEqual(body, b'')
+        self.assertEqual(header_values(hdrs, 'Content-Length'), ['0'])
         self._assert_no_store_and_single_referrer(hdrs, status)
         self.assertEqual(self._stub_hits(), [])
 
@@ -858,7 +923,7 @@ class EmbyPublicLiveDenyTests(_EmbyLiveBase):
     def test_admin_token_does_not_bypass_403(self):
         paths = [
             '/Users', '/Users/New', '/Users/' + USER_ID + '/Policy',
-            '/Plugins', '/System/Info', '/ScheduledTasks',
+            '/Plugins', '/System/Logs', '/ScheduledTasks',
             '/Library/Refresh', '/Library/VirtualFolders',
             '/Devices', '/Auth/Keys', '/Sessions', '/Encoding',
             '/emby/Plugins', '/mediabrowser/Users',
@@ -894,7 +959,9 @@ class EmbyPublicLiveDenyTests(_EmbyLiveBase):
                     self._assert_no_store_and_single_referrer(hdrs, status)
 
     def test_websocket_upgrade_is_403(self):
-        for path in ('/embywebsocket', '/emby/embywebsocket', '/Users/Me', '/socket'):
+        # Official-client path /embywebsocket is allowed (see Movie3 tests).
+        # Upgrade on any other path is still 403 and never reaches relay.
+        for path in ('/Users/Me', '/socket', '/web/index.html'):
             with self.subTest(path=path):
                 with self._lock:
                     self._records.clear()
@@ -984,7 +1051,7 @@ class EmbyPublicLiveCacheTests(_EmbyLiveBase):
                 self.assertEqual(cache_control_values(hdrs), [NO_STORE])
 
     def test_error_responses_are_no_store_including_403_and_404(self):
-        for status_expected, path in ((403, '/Plugins'), (404, '/discover'), (403, '/Users')):
+        for status_expected, path in ((403, '/Plugins'), (404, '/search'), (403, '/Users')):
             with self.subTest(path=path):
                 status, hdrs, body = self._call(path)
                 self.assertEqual(status, status_expected)
@@ -1025,8 +1092,7 @@ class EmbyPublicLiveError502Tests(unittest.TestCase):
             raise unittest.SkipTest(
                 'caddy binary not found; set CADDY or add caddy to PATH')
         source = CADDYFILE.read_text(encoding='utf-8')
-        if '{$EMBY_DOMAIN}' not in source:
-            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        public_site_placeholder(source)
 
     def test_allowed_path_502_has_exactly_one_no_store(self):
         source = CADDYFILE.read_text(encoding='utf-8')
@@ -1043,7 +1109,7 @@ class EmbyPublicLiveError502Tests(unittest.TestCase):
             config_path = workdir / 'Caddyfile'
             config_path.write_text(config, encoding='utf-8')
             with CaddyProcess(self.caddy, config_path, site_port, workdir):
-                status, headers, body = request_https(site_port, '/System/Ping')
+                status, headers, body = request_https(site_port, '/movie/System/Ping')
         self.assertEqual(status, 502, body[:200])
         self.assertEqual(cache_control_values(headers), [NO_STORE])
         self.assertEqual(header_values(headers, 'Referrer-Policy'), ['no-referrer'])
@@ -1212,19 +1278,28 @@ class EmbyPublicLiveFix1OpenlistTests(_EmbyLiveBase):
                 self._assert_forbidden(path, method='GET')
 
     def test_d4_openlist_other_paths_and_methods_are_403(self):
-        cases = [
+        # Management OpenList pages on movie3 are 404 (they stay on movie2).
+        ui = [
             ('GET', '/openlist'),
             ('GET', '/openlist/'),
             ('GET', '/openlist/api'),
             ('GET', '/openlist/api/fs/list'),
             ('GET', '/openlist/p/aliyun/Movies/x.mkv?sign=test-sign'),
+            ('GET', '/OPENLIST/api'),
+        ]
+        for method, path in ui:
+            with self.subTest(method=method, path=path, expect=404):
+                with self._lock:
+                    self._records.clear()
+                self._assert_not_found(path, method=method)
+        # Signed-download path is GET/HEAD only; other methods stay 403.
+        denied = [
             ('POST', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
             ('PUT', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
             ('DELETE', '/openlist/d/aliyun/Movies/x.mkv?sign=test-sign'),
-            ('GET', '/OPENLIST/api'),
         ]
-        for method, path in cases:
-            with self.subTest(method=method, path=path):
+        for method, path in denied:
+            with self.subTest(method=method, path=path, expect=403):
                 with self._lock:
                     self._records.clear()
                 self._assert_forbidden(path, method=method)
@@ -1256,8 +1331,7 @@ class EmbyPublicLiveFix1ImageUpstreamErrorTests(unittest.TestCase):
             raise unittest.SkipTest(
                 'caddy binary not found; set CADDY or add caddy to PATH')
         source = CADDYFILE.read_text(encoding='utf-8')
-        if '{$EMBY_DOMAIN}' not in source:
-            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        public_site_placeholder(source)
         cls._tmpdir = tempfile.TemporaryDirectory(prefix='movie-emby-img4xx-')
         workdir = Path(cls._tmpdir.name)
         cert, key = make_self_signed(workdir)
@@ -1292,7 +1366,7 @@ class EmbyPublicLiveFix1ImageUpstreamErrorTests(unittest.TestCase):
 
     def test_d2_upstream_400_on_image_is_no_store(self):
         status, hdrs, body = request_https(
-            self.emby_port, '/Items/' + ITEM_ID + '/Images/Primary')
+            self.emby_port, '/movie/Items/' + ITEM_ID + '/Images/Primary')
         self.assertEqual(status, 400, body[:200])
         cc = cache_control_values(hdrs)
         self.assertEqual(cc, [NO_STORE], 'D2: upstream 400 carried %s' % cc)
@@ -1374,8 +1448,7 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
             raise unittest.SkipTest(
                 'caddy binary not found; set CADDY or add caddy to PATH')
         source = CADDYFILE.read_text(encoding='utf-8')
-        if '{$EMBY_DOMAIN}' not in source:
-            raise AssertionError('{$EMBY_DOMAIN} site is missing from gateway/Caddyfile')
+        public_site_placeholder(source)
         cls._tmpdir = tempfile.TemporaryDirectory(prefix='movie-emby-redir-')
         workdir = Path(cls._tmpdir.name)
         cert, key = make_self_signed(workdir)
@@ -1420,7 +1493,7 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
 
     def test_d4_stream_location_leaves_movie2_and_uses_openlist_d(self):
         status, hdrs, body = request_https(
-            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true')
+            self.emby_port, '/movie/Videos/' + VIDEO_ID + '/stream?static=true')
         self.assertEqual(status, 307, body[:200])
         locs = header_values(hdrs, 'Location')
         self.assertEqual(len(locs), 1, locs)
@@ -1495,14 +1568,14 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
 
     def test_d6_emby_307_get_headers_and_body_have_no_movie2_or_absolute_url(self):
         status, hdrs, body = request_https(
-            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true', method='GET')
+            self.emby_port, '/movie/Videos/' + VIDEO_ID + '/stream?static=true', method='GET')
         self._assert_3xx_clean(
             status, hdrs, body, 'GET',
             expect_location=r'(?i)^/openlist/d/aliyun/Movies/X\.mkv\?sign=good$')
 
     def test_d6_emby_307_head_headers_and_body_have_no_movie2_or_absolute_url(self):
         status, hdrs, body = request_https(
-            self.emby_port, '/Videos/' + VIDEO_ID + '/stream?static=true', method='HEAD')
+            self.emby_port, '/movie/Videos/' + VIDEO_ID + '/stream?static=true', method='HEAD')
         self._assert_3xx_clean(
             status, hdrs, body, 'HEAD',
             expect_location=r'(?i)^/openlist/d/aliyun/Movies/X\.mkv\?sign=good$')
@@ -1513,7 +1586,7 @@ class EmbyPublicLiveFix1RedirectTests(unittest.TestCase):
             status, hdrs, body = request_https(self.emby_port, '/', method=method)
             self._assert_3xx_clean(
                 status, hdrs, body, 'root-%s' % method,
-                expect_location=r'(?i)^/web/index\.html$')
+                expect_location=r'(?i)^/movie/?$')
 
 
 

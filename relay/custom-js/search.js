@@ -53,6 +53,9 @@
 // User-session handoff stays in postMessage, never in a URL or a server log.
 (() => {
   if(!window.opener || !location.hash.includes('cinemaHandoff=1'))return;
+  // Under /movie (movie3 public wall) keep the prefix; movie2 path /web/... is unchanged.
+  const cinemaPathPrefix=(typeof location.pathname==='string'&&/^\/movie(\/|$)/i.test(location.pathname))?'/movie':'';
+  const cinemaServerAddress=location.origin+cinemaPathPrefix;
   const portal=['127.0.0.1','localhost','[::1]'].includes(location.hostname)?location.protocol+'//'+location.hostname+':8097':location.origin;
   let accepted=false;
   window.addEventListener('message',event=>{
@@ -64,11 +67,11 @@
       if(!Array.isArray(credentials.Servers))credentials.Servers=[];
       let server=credentials.Servers.find(s=>s.Id===auth.server_id);
       if(!server){server={Id:auth.server_id};credentials.Servers.push(server);}
-      Object.assign(server,{Name:auth.name,ManualAddress:location.origin,ManualAddressOnly:true,LocalAddress:location.origin,RemoteAddress:location.origin,LastConnectionMode:2,DateLastAccessed:Date.now(),UserId:auth.user_id});
+      Object.assign(server,{Name:auth.name,ManualAddress:cinemaServerAddress,ManualAddressOnly:true,LocalAddress:cinemaServerAddress,RemoteAddress:cinemaServerAddress,LastConnectionMode:2,DateLastAccessed:Date.now(),UserId:auth.user_id});
       server.Users=(server.Users||[]).filter(u=>u.UserId!==auth.user_id);server.Users.push({UserId:auth.user_id,AccessToken:auth.token});delete server.AccessToken;
       localStorage.setItem('servercredentials3',JSON.stringify(credentials));localStorage.setItem('autoLogin','lastuser');
       accepted=true;window.opener.postMessage({type:'cinema-watch-complete'},portal);
-      location.replace('/web/index.html#!/home');
+      location.replace(cinemaPathPrefix+'/web/index.html#!/home');
     }catch{window.opener.postMessage({type:'cinema-watch-error'},portal);}
   });
   window.opener.postMessage({type:'cinema-watch-ready'},portal);
