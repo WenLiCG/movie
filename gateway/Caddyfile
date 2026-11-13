@@ -6,7 +6,7 @@
 
 {$MOVIE_DOMAIN} {
     encode zstd gzip
-    header Referrer-Policy "no-referrer"
+    header >Referrer-Policy "no-referrer"
     header >Cache-Control "private, no-store"
     redir /search /search/ 308
     redir /discover /discover/ 308
@@ -43,12 +43,94 @@
         path /ge2o /ge2o/*
         not path /ge2o/custom.js /ge2o/custom.css
     }
-    respond @management "Not found" 404
+    handle @management {
+        respond "Not found" 404
+    }
     handle {
         reverse_proxy relay:8095
     }
     handle_errors {
         header Cache-Control "private, no-store"
+        header Referrer-Policy "no-referrer"
     }
 }
 
+# Public movie-wall / playback site. Set EMBY_DOMAIN (for example emby.example.com).
+# This site is not covered by Cloudflare Access. Management stays on {$MOVIE_DOMAIN}.
+# Requests are filtered by path: an admin token does not grant extra APIs here.
+{$EMBY_DOMAIN} {
+    encode zstd gzip
+    header >Referrer-Policy "no-referrer"
+    header >Cache-Control "private, no-store"
+    header >Vary "Authorization, Cookie, X-Emby-Token"
+
+    # Defense in depth: reject raw request-targets whose path (before '?')
+    # contains encoded slashes/dots/backslashes, semicolons, or '//' .
+    # Caddy's path matcher decodes %2F/%2e and cleans '..' before matching;
+    # rejecting these encodings on the raw URI closes bypasses and avoids
+    # sending ambiguous targets to relay. Ordinary clients use literal slashes.
+    @dangerous {
+        expression "{http.request.uri}.matches('(?i)^[^?]*((%2f)|(%2e)|(%5c)|;|//)')"
+    }
+    handle @dangerous {
+        respond "Forbidden" 403
+    }
+
+    # Management UIs and the sibling apps stay on MOVIE_DOMAIN. Hash routes
+    # such as /web/index.html#!/dashboard cannot be blocked by path; the API
+    # whitelist below is the real control.
+    @blocked_pages {
+        path_regexp blocked_pages (?i)^(/emby|/mediabrowser)?/((discover|search|sonarr|qb|openlist|ge2o)(/.*)?|web/(dashboard|configurationpage).*)
+    }
+    handle @blocked_pages {
+        respond "Not found" 404
+    }
+
+    # WebSocket is denied by default (MV-11 will confirm whether the official
+    # Emby App needs /embywebsocket). Any Upgrade: websocket is also denied.
+    @websocket {
+        expression "{http.request.header.Upgrade}.matches('(?i)websocket') || {http.request.uri.path}.matches('(?i)(^|/)embywebsocket')"
+    }
+    handle @websocket {
+        respond "Forbidden" 403
+    }
+
+    @root path /
+    handle @root {
+        redir * /web/index.html 302
+    }
+
+    # Only versioned /web/ static assets with no credentials may be publicly cached.
+    @versioned_public {
+        path_regexp verpub (?i)^(/emby|/mediabrowser)?/web/.+\.(js|css|woff2?|ttf|otf|map|png|svg|ico|webp|jpe?g|gif)$
+        expression "{http.request.uri.query}.matches('(?i)(^|&)(v|version)=') && {http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
+    }
+    header @versioned_public >Cache-Control "public, max-age=31536000, immutable"
+    header @versioned_public >Vary "Accept-Encoding"
+
+    # Anonymous item images may use a short private cache; any token or Cookie forces no-store.
+    @images_anon {
+        path_regexp imganon (?i)^(/emby|/mediabrowser)?/Items/[^/]+/Images
+        expression "{http.request.header.Cookie} == '' && {http.request.header.Authorization} == '' && {http.request.header.X-Emby-Token} == '' && !{http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=')"
+    }
+    header @images_anon >Cache-Control "private, max-age=300"
+
+    # Whitelist (case-insensitive; optional /emby or /mediabrowser prefix).
+    # User ids are Emby GUIDs (32 hex or hyphenated UUID). /Users, /Users/New,
+    # /Users/Public and /Users/{id}/Policy are intentionally not listed.
+    @allowed {
+        path_regexp allow (?i)^(/emby|/mediabrowser)?/(Users/AuthenticateByName/?$|Users/Authenticate/?$|Users/Me/?$|Users/Me/(Items|Views)(/.*)?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(Items|Views)(/.*)?$|Items/[A-Za-z0-9._-]+/?$|Items/[A-Za-z0-9._-]+/Images(/.*)?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Videos/[A-Za-z0-9._-]+(/.*)?$|Audio/[A-Za-z0-9._-]+/stream.*$|Sessions/Playing(/Progress|/Stopped|/Ping)?/?$|Sessions/Logout/?$|System/Info/Public/?$|System/Ping/?$|Shows/[A-Za-z0-9._-]+(/(Episodes|Seasons|NextUp))?/?$|web/?$|web/.*$)
+    }
+    handle @allowed {
+        reverse_proxy relay:8095
+    }
+
+    handle {
+        respond "Forbidden" 403
+    }
+
+    handle_errors {
+        header Cache-Control "private, no-store"
+        header Referrer-Policy "no-referrer"
+    }
+}

@@ -13,6 +13,7 @@ services:
     restart: unless-stopped
     environment:
       MOVIE_DOMAIN: ${MOVIE_DOMAIN:?Run python3 configure.py first}
+      EMBY_DOMAIN: ${EMBY_DOMAIN:-emby.invalid}
     ports:
       - "80:80"
       - "443:443"
