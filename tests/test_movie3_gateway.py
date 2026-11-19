@@ -311,6 +311,26 @@ class Movie3PrefixLiveTests(_EmbyLiveBase):
                         self._records.clear()
                     self._assert_forbidden(labelled, headers=ADMIN_HEADERS)
 
+    def test_system_info_requires_token_on_both_entries(self):
+        for path in ('/System/Info', '/System/Info/'):
+            for labelled in (public_movie_path(path), emby_root_path(path)):
+                with self.subTest(unauth=labelled):
+                    with self._lock:
+                        self._records.clear()
+                    self._assert_forbidden(labelled)
+                with self.subTest(auth=labelled):
+                    with self._lock:
+                        self._records.clear()
+                    self._assert_allowed(labelled, headers={'X-Emby-Token': 'user-session-token'})
+
+    def test_anonymous_public_endpoints_on_both_entries(self):
+        for path in ('/System/Info/Public', '/Users/Public'):
+            for labelled in (public_movie_path(path), emby_root_path(path)):
+                with self.subTest(path=labelled):
+                    with self._lock:
+                        self._records.clear()
+                    self._assert_allowed(labelled)
+
     def test_d5_double_encoding_on_both_entries(self):
         extras = ['/movie' + p if not p.lower().startswith('/movie') else p for p in DOUBLE_ENCODED_RAW]
         extras += [emby_root_path(p) if not p.lower().startswith('/emby') else p for p in DOUBLE_ENCODED_RAW]

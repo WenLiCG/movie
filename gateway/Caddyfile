@@ -170,7 +170,7 @@
 
     @allowed_get_{args[0]} {
         method GET HEAD
-        path_regexp allow_get_{args[0]} (?i)^(/emby|/mediabrowser)?/(Users/Me/?$|Users/Me/(Items|Views|HomeSections|Sections)(/.*)?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(Items|Views|HomeSections|Sections)(/.*)?$|Items/[A-Za-z0-9._-]+/?$|Items/[A-Za-z0-9._-]+/Images(/.*)?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Videos/[A-Za-z0-9._-]+/(stream(\.[A-Za-z0-9]+)?|master\.m3u8|hls[0-9]+/.*|Subtitles/.*)$|Audio/[A-Za-z0-9._-]+/stream.*$|Users/Public/?$|UserSettings/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Items/[A-Za-z0-9._-]+/(Similar|ThemeMedia)/?$|System/Info/Public/?$|System/Info/?$|System/Endpoint/?$|System/Ping/?$|Branding(/.*)?$|Shows/[A-Za-z0-9._-]+(/(Episodes|Seasons|NextUp))?/?$|web/?$|web/.*$)
+        path_regexp allow_get_{args[0]} (?i)^(/emby|/mediabrowser)?/(Users/Me/?$|Users/Me/(Items|Views|HomeSections|Sections)(/.*)?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Users/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/(Items|Views|HomeSections|Sections)(/.*)?$|Items/[A-Za-z0-9._-]+/?$|Items/[A-Za-z0-9._-]+/Images(/.*)?$|Items/[A-Za-z0-9._-]+/PlaybackInfo/?$|Videos/[A-Za-z0-9._-]+/(stream(\.[A-Za-z0-9]+)?|master\.m3u8|hls[0-9]+/.*|Subtitles/.*)$|Audio/[A-Za-z0-9._-]+/stream.*$|Users/Public/?$|UserSettings/([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$|Items/[A-Za-z0-9._-]+/(Similar|ThemeMedia)/?$|System/Info/Public/?$|System/Endpoint/?$|System/Ping/?$|Branding(/.*)?$|Shows/[A-Za-z0-9._-]+(/(Episodes|Seasons|NextUp))?/?$|web/?$|web/.*$)
     }
     handle @allowed_get_{args[0]} {
         reverse_proxy relay:8095 {
@@ -181,6 +181,33 @@
             # unchanged. Any leftover absolute Location is reduced to a path.
             @emby_redir_{args[0]} status 300 301 302 303 307 308
             handle_response @emby_redir_{args[0]} {
+                header Cache-Control "private, no-store"
+                header Referrer-Policy "no-referrer"
+                header Location "{http.reverse_proxy.header.Location}"
+                header Location "(?i)^https?://[^/]+/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+/openlist/d/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^/openlist/p/(.*)$" "/openlist/d/$1"
+                header Location "(?i)^https?://[^/]+(/.*)$" "$1"
+                header Content-Length 0
+                header -Content-Type
+                respond "" {http.reverse_proxy.status_code}
+            }
+        }
+    }
+
+    # Complete /System/Info (not /Public) requires a token at the gateway.
+    # Without one, do not proxy — even if upstream would return full service info.
+    @system_info_authed_{args[0]} {
+        method GET HEAD
+        path_regexp system_info_full_{args[0]} (?i)^(/emby|/mediabrowser)?/System/Info/?$
+        expression "{http.request.header.X-Emby-Token} != '' || {http.request.header.X-Emby-Authorization}.matches('(?i)Token=') || {http.request.header.Authorization}.matches('(?i)Token=') || {http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=[^&]+')"
+    }
+    handle @system_info_authed_{args[0]} {
+        reverse_proxy relay:8095 {
+            header_down -Cache-Control
+            header_down Cache-Control "private, no-store"
+            @emby_redir_info_{args[0]} status 300 301 302 303 307 308
+            handle_response @emby_redir_info_{args[0]} {
                 header Cache-Control "private, no-store"
                 header Referrer-Policy "no-referrer"
                 header Location "{http.reverse_proxy.header.Location}"

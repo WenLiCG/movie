@@ -182,10 +182,10 @@ Emby 自身返回的根绝对路径（`Location`，以及 HTML/JS 里写死的 `
 | 音频流 | `GET /Audio/{id}/stream*` | 播放音轨 |
 | 进度上报 | `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`、`/Sessions/Playing/Ping` | 播放进度 |
 | 会话能力 | `POST /Sessions/Capabilities`、`POST /Sessions/Capabilities/Full` | 网页端登录后上报客户端能力；`GET /Sessions`（列全部会话）仍 403 |
-| 登录选人 | `GET /Users/Public` | 网页端登录页展示可选用户。会暴露登录页可见的用户名与头像（用户枚举）；因实测挡住网页登录流程而补入 |
+| 登录选人 | `GET /Users/Public` | 匿名必要接口，仍然放行，但应返回空列表。测试环境把相应 Emby 用户设为不在登录页显示（隐藏）；网页登录改为手动输入用户名（如 viewer / `manuallogin`）仍可完成。不要用替换响应正文的方式清空列表 |
 | 用户设置 | `GET /UserSettings/{GUID}` | 网页端登录后读取展示偏好。仅 GET，GUID 限定同上 |
 | 品牌资源 | `GET /Branding` 及其子路径（如 `Css`、`Configuration`） | 网页端启动会请求；仅 GET |
-| 公开服务信息 | `GET /System/Info/Public`、`GET /System/Info`、`GET /System/Endpoint` | 网页端登录后会请求完整 `System/Info` 与 `System/Endpoint`。`/System/Configuration`、`/System/Logs` 等仍 403 |
+| 公开服务信息 | 匿名：`GET /System/Info/Public`；需 token：完整 `GET /System/Info`；`GET /System/Endpoint` | `System/Info/Public` 是匿名必要接口。完整 `/System/Info` 必须带 token（`X-Emby-Token` 头、`Authorization` 或 `X-Emby-Authorization` 中的 `Token=`，或非空查询参数 `api_key` / `X-Emby-Token`），否则网关 403，不返回完整服务信息，也不转给上游。网页端登录后带 token 请求完整 `System/Info`。`/System/Configuration`、`/System/Logs` 等仍 403 |
 | 探活 | `GET /System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
 | 剧集墙 | `GET /Shows/{id}`、`/Episodes`、`/Seasons`、`/NextUp` | 电视剧电影墙读取 |
 | 网页静态资源 | `GET /web/` 与 `GET /movie/web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |
@@ -195,7 +195,7 @@ Emby 自身返回的根绝对路径（`Location`，以及 HTML/JS 里写死的 `
 **明确不放行、记入 MV-11 待 App 实测后再逐条补进白名单（不改回黑名单）的项：**
 
 - 其它路径上的 WebSocket（任何非 `/embywebsocket` 的 `Upgrade: websocket`）仍为 403。官方 App 与 Infuse 填带路径的地址是否可用，须由用户用真机验证，不能用网页端结果代替。
-- `/Sessions`（列出全部会话）、`GET /Sessions/Capabilities`（POST 已放行）、`/Sessions/Logout`、`/Users/Authenticate`（非 ByName）、`/DisplayPreferences`、改密接口等：仍 403。挡住了再按需补。 `/Users/Public`、`POST /Sessions/Capabilities(/Full)`、`GET /UserSettings/{GUID}`、`GET /Branding/*`、`GET /System/Info`、`GET /System/Endpoint`、`GET /Users/{GUID}/HomeSections`、`GET /Items/{id}/Similar` 与 `ThemeMedia` 已按网页端完整流程（登录、电影墙、详情、播放）实测补入。
+- `/Sessions`（列出全部会话）、`GET /Sessions/Capabilities`（POST 已放行）、`/Sessions/Logout`、`/Users/Authenticate`（非 ByName）、`/DisplayPreferences`、改密接口等：仍 403。挡住了再按需补。 `/Users/Public`（匿名，空列表）、`POST /Sessions/Capabilities(/Full)`、`GET /UserSettings/{GUID}`、`GET /Branding/*`、完整 `GET /System/Info`（必须带 token）、`GET /System/Endpoint`、`GET /Users/{GUID}/HomeSections`、`GET /Items/{id}/Similar` 与 `ThemeMedia` 已按网页端完整流程（登录、电影墙、详情、播放）实测补入。
 
 缓存：默认以及全部 4xx/5xx（网关自己的 403/404 和上游错误，含 502）为 `Cache-Control: private, no-store`，`Referrer-Policy: no-referrer`（延迟写入，覆盖上游，响应里只出现一次）。带 token、`Authorization`、`Cookie` 或查询参数 `api_key` / `X-Emby-Token` 的响应一律 `private, no-store`。仅不依赖登录状态、带 `v` 或 `version` 查询参数、并且上游返回 2xx/304 的 `/web/` 静态资源（js/css/字体/常见图片扩展名，不含 HTML）可为 `public, max-age=31536000, immutable`。不带凭据且上游 2xx/304 的条目图片可为 `private, max-age=300`；带凭据或任何错误响应仍为 `no-store`，不会 public。默认响应带 `Vary: Authorization, Cookie, X-Emby-Token`；可公共缓存的静态资源改用 `Vary: Accept-Encoding`。Cloudflare 层的缓存与规则须在开放公网之后另测，不在本机 `--resolve` 验证范围内。
 

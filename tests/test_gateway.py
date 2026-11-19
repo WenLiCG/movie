@@ -535,7 +535,6 @@ ALLOW_CASES = [
     ('progress Ping POST', 'POST', '/Sessions/Playing/Ping'),
     ('System/Info/Public', 'GET', '/System/Info/Public'),
     ('System/Info/Public trailing slash', 'GET', '/System/Info/Public/'),
-    ('System/Info (web client after login)', 'GET', '/System/Info'),
     ('System/Endpoint', 'GET', '/System/Endpoint'),
     ('System/Ping', 'GET', '/System/Ping'),
     ('Users/Public login picker', 'GET', '/Users/Public'),
@@ -753,6 +752,10 @@ class EmbyPublicGatewayDocTests(unittest.TestCase):
         self.assertIn('System/Info/Public', docs)
         self.assertIn('System/Ping', docs)
         self.assertIn('Users/Public', docs)
+        self.assertRegex(docs, r'System/Info(?!/Public).*(token|令牌|认证)|完整.*System/Info.*(token|令牌|认证)')
+        self.assertRegex(docs, r'Users/Public.*(空列表|空的列表|\[\])')
+        self.assertRegex(docs, r'不在登录页显示|隐藏用户|IsHidden')
+        self.assertRegex(docs, r'手动输入|手输|manuallogin|手动登录')
         self.assertIn('/Sessions/Playing', docs)
         self.assertIn('embywebsocket', docs)
         self.assertRegex(docs, r'#!/dashboard|hash 路由')
@@ -910,6 +913,74 @@ class EmbyPublicLiveAllowTests(_EmbyLiveBase):
         status, hdrs, body = self._assert_allowed(
             '/Users/' + USER_ID + '/Items?api_key=ADMIN&X-Emby-Token=ADMIN')
         self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
+    def test_system_info_without_token_is_forbidden_and_never_reaches_relay(self):
+        """Complete /System/Info must not return full service info without a token."""
+        paths = (
+            '/System/Info',
+            '/System/Info/',
+            '/emby/System/Info',
+            '/mediabrowser/System/Info',
+            '/system/info',
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._call(path)
+                self.assertEqual(status, 403, 'path=%r body=%r' % (path, body[:200]))
+                self._assert_no_store_and_single_referrer(hdrs, status)
+                self.assertEqual(self._stub_hits(), [], 'relay saw %s for %r' % (self._stub_hits(), path))
+                self.assertNotIn(b'LocalAddress', body)
+                self.assertNotIn(b'WanAddress', body)
+                self.assertNotIn(b'OperatingSystem', body)
+
+    def test_system_info_without_effective_token_is_forbidden(self):
+        """Cookie or empty token query must not satisfy System/Info auth."""
+        cases = (
+            ('/System/Info', {'Cookie': 'sid=1'}),
+            ('/System/Info?api_key=', None),
+            ('/System/Info?X-Emby-Token=', None),
+            ('/emby/System/Info', {'Authorization': 'Bearer not-an-emby-token'}),
+        )
+        for path, headers in cases:
+            with self.subTest(path=path, headers=headers):
+                with self._lock:
+                    self._records.clear()
+                self._assert_forbidden(path, headers=headers)
+
+    def test_system_info_with_token_reaches_relay(self):
+        cases = (
+            ('/System/Info', {'X-Emby-Token': 'user-session-token'}),
+            ('/System/Info/', {
+                'Authorization': 'MediaBrowser Client="EmbyWeb", Token=user-session-token',
+            }),
+            ('/emby/System/Info', {
+                'X-Emby-Authorization': 'MediaBrowser Client="EmbyWeb", Token=user-session-token',
+            }),
+            ('/System/Info?api_key=user-session-token', None),
+            ('/mediabrowser/System/Info?X-Emby-Token=user-session-token', None),
+        )
+        for path, headers in cases:
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._assert_allowed(path, headers=headers)
+                self.assertEqual(cache_control_values(hdrs), [NO_STORE])
+
+    def test_anonymous_public_info_and_users_still_reach_relay(self):
+        for path in (
+            '/System/Info/Public',
+            '/System/Info/Public/',
+            '/emby/System/Info/Public',
+            '/Users/Public',
+            '/Users/Public/',
+            '/emby/Users/Public',
+        ):
+            with self.subTest(path=path):
+                with self._lock:
+                    self._records.clear()
+                self._assert_allowed(path)
 
 
 class EmbyPublicLiveDenyTests(_EmbyLiveBase):
