@@ -323,6 +323,23 @@ class Movie3PrefixLiveTests(_EmbyLiveBase):
                         self._records.clear()
                     self._assert_allowed(labelled, headers={'X-Emby-Token': 'user-session-token'})
 
+    def test_system_info_empty_authorization_token_on_both_entries(self):
+        empty_headers = (
+            {'Authorization': 'MediaBrowser Client="EmbyWeb", Token='},
+            {'X-Emby-Authorization': 'MediaBrowser Client="EmbyWeb", Token='},
+        )
+        for path in ('/System/Info', '/System/Info/'):
+            for labelled in (public_movie_path(path), emby_root_path(path)):
+                for headers in empty_headers:
+                    with self.subTest(path=labelled, headers=headers):
+                        with self._lock:
+                            self._records.clear()
+                        status, hdrs, body = self._call(labelled, headers=headers)
+                        self.assertEqual(status, 403, 'path=%r body=%r' % (labelled, body[:200]))
+                        self.assertEqual(self._stub_hits(), [], 'relay saw %s for %r' % (self._stub_hits(), labelled))
+                        self.assertNotIn(b'LocalAddress', body)
+                        self.assertNotIn(b'UPSTREAM:', body)
+
     def test_anonymous_public_endpoints_on_both_entries(self):
         for path in ('/System/Info/Public', '/Users/Public'):
             for labelled in (public_movie_path(path), emby_root_path(path)):

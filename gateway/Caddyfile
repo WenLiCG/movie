@@ -195,12 +195,13 @@
         }
     }
 
-    # Complete /System/Info (not /Public) requires a token at the gateway.
-    # Without one, do not proxy — even if upstream would return full service info.
+    # Complete /System/Info (not /Public) requires a non-empty token at the gateway.
+    # Empty Token= / api_key= is unauthenticated: 403 and do not proxy.
+    # A non-empty token value is forwarded; the gateway does not validate sessions.
     @system_info_authed_{args[0]} {
         method GET HEAD
         path_regexp system_info_full_{args[0]} (?i)^(/emby|/mediabrowser)?/System/Info/?$
-        expression "{http.request.header.X-Emby-Token} != '' || {http.request.header.X-Emby-Authorization}.matches('(?i)Token=') || {http.request.header.Authorization}.matches('(?i)Token=') || {http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=[^&]+')"
+        expression "{http.request.header.X-Emby-Token} != '' || {http.request.header.X-Emby-Authorization}.matches('(?i)Token=\"?[^,& \"]+\"?') || {http.request.header.Authorization}.matches('(?i)Token=\"?[^,& \"]+\"?') || {http.request.uri.query}.matches('(?i)(^|&)(api_key|X-Emby-Token)=[^&]+')"
     }
     handle @system_info_authed_{args[0]} {
         reverse_proxy relay:8095 {

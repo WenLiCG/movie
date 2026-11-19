@@ -949,6 +949,39 @@ class EmbyPublicLiveAllowTests(_EmbyLiveBase):
                     self._records.clear()
                 self._assert_forbidden(path, headers=headers)
 
+    def test_system_info_empty_authorization_token_is_forbidden_and_never_reaches_relay(self):
+        """Empty Token= in Authorization headers is unauthenticated: gateway 403, 0 upstream hits."""
+        empty = (
+            ('/System/Info', {
+                'Authorization': 'MediaBrowser Client="EmbyWeb", Token=',
+            }),
+            ('/emby/System/Info', {
+                'Authorization': 'MediaBrowser Client="EmbyWeb", Token=',
+            }),
+            ('/System/Info', {
+                'X-Emby-Authorization': 'MediaBrowser Client="EmbyWeb", Token=',
+            }),
+            ('/emby/System/Info', {
+                'X-Emby-Authorization': 'MediaBrowser Client="EmbyWeb", Token=',
+            }),
+            ('/mediabrowser/System/Info', {
+                'Authorization': 'MediaBrowser Client="EmbyWeb", Device="x", Token=',
+            }),
+        )
+        for path, headers in empty:
+            with self.subTest(path=path, headers=headers):
+                with self._lock:
+                    self._records.clear()
+                status, hdrs, body = self._call(path, headers=headers)
+                self.assertEqual(status, 403, 'path=%r body=%r' % (path, body[:200]))
+                self._assert_no_store_and_single_referrer(hdrs, status)
+                self.assertEqual(
+                    self._stub_hits(), [],
+                    'relay saw %s for %r headers=%r' % (self._stub_hits(), path, headers))
+                self.assertNotIn(b'LocalAddress', body)
+                self.assertNotIn(b'WanAddress', body)
+                self.assertNotIn(b'UPSTREAM:', body)
+
     def test_system_info_with_token_reaches_relay(self):
         cases = (
             ('/System/Info', {'X-Emby-Token': 'user-session-token'}),

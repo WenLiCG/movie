@@ -3,7 +3,8 @@
 
 HOST_EMBY is movie3.g60.net (the public wall). Historic bare Emby paths are
 mapped onto /emby or /movie. A separate negative check confirms the old
-emby.g60.net site is no longer serving.
+emby.g60.net site does not return an Emby public payload. An empty 200 is
+not evidence that the host has stopped serving or refused the connection.
 
 Optional stdin JSON: {"user":"...","pw":"..."} for the ordinary-user path
 (login, wall, PlaybackInfo, follow 307 to 206, sign rejection). Credentials
@@ -207,11 +208,65 @@ def d6_redirect_reasons(r, method):
     return reasons
 
 
+_INTERNAL_ADDR_MARKERS = (b"LocalAddress", b"WanAddress", b"ProgramDataPath")
+_PLACEHOLDER_TOKENS = frozenset({
+    "",
+    "admin",
+    "ADMIN",
+    "fake-admin-token-for-gateway-test",
+})
+
+
+def _raw_body(r):
+    raw = r.get("body") or b""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "replace")
+    return raw
+
+
+def has_internal_addresses(r):
+    """True when a response body exposes Emby internal service fields."""
+    blob = _raw_body(r) + b"\n" + (r.get("body_head") or "").encode("utf-8", "replace")
+    return any(marker in blob for marker in _INTERNAL_ADDR_MARKERS)
+
+
+def _token_values(headers, path):
+    values = []
+    headers = headers or {}
+    if "X-Emby-Token" in headers:
+        values.append(str(headers.get("X-Emby-Token") or "").strip().strip('"'))
+    for key in ("Authorization", "X-Emby-Authorization"):
+        if key not in headers:
+            continue
+        raw = str(headers.get(key) or "")
+        for m in re.finditer(r'(?i)\bToken=("?)([^,"\s]*)\1', raw):
+            values.append(m.group(2))
+        if re.search(r'(?i)\bToken=', raw) and not re.search(r'(?i)\bToken=("?)([^,"\s]+)\1', raw):
+            values.append("")
+    query = urllib.parse.urlsplit(path or "").query
+    qs = urllib.parse.parse_qs(query, keep_blank_values=True)
+    for key in ("api_key", "X-Emby-Token", "ApiKey"):
+        if key in qs:
+            values.extend(qs[key])
+    return values
+
+
+def is_empty_or_placeholder_auth(headers, path):
+    """True when no token is presented, or every presented token is empty/placeholder."""
+    values = _token_values(headers, path)
+    if not values:
+        return True
+    return all((v or "") in _PLACEHOLDER_TOKENS or (v or "").lower() == "admin" for v in values)
+
+
 def classify(r):
     body = r["body_head"].strip()
-    if r["status"] == 403 and (body.startswith("Forbidden") or r["body"][:9] == b"Forbidden" or (r["body_len"] == 0 and r["status"] == 403)):
-        # HEAD 403 has empty body — still gateway 403 if we asked HEAD; callers distinguish
-        if body.startswith("Forbidden") or r["body"][:9] == b"Forbidden":
+    raw = r.get("body") or b""
+    if r["status"] == 403:
+        # A 403 whose body still carries internal addresses is not a clean gateway 403.
+        if has_internal_addresses(r):
+            return "upstream-or-other"
+        if body.startswith("Forbidden") or raw[:9] == b"Forbidden":
             return "gateway-403"
     if r["status"] == 404 and "Not found" in body:
         return "gateway-404"
@@ -230,7 +285,10 @@ def check(name, expect, host, path, method="GET", headers=None, raw_path=None, b
     ok, reasons = True, []
     cls = r["classification"]
     if expect == "gateway-403":
-        if cls != "gateway-403" and not (method == "HEAD" and r["status"] == 403):
+        if has_internal_addresses(r):
+            ok = False
+            reasons.append("gateway 403 body leaked internal addresses: %s" % r["body_head"][:80])
+        elif cls != "gateway-403" and not (method == "HEAD" and r["status"] == 403):
             if not (r["status"] in (400, 403) and "upstream" not in cls):
                 ok = False
                 reasons.append("want gateway 403, got %s %s" % (r["status"], r["body_head"][:80]))
@@ -242,6 +300,11 @@ def check(name, expect, host, path, method="GET", headers=None, raw_path=None, b
         if cls in ("gateway-403", "gateway-404"):
             ok = False
             reasons.append("blocked by gateway: %s %s" % (r["status"], r["body_head"][:80]))
+        if has_internal_addresses(r) and is_empty_or_placeholder_auth(headers, path):
+            ok = False
+            reasons.append(
+                "empty or placeholder token must not receive internal addresses (status=%s)"
+                % r["status"])
     elif expect == "redirect-web":
         if r["status"] not in (301, 302, 307, 308):
             ok = False
@@ -413,6 +476,14 @@ def main():
     cases.append(check("System/Info with api_key", "allowed", HOST_EMBY, "/System/Info?api_key=ADMIN"))
     cases.append(check("System/Info cookie only", "gateway-403", HOST_EMBY, "/System/Info", headers={"Cookie": "sid=1"}))
     cases.append(check("System/Info empty api_key", "gateway-403", HOST_EMBY, "/System/Info?api_key="))
+    cases.append(check(
+        "System/Info empty Authorization Token=",
+        "gateway-403", HOST_EMBY, "/System/Info",
+        headers={"Authorization": 'MediaBrowser Client="EmbyWeb", Token='}))
+    cases.append(check(
+        "System/Info empty X-Emby-Authorization Token=",
+        "gateway-403", HOST_EMBY, "/System/Info",
+        headers={"X-Emby-Authorization": 'MediaBrowser Client="EmbyWeb", Token='}))
 
     for path in ("/Users", "/Users/New", "/Plugins", "/ScheduledTasks",
                  "/Library/Refresh", "/Devices", "/Auth/Keys", "/Sessions", "/emby/Plugins"):
@@ -615,20 +686,26 @@ def main():
         loc = (lr.get("location") or [""])[0] if not err else ""
         if loc and ("/movie" in loc.lower() or "/web/" in loc.lower()):
             serving = True
+        if err:
+            classification = "legacy-error"
+        elif not serving:
+            classification = "legacy-not-emby-payload"
+        else:
+            classification = classify(lr) if lr.get("status") else "error"
         cases.append({
-            "name": "legacy emby.g60.net not serving %s %s" % (method, path),
+            "name": "legacy emby.g60.net not an Emby public payload %s %s" % (method, path),
             "path": path, "host": HOST_EMBY_LEGACY, "method": method,
-            "expect": "not serving Emby public wall",
+            "expect": "not an Emby public payload (empty 200 is not stopped or refused)",
             "status": lr["status"], "cache_control": lr.get("cache_control") or [],
             "referrer_policy": lr.get("referrer_policy") or [],
             "location": lr.get("location") or [],
             "content_range": lr.get("content_range") or [],
-            "classification": "legacy-not-serving" if err else classify(lr) if lr.get("status") else "error",
+            "classification": classification,
             "ok": (err is not None) or (not serving),
             "reasons": [] if ((err is not None) or (not serving)) else [
-                "still serving status=%s loc=%s body=%s" % (
+                "still an Emby public payload status=%s loc=%s body=%s" % (
                     lr["status"], loc, (lr.get("body_head") or "")[:80])],
-            "body_head": ("error=%s" % err) if err else "status=%s serving=%s" % (lr["status"], serving),
+            "body_head": ("error=%s" % err) if err else "status=%s emby_payload=%s" % (lr["status"], serving),
         })
 
     # ---- ordinary user path (mv4viewer) ----

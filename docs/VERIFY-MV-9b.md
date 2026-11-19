@@ -1,6 +1,6 @@
 # MV-9b 验证脚本（A 上运行）
 
-本文件与 `scripts/verify_a.py`、`scripts/verify_movie3.py` 一并纳入仓库，供在测试机 A 上复验公网电影墙站点（movie3）及旧 emby 主机名是否已停止提供服务。不含口令、密钥或机器管理凭据。
+本文件与 `scripts/verify_a.py`、`scripts/verify_movie3.py` 一并纳入仓库，供在测试机 A 上复验公网电影墙站点（movie3），以及旧 emby 主机名是否仍返回 Emby 公开载荷。旧主机名上的空 200 只说明响应不是 Emby 公开载荷，不能据此推断主机已关闭或网络层未接通。不含口令、密钥或机器管理凭据。
 
 ## 依赖
 
@@ -39,3 +39,7 @@ stdin 格式：`{"user":"<username>","pw":"<password>"}`。脚本在读入后立
 3. `{$MOVIE3_DOMAIN} {` 改为 `http://movie3.g60.net {`（测试环境当前主机名）
 
 派生后的现场副本不要当作产品仓库的第二份源；复验 A 时核对该派生文件的 sha256 与 inode，并与仓库模板对照上述三处差异。
+
+## 完整 System/Info 的空 Token=
+
+完整 `GET/HEAD /System/Info`（非 `/Public`）在 `/movie` 与 `/emby` 上，若 `Authorization` 或 `X-Emby-Authorization` 只带空的 `Token=`（或空的 `api_key` / `X-Emby-Token`），网关必须返回 403 且不得转给上游。网关只检查 token 值是否非空，不验证真实会话；非空伪 token 仍交上游。验证脚本的 `allowed` 分支遇到空 token 或 ADMIN 等占位伪 token 却拿到含 `LocalAddress` / `WanAddress` 的 200，或 403 `Forbidden` 正文后又出现这些内部地址，不得记为通过。

@@ -185,7 +185,7 @@ Emby 自身返回的根绝对路径（`Location`，以及 HTML/JS 里写死的 `
 | 登录选人 | `GET /Users/Public` | 匿名必要接口，仍然放行，但应返回空列表。测试环境把相应 Emby 用户设为不在登录页显示（隐藏）；网页登录改为手动输入用户名（如 viewer / `manuallogin`）仍可完成。不要用替换响应正文的方式清空列表 |
 | 用户设置 | `GET /UserSettings/{GUID}` | 网页端登录后读取展示偏好。仅 GET，GUID 限定同上 |
 | 品牌资源 | `GET /Branding` 及其子路径（如 `Css`、`Configuration`） | 网页端启动会请求；仅 GET |
-| 公开服务信息 | 匿名：`GET /System/Info/Public`；需 token：完整 `GET /System/Info`；`GET /System/Endpoint` | `System/Info/Public` 是匿名必要接口。完整 `/System/Info` 必须带 token（`X-Emby-Token` 头、`Authorization` 或 `X-Emby-Authorization` 中的 `Token=`，或非空查询参数 `api_key` / `X-Emby-Token`），否则网关 403，不返回完整服务信息，也不转给上游。网页端登录后带 token 请求完整 `System/Info`。`/System/Configuration`、`/System/Logs` 等仍 403 |
+| 公开服务信息 | 匿名：`GET /System/Info/Public`；需 token：完整 `GET /System/Info`；`GET /System/Endpoint` | `System/Info/Public` 是匿名必要接口。完整 `/System/Info` 必须带非空 token（`X-Emby-Token` 头、`Authorization` 或 `X-Emby-Authorization` 中的非空 `Token=`，或非空查询参数 `api_key` / `X-Emby-Token`；空的 `Token=` 视为未认证），否则网关 403，不返回完整服务信息，也不转给上游。网关不验证会话，非空伪 token 仍转上游。网页端登录后带 token 请求完整 `System/Info`。`/System/Configuration`、`/System/Logs` 等仍 403 |
 | 探活 | `GET /System/Ping` | 放行：无敏感信息，官方客户端与 App 用于探测服务器。低风险 |
 | 剧集墙 | `GET /Shows/{id}`、`/Episodes`、`/Seasons`、`/NextUp` | 电视剧电影墙读取 |
 | 网页静态资源 | `GET /web/` 与 `GET /movie/web/` 下的资源（dashboard / configurationpage 除外） | 静态资源 |

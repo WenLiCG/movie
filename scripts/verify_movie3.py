@@ -173,11 +173,65 @@ def d6_redirect_reasons(r, method):
     return reasons
 
 
+_INTERNAL_ADDR_MARKERS = (b"LocalAddress", b"WanAddress", b"ProgramDataPath")
+_PLACEHOLDER_TOKENS = frozenset({
+    "",
+    "admin",
+    "ADMIN",
+    "fake-admin-token-for-gateway-test",
+})
+
+
+def _raw_body(r):
+    raw = r.get("body") or b""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "replace")
+    return raw
+
+
+def has_internal_addresses(r):
+    """True when a response body exposes Emby internal service fields."""
+    blob = _raw_body(r) + b"\n" + (r.get("body_head") or "").encode("utf-8", "replace")
+    return any(marker in blob for marker in _INTERNAL_ADDR_MARKERS)
+
+
+def _token_values(headers, path):
+    values = []
+    headers = headers or {}
+    if "X-Emby-Token" in headers:
+        values.append(str(headers.get("X-Emby-Token") or "").strip().strip('"'))
+    for key in ("Authorization", "X-Emby-Authorization"):
+        if key not in headers:
+            continue
+        raw = str(headers.get(key) or "")
+        for m in re.finditer(r'(?i)\bToken=("?)([^,"\s]*)\1', raw):
+            values.append(m.group(2))
+        if re.search(r'(?i)\bToken=', raw) and not re.search(r'(?i)\bToken=("?)([^,"\s]+)\1', raw):
+            values.append("")
+    query = urllib.parse.urlsplit(path or "").query
+    qs = urllib.parse.parse_qs(query, keep_blank_values=True)
+    for key in ("api_key", "X-Emby-Token", "ApiKey"):
+        if key in qs:
+            values.extend(qs[key])
+    return values
+
+
+def is_empty_or_placeholder_auth(headers, path):
+    """True when no token is presented, or every presented token is empty/placeholder."""
+    values = _token_values(headers, path)
+    if not values:
+        return True
+    return all((v or "") in _PLACEHOLDER_TOKENS or (v or "").lower() == "admin" for v in values)
+
+
 def classify(r):
     body = r["body_head"].strip()
-    if r["status"] == 403 and (body.startswith("Forbidden") or r["body"][:9] == b"Forbidden" or (r["body_len"] == 0 and r["status"] == 403)):
-        # HEAD 403 has empty body — still gateway 403 if we asked HEAD; callers distinguish
-        if body.startswith("Forbidden") or r["body"][:9] == b"Forbidden":
+    raw = r.get("body") or b""
+    if r["status"] == 403:
+        # A 403 whose body still carries internal addresses is not a clean gateway 403.
+        if has_internal_addresses(r):
+            return "upstream-or-other"
+        if body.startswith("Forbidden") or raw[:9] == b"Forbidden":
             return "gateway-403"
     if r["status"] == 404 and "Not found" in body:
         return "gateway-404"
@@ -196,7 +250,10 @@ def check(name, expect, host, path, method="GET", headers=None, raw_path=None, b
     ok, reasons = True, []
     cls = r["classification"]
     if expect == "gateway-403":
-        if cls != "gateway-403" and not (method == "HEAD" and r["status"] == 403):
+        if has_internal_addresses(r):
+            ok = False
+            reasons.append("gateway 403 body leaked internal addresses: %s" % r["body_head"][:80])
+        elif cls != "gateway-403" and not (method == "HEAD" and r["status"] == 403):
             if not (r["status"] in (400, 403) and "upstream" not in cls):
                 ok = False
                 reasons.append("want gateway 403, got %s %s" % (r["status"], r["body_head"][:80]))
@@ -208,6 +265,11 @@ def check(name, expect, host, path, method="GET", headers=None, raw_path=None, b
         if cls in ("gateway-403", "gateway-404"):
             ok = False
             reasons.append("blocked by gateway: %s %s" % (r["status"], r["body_head"][:80]))
+        if has_internal_addresses(r) and is_empty_or_placeholder_auth(headers, path):
+            ok = False
+            reasons.append(
+                "empty or placeholder token must not receive internal addresses (status=%s)"
+                % r["status"])
     elif expect == "redirect-movie":
         if r["status"] not in (301, 302, 307, 308):
             ok = False
@@ -508,6 +570,10 @@ def main():
                            prefix + "/Users", headers=ADMIN))
         cases.append(check("deny System/Info unauth %s" % prefix, "gateway-403", HOST_MOVIE3,
                            prefix + "/System/Info"))
+        cases.append(check(
+            "deny System/Info empty Authorization Token= %s" % prefix,
+            "gateway-403", HOST_MOVIE3, prefix + "/System/Info",
+            headers={"Authorization": 'MediaBrowser Client="EmbyWeb", Token='}))
         cases.append(check("allow System/Info token %s" % prefix, "allowed", HOST_MOVIE3,
                            prefix + "/System/Info", headers=ADMIN))
         cases.append(check("deny System/Logs %s" % prefix, "gateway-403", HOST_MOVIE3,
