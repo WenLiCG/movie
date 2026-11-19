@@ -3,11 +3,11 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const code=fs.readFileSync(require('node:path').join(__dirname,'../relay/custom-js/search.js'),'utf8');
-function page(origin,portal){
+function page(origin,portal,pathname='/web/index.html'){
   const values=new Map(),messages=[],handlers={},opener={postMessage:(data,to)=>messages.push({data,to})};
   let redirect='';
   const window={opener,__cinemaSearchInstalled:true,addEventListener:(name,fn)=>handlers[name]=fn};
-  const location={origin,hostname:new URL(origin).hostname,protocol:new URL(origin).protocol,hash:'#!/login?cinemaHandoff=1',replace:path=>redirect=path};
+  const location={origin,hostname:new URL(origin).hostname,protocol:new URL(origin).protocol,pathname,hash:'#!/login?cinemaHandoff=1',replace:path=>redirect=path};
   vm.runInNewContext(code,{window,location,localStorage:{getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v)},Date});
   return {values,messages,receive:data=>handlers.message(data),opener,redirect:()=>redirect,portal};
 }
@@ -25,4 +25,29 @@ for(const [origin,portal] of [['https://movie.example.com','https://movie.exampl
   assert.equal(p.values.get('autoLogin'),'lastuser');assert.equal(p.redirect(),'/web/index.html#!/home');
   assert(!p.redirect().includes(auth.token));assert.equal(p.messages.at(-1).data.type,'cinema-watch-complete');
 }
-console.log('watch handoff: exact origin/source, same host across tunnel ports, preserved accounts, user token outside URLs');
+// movie3: under /movie the handoff address and home redirect keep the prefix.
+// movie2 (pathname /web/...) must stay on location.origin and /web/index.html.
+{
+  const origin='https://movie3.example.com',portal=origin;
+  const p=page(origin,portal,'/movie/web/index.html?cinemaHandoff=1');
+  const auth={server_id:'server',user_id:'admin',token:'user-session-only',name:'影院'};
+  p.values.set('servercredentials3',JSON.stringify({Servers:[{Id:'another',Users:[{UserId:'other',AccessToken:'other-session'}]}]}));
+  p.receive({origin:portal,source:p.opener,data:{type:'cinema-watch-login',auth}});
+  const saved=JSON.parse(p.values.get('servercredentials3')),s=saved.Servers.find(s=>s.Id==='server');
+  assert.equal(s.ManualAddress,origin+'/movie');
+  assert.equal(s.LocalAddress,origin+'/movie');
+  assert.equal(s.RemoteAddress,origin+'/movie');
+  assert.equal(p.redirect(),'/movie/web/index.html#!/home');
+  assert(!p.redirect().includes(auth.token));
+}
+{
+  // A /movies lookalike (not the /movie prefix) must keep movie2 behaviour.
+  const origin='https://movie2.example.com',portal=origin;
+  const p=page(origin,portal,'/movies/web/index.html');
+  const auth={server_id:'server',user_id:'admin',token:'user-session-only',name:'影院'};
+  p.receive({origin:portal,source:p.opener,data:{type:'cinema-watch-login',auth}});
+  const saved=JSON.parse(p.values.get('servercredentials3')),s=saved.Servers.find(s=>s.Id==='server');
+  assert.equal(s.ManualAddress,origin);
+  assert.equal(p.redirect(),'/web/index.html#!/home');
+}
+console.log('watch handoff: exact origin/source, same host across tunnel ports, preserved accounts, user token outside URLs, movie3 prefix');
