@@ -1,0 +1,18 @@
+# SHA256SUMS-PR7-NOGO-FIX-20261119-0716 — does not include this file
+9e4f7e85294ff8570dd08b5ddd778036b9d70a87cd31788f41121067ce0d4eb9  DELIVERY-MV-9b-PR7-NOGO-FIX-20261119-0716.md
+b10329dd3f73b5123e4e0b410ffb9a2a75f9f4be78f3b55673839a64c578f77a  patches/0004-MV-9b-PR7-nogo-empty-Token-System-Info.patch
+cf66f433d16b397091bc9a96850c66461d1161cf3ba105325a516f4ec7536c58  logs/40-nogo-red-20261119T071040-0800.txt
+83a49312d1fbcade3f4c8a8990bd1762b0253fe8defa0e7725db4e026923e51c  logs/41-nogo-red-retry-20261119T071111-0800.txt
+d0d7ca9be40b91f3c54f83091c136aff9fccbdc9f8a0eaf650ad543458cdbdc1  logs/42-nogo-green-20261119T071358-0800.txt
+88b86eaa38af93e764b2dc8c7337301caed527a0ad1319b11c978ea429eaf069  logs/43-nogo-green-retry-20261119T071410-0800.txt
+5d4c39441328a26bed01dd4adf12573e9c051dcf44072ec4ee3ed47f4f0eb95a  logs/44-nogo-full-unittest-20261119T071418-0800.txt
+f5a4032aa82dae1abc3b5b4658e2ec52f5adf22f2493936f37989bac29ecf677  logs/45-nogo-local-gateway-probe-20261119T071522-0800.txt
+4f004cbecfc31e4b275d33401dd1d7b3289f0de6dc087a8d68a521669bef3927  logs/46-caddy-validate-20261119T071614-0800.txt
+67e0746ede2049d20812ab58ae7c64c19c6e1e7efe5b80fc37b495a0ca6e149e  repo-pr7-nogo/gateway/Caddyfile
+adac817911ec03456e58d12714fac3eef7d911611f8edd900ff872e9808b3b5f  repo-pr7-nogo/docs/SETUP.md
+39ed83517af4145df924e265231d33e0166bddee4faf695751bdd0ec1f30bd7a  repo-pr7-nogo/docs/VERIFY-MV-9b.md
+f4545f0a6810b96867ed1c6034ba96e4dfd80ffdc43833880ed4c82d1deab0d6  repo-pr7-nogo/scripts/verify_a.py
+9da487c310b0aa0987a11f7047134afa0e31af4fb54a7eb64f76b7cf2d970c1e  repo-pr7-nogo/scripts/verify_movie3.py
+76323671cc5b191223efd25eff74fbdfc8f76195c8e36a9f679d2a82f2c70ab8  repo-pr7-nogo/tests/test_gateway.py
+b214642e43d4e96579df157af8928b5f896391cf81e197102d29fc47926faa31  repo-pr7-nogo/tests/test_movie3_gateway.py
+71a1d754348071a4122806704a00012b63e107c0ef1e134e4056d93f474fda99  repo-pr7-nogo/tests/test_verify_scripts.py

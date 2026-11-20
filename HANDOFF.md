@@ -78,3 +78,13 @@ sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
 - **历史现场证据。** 2026-11-03 至 11-04 的记录覆盖真实 HTTPS 登录和 PT 搜索、真实影片云盘发布、直连跳转，以及自建视频和字幕的上传恢复、到期清理、云端联动删除与重新归档。多版本影片验证了授权和实际 307 跳转。原始截图和浏览器记录在验收工作区的 `.impeccable/review/`。详见 [部署记录顶部](docs/DEPLOYMENT.md) 和 [恢复与空间保护](docs/DISCOVER.md#恢复与空间保护)。
 - **本次工作区复核。** Windows 上 Python 共运行 143 项，139 项通过、4 项平台条件跳过。3 个 Node 回归、模拟数据的 Chrome 界面回归、Bash 语法和 Compose 静态检查均通过。已有安装包的外部 SHA-256 和内部源码清单均匹配。
 - **待现场验收。** 第二台空白 VPS 的完整部署，Debian 13/arm64 真机安装，真实客户端长时间播放与续播、实际视频/分片流量及手机真机，还有磁盘压力测试。长期真实 PT 追更和字幕提供方自动下载也需按实际账号及资源核验。现网服务状态以接手当天查询为准。
+
+## 2026-11-19 PST 停止
+
+用户原话（PM 已核实，position 326）：“停止开发，完成handoff后更新到GitHub”。开发停在这里。本节只记录停止交接，不改上面 2026-11-09 段落的事实，也不是那些历史验收的复测。
+
+按 software-handoff v1.3 / workflow v1.4 摘要执行，技能文件未在本线程加载。完整字段在 [docs/archive/2026-11-19-stop/ARCHIVE-NOTE.md](docs/archive/2026-11-19-stop/ARCHIVE-NOTE.md)。安全包正文在 [docs/archive/2026-11-19-stop/](docs/archive/2026-11-19-stop/)。仓库原先没有这个归档目录。
+
+- **no-go。** 冻结候选仍是 Draft PR #7 head `0aabaaede8ba37b70607416a6fde53a4c2992ce1` / tree `f1617efc5a0645fdd1a9791024c565950e880ad9`，base `c792c3fe3312f77c7022aa7f5fcd30f419dbab44`。独立 QA 第二轮 fail/no-go。第一轮 head `9d6c23fd733b447ff708fcf974cf3687cbb19b62` / tree `566ba6edc24ee1631fd35f84e9fc18418dc0cd86` 亦 no-go。两轮结论都保留。2026-11-19 16:08 PST 只读核对时，远程 head 仍是这组 SHA；SHA 未变不是当前 QA 通过。
+- **未测。** A 现场 blocked。真实签名 Range 206、WebSocket 101、官方 App、Infuse、滑条、公网层 unrun。残留验证脚本误判是离线桩证据，不能写成 A 现场泄漏。作者 07:16 PT 修复交接是停止前的唯一作者交付，其中“继续修复 / 应用 / 在 A 复验”已被停止指令取代。作者停止后工作区状态未知。
+- **未合并、未部署。** PR #7 仍是 Draft。本次只加文档，不合并，不部署，不恢复开发。禁止把本段或归档提交当成功能验收。
