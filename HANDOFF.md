@@ -267,4 +267,15 @@ sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
 
 未部署，没有数据库迁移。回滚这个分支不会改变已经下发的 HSTS，因为本节没有发布。代码回滚是revert导入提交 `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1`、独立测试提交 `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` 和包含本节的提交，或直接关闭 PR。不要 force-push，不要改已经推送的提交。
 
-继续：先看 GitHub `regression` 的终态；所有者决定 `.mks`/`.ttml`、`moving` 重试、无 SHA1 发布，以及是否把管理入口拆到独立子域。本节不合并、不部署。
+### GitHub 回归终态
+
+核对时间 2026-11-22T23:50Z。head `b134f6712e193880bc71946d5cd099a802b41065` 上有两次同名 `regression`，都是 Checks API 的 `completed` / `success`。工作流同时监听 `push` 和 `pull_request`，所以一次推送会跑两遍；两边都只构建并测试，没有部署。
+
+| 触发 | 运行 | 作业 | 开始 / 结束 (UTC) | 结论 |
+| --- | --- | --- | --- | --- |
+| push | [45085166225](https://github.com/WenLiCG/movie/actions/runs/45085166225) | [137402009591](https://github.com/WenLiCG/movie/actions/runs/45085166225/job/137402009591) | 23:47:55 / 23:49:46 | success |
+| pull_request | [45085182699](https://github.com/WenLiCG/movie/actions/runs/45085182699) | [137402061701](https://github.com/WenLiCG/movie/actions/runs/45085182699/job/137402061701) | 23:48:06 / 23:49:57 | success |
+
+旧的 combined commit status 没有状态项，`state` 仍显示 `pending`。以 Checks API 的这两次 success 为终态。没有合并，没有部署。
+
+继续由所有者决定 `.mks`/`.ttml`、`moving` 重试、无 SHA1 发布，以及是否把管理入口拆到独立子域。本节不合并、不部署。
