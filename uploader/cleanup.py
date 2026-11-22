@@ -10,6 +10,16 @@ from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative,
 from archive import watch_lock, task_actions, torrent_instance
 
 
+# Media the uploader never archives (other video containers, separate audio tracks, bitmap or
+# other subtitle formats). Deleting a torrent with deleteFiles would lose these for good.
+UNARCHIVED_MEDIA = {'.rmvb', '.rm', '.wmv', '.asf', '.mpg', '.mpeg', '.mpe', '.vob', '.flv', '.f4v', '.3gp',
+                    '.divx', '.ogm', '.ogv', '.mts', '.m2t', '.iso', '.mka', '.flac', '.dts', '.ac3', '.eac3',
+                    '.thd', '.truehd', '.aac', '.mp3', '.m4a', '.opus', '.wav', '.sup', '.idx', '.sub', '.vtt',
+                    '.smi', '.sami', '.usf', '.pgs'}
+# Real samples are small; a "sample"-named file above this is treated as a main feature.
+SAMPLE_LIMIT = 1024 ** 3
+
+
 class Cleaner:
     def __init__(self, uploader, state, settings_path=None):
         self.uploader, self.db, self.state = uploader, uploader.db, Path(state)
@@ -55,7 +65,11 @@ class Cleaner:
             if file.get("progress") != 1:
                 return None
             paths.append(str(path))
+            if path.suffix.lower() in UNARCHIVED_MEDIA:
+                raise Failure('cleanup_unarchived_media')
             if sample(file['name']):
+                if path.suffix.lower() in VIDEO and file.get('size', 0) > SAMPLE_LIMIT:
+                    raise Failure('cleanup_not_archived')
                 continue
             if disc(file['name']):
                 raise Failure('cleanup_unsupported_disc')
@@ -234,7 +248,7 @@ class Cleaner:
                     self.db.execute("INSERT OR REPLACE INTO cleanups(hash,plan,state,reason,retry_at,label) VALUES (?,?,'deferred',?,?,?)",
                         (torrent['hash'],json.dumps({k:torrent.get(k) for k in ('hash','category','save_path','download_path','added_on','completion_on')}
                          | {'published_count':published_count,'retention_days':configured_days}),reason,
-                         now + (86400 if reason in {'cleanup_unsupported_disc','cleanup_subtitle_mapping_missing'} else 300),torrent.get('name','下载任务')))
+                         now + (86400 if reason in {'cleanup_unsupported_disc','cleanup_subtitle_mapping_missing','cleanup_unarchived_media'} else 300),torrent.get('name','下载任务')))
                 log('cleanup',reason)
         for row in self.db.execute("SELECT * FROM cleanups WHERE state='pending' AND retry_at<=?", (now,)).fetchall():
             try:

@@ -217,3 +217,37 @@ class BoundaryTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+
+class ActionBackoffTests(unittest.TestCase):
+    def test_persistent_identical_wait_backs_off_and_new_request_runs_at_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            from uploader import Failure, Uploader
+            from archive import create_actions
+            uploader = Uploader(Mock(), Path(temp), Path(temp) / 'media')
+            try:
+                now = [1000.0]
+                uploader.clock = lambda: now[0]
+                with uploader.db:
+                    create_actions(uploader.db)
+                    uploader.db.execute("INSERT INTO task_actions VALUES ('torrent:x','delete','{}','pending',NULL,1)")
+                calls = []
+                def waiting(sources, action):
+                    calls.append(action['at'])
+                    raise Failure('delete_all_waiting_scan')
+                uploader.process_action = waiting
+                for _ in range(10):
+                    uploader.process_actions(None)
+                # Three immediate repeats of the same wait, then the expensive check is deferred.
+                self.assertEqual(len(calls), 4)
+                now[0] += 301
+                uploader.process_actions(None)
+                self.assertEqual(len(calls), 5)
+                # A new request (new 'at') is not held back by the old streak.
+                with uploader.db:
+                    uploader.db.execute("UPDATE task_actions SET at=2, error=NULL WHERE id='torrent:x'")
+                uploader.process_actions(None)
+                self.assertEqual(calls[-1], 2)
+                self.assertEqual(uploader.db.execute('SELECT state,error FROM task_actions').fetchone()[:], ('pending', 'delete_all_waiting_scan'))
+            finally:
+                uploader.db.close()

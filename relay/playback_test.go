@@ -162,6 +162,35 @@ func TestStrictPlaybackObservesFirstVideoBytesBeforeStreamFinishes(t *testing.T)
 	}
 }
 
+func TestStrictPlaybackIgnoresUnauthorizedEvidence(t *testing.T) {
+	old := playbackLogPath
+	playbackLogPath = filepath.Join(t.TempDir(), "events.jsonl")
+	defer func() { playbackLogPath = old }()
+	playbackRecent = map[string]int64{}
+	router := gin.New()
+	router.Use(PlaybackRecorder())
+	// ApiKeyChecker rejects before granting an item; Emby rejects a forged session report.
+	router.GET("/videos/999/stream", func(c *gin.Context) { c.AbortWithStatus(http.StatusUnauthorized) })
+	router.POST("/Sessions/Playing", func(c *gin.Context) { c.Status(http.StatusUnauthorized) })
+	for i := 0; i < 3; i++ {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/videos/999/stream?api_key=random-"+string(rune('a'+i)), nil))
+		r := httptest.NewRequest("POST", "/Sessions/Playing", strings.NewReader(`{"ItemId":"1"}`))
+		r.Header.Set("X-Emby-Token", "random-"+string(rune('a'+i)))
+		router.ServeHTTP(httptest.NewRecorder(), r)
+	}
+	if raw, err := os.ReadFile(playbackLogPath); err == nil && len(raw) > 0 {
+		t.Fatalf("unauthorized requests were recorded: %s", raw)
+	}
+	// An accepted report is still recorded.
+	router.POST("/Sessions/Playing/Stopped", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	r := httptest.NewRequest("POST", "/Sessions/Playing/Stopped", strings.NewReader(`{"ItemId":"1"}`))
+	r.Header.Set("X-Emby-Token", "valid-token")
+	router.ServeHTTP(httptest.NewRecorder(), r)
+	if raw, _ := os.ReadFile(playbackLogPath); strings.Count(string(raw), "\n") != 1 {
+		t.Fatal("accepted session report missing")
+	}
+}
+
 func TestStrictChineseCloudSourceSurvivesFormEncoding(t *testing.T) {
 	old := config.C
 	defer func() { config.C = old }()

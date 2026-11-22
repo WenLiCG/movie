@@ -28,15 +28,17 @@ function notice(message, error = false) {
 }
 $('dismiss-notice').onclick = () => $('notice').hidden = true;
 async function api(path, body) {
-  const response = await fetch('/discover/api/' + path, {method: body === undefined ? 'GET' : 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: body === undefined ? undefined : JSON.stringify(body)});
-  let data;
-  try { data = await response.json(); } catch { throw new Error('服务暂时不可用，请稍后重试。'); }
+  let response;
+  try { response = await fetch('/discover/api/' + path, {method: body === undefined ? 'GET' : 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: body === undefined ? undefined : JSON.stringify(body)}); }
+  catch { throw new Error('无法连接影院服务，请检查网络后重试。'); }
   if (response.status === 401) signedIn(false);
+  let data;
+  try { data = await response.json(); } catch { throw Object.assign(new Error(response.status === 401 ? '会话已失效，请使用 Emby 管理员账号登录。' : '服务暂时不可用，请稍后重试。'), {status: response.status}); }
   if (!response.ok) throw Object.assign(new Error(data.error || '操作失败，请稍后重试。'), {status: response.status});
   return data;
 }
 async function action(button, work) { button.disabled = true; try { await work(); } catch (error) { notice(error.message, true); } finally { button.disabled = false; } }
-function signedIn(value) { if (value) { $('notice').hidden = true; loadRecommendations(); } if (!value) { recommendationGeneration++; csrf = ''; $('follow-dialog').close(); $('episodes-dialog').close(); $('task-dialog').close(); } $('login').hidden = value; $('workspace').hidden = !value; $('metrics').hidden = !value; $('logout').hidden = !value; $('watch').hidden=!value; document.querySelector('nav').hidden = !value; }
+function signedIn(value) { if (value) { $('notice').hidden = true; loadRecommendations(); } if (!value) { recommendationGeneration++; searchGeneration++; csrf = ''; items = []; submittedReleases.clear(); $('results').replaceChildren(); $('result-count').textContent = ''; $('filters').hidden = true; $('search-warning').hidden = true; $('tv-download-note').hidden = true; $('search').classList.remove('has-results'); $('welcome').hidden = false; ['series-list', 'task-list', 'playback-list'].forEach(id => $(id).replaceChildren()); currentView = 'search'; document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== 'search'); document.querySelectorAll('[data-view]').forEach(el => el.dataset.view === 'search' ? el.setAttribute('aria-current', 'page') : el.removeAttribute('aria-current')); $('follow-dialog').close(); $('episodes-dialog').close(); $('task-dialog').close(); } $('login').hidden = value; $('workspace').hidden = !value; $('metrics').hidden = !value; $('logout').hidden = !value; $('watch').hidden=!value; document.querySelector('nav').hidden = !value; }
 let recommendationGeneration=0;
 async function loadRecommendations(){
   const generation=++recommendationGeneration;
@@ -74,6 +76,7 @@ document.querySelectorAll('[data-view]').forEach(el => el.onclick = () => show(e
 $('login-form').onsubmit = event => { event.preventDefault(); action(event.submitter, async () => { const result = await api('login', {username: $('username').value, password: $('password').value}); csrf = result.csrf; $('password').value = ''; signedIn(true); await status(); await metrics(); }); };
 $('logout').onclick = () => action($('logout'), async () => { await api('logout', {}); csrf = ''; signedIn(false); });
 let searchGeneration=0, searchWarnings=[];
+const submittedReleases=new Set();
 async function search() {
   const generation=++searchGeneration;
   kind=document.querySelector('[name=kind]:checked').value;
@@ -151,7 +154,7 @@ function openFollow(item) {
   $('version-confirm-row').hidden=true;$('version-confirm').required=false;$('replace-version-row').hidden=true;$('existing-version').hidden=true;
   $('follow-scope').hidden=false;
   $('mode').value='all';$('season-label').hidden=true;
-  $('season').replaceChildren(...(item.seasons||[]).map(v=>new Option(`第 ${v.seasonNumber} 季`,v.seasonNumber)));
+  $('season').replaceChildren(...(item.seasons||[]).filter(v=>v.seasonNumber>0).map(v=>new Option(`第 ${v.seasonNumber} 季`,v.seasonNumber)));
   $('submit-version').disabled=false;$('submit-version').textContent='保存追更范围';$('follow-dialog').showModal();
 }
 $('follow-dialog').addEventListener('close',()=>{versionGeneration++;});
@@ -166,11 +169,11 @@ function render() {
     if(item.subtitle)el.firstChild.insertBefore(node('p',item.subtitle,'row-description'),el.firstChild.lastChild);
     if(item.labels?.length){const labels=node('div',undefined,'release-labels');item.labels.forEach(v=>labels.append(node('span',v,'release-label')));el.firstChild.append(labels);}
     if(kind==='tv'){
-      const download=node('button','下载此资源',undefined,'download');download.onclick=()=>action(download,async()=>{const r=await api('download-release',{release_id:item.id});download.textContent='已提交';download.onclick=null;notice(r.message);});
+      const download=node('button',submittedReleases.has(item.id)?'已提交':'下载此资源',undefined,'download');if(submittedReleases.has(item.id))download.disabled=true;else download.onclick=()=>action(download,async()=>{const r=await api('download-release',{release_id:item.id});submittedReleases.add(item.id);download.textContent='已提交';download.onclick=null;notice(r.message);});
       const follow=node('button','按此版本追更','primary','follow');follow.onclick=()=>action(follow,()=>openResource(item));
       const actions=node('div',undefined,'row-actions');actions.append(download,follow);el.append(actions);
     }else{
-      const button=node('button','下载','primary','download');button.onclick=()=>action(button,async()=>{const r=await api('download',{id:item.id});button.textContent='已提交';button.onclick=null;notice(r.message);});el.append(button);
+      const button=node('button',submittedReleases.has(item.id)?'已提交':'下载','primary','download');if(submittedReleases.has(item.id))button.disabled=true;else button.onclick=()=>action(button,async()=>{const r=await api('download',{id:item.id});submittedReleases.add(item.id);button.textContent='已提交';button.onclick=null;notice(r.message);});el.append(button);
     }
     $('results').append(el);
   });
@@ -189,7 +192,7 @@ async function loadEpisodes(generation = episodeGeneration) {
   try {
     const result = await api('episodes', {id: target.id, quality: '1080p'});
     if (generation !== episodeGeneration || !$('episodes-dialog').open) return;
-    episodeSeries = result.series_id; episodeItems = result.items; episodeVersionReady=result.version_ready===true; if(!episodeVersionReady){$('episode-notice').textContent='该剧尚无有效版本规则，请先在剧集／综艺搜索中选择资源并保存版本。';$('episode-notice').hidden=false;}
+    episodeSeries = result.series_id; episodeItems = result.items; episodeVersionReady=result.version_ready===true; if(!episodeVersionReady){$('episode-notice').textContent='该剧尚无有效版本规则，请先在剧集／综艺搜索中选择资源并保存版本。';$('episode-notice').hidden=false;}else if($('episode-notice').textContent.startsWith('该剧尚无有效版本规则'))$('episode-notice').hidden=true;
     const season = $('episode-season').value;
     const seasons = [...new Set(episodeItems.map(e => e.seasonNumber))].sort((a, b) => a - b);
     $('episode-season').replaceChildren(...seasons.map(v => new Option(`第 ${v} 季`, v)));
@@ -230,9 +233,15 @@ $('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter,
   $('follow-dialog').close();notice(result.message||'版本规则已保存。');
   if(mode==='manual')await openEpisodes({id,title});
 });};
+let statusBusy=false, qbCredentialsNeeded=null;
+$('days').addEventListener('input',()=>{$('days').dataset.edited='1';});
 async function status() {
-  const s = await api('status'); $('days').value = s.settings.retention_days;
-  $('openlist-credentials').hidden=!s.credentials.openlist; $('download-credentials').open=s.credentials.qb;
+  if(statusBusy)return;statusBusy=true;
+  try{await loadStatus();}finally{statusBusy=false;}
+}
+async function loadStatus() {
+  const s = await api('status'); if (!$('days').dataset.edited && document.activeElement !== $('days')) $('days').value = s.settings.retention_days;
+  $('openlist-credentials').hidden=!s.credentials.openlist; if (s.credentials.qb !== qbCredentialsNeeded) { $('download-credentials').open=s.credentials.qb; qbCredentialsNeeded=s.credentials.qb; }
   const names = {metadata:'Emby 刮削', uploader:'上传服务', cloud: '阿里云盘', downloader: '下载器', indexers: '搜索站点', television: '追剧连接', retention: '保留时间'};
   const missing = Object.entries(s.checks).filter(([,v]) => !v.complete);
   $('nav-warning').hidden = !missing.length; $('config-warning').hidden = !missing.length;
@@ -243,7 +252,7 @@ async function status() {
 $('config-warning').onclick = () => show('settings');
 $('metadata-defaults').onclick = () => action($('metadata-defaults'), async () => {notice((await api('metadata-defaults', {})).message);await status();});
 $('cloud-form').onsubmit = event => { event.preventDefault(); action(event.submitter, async () => { const r = await api('configure', {openlist_username:$('openlist-user').value,openlist_password:$('openlist-password').value, refresh_token: $('refresh-token').value, qb_username: $('qb-user').value, qb_password: $('qb-password').value}); $('refresh-token').value = ''; $('openlist-password').value=''; $('qb-password').value = ''; notice(r.message); await status(); }); };
-$('retention-form').onsubmit = event => { event.preventDefault(); action(event.submitter, async () => { notice((await api('settings', {retention_days: Number($('days').value)})).message); await status(); }); };
+$('retention-form').onsubmit = event => { event.preventDefault(); action(event.submitter, async () => { notice((await api('settings', {retention_days: Number($('days').value)})).message); delete $('days').dataset.edited; await status(); }); };
 function chooseVersionForSeries(series){
   show('search');document.querySelector('[name=kind][value=tv]').checked=true;$('query').value=series.title;$('search-form').requestSubmit();
 }
@@ -273,13 +282,13 @@ function uploadRow(u, compact=false, short=false) {
   el.firstChild.firstChild.title=name;
   el.firstChild.firstChild.hidden=compact;
   if(u.state==='failed'||u.error==='upload_unconfirmed'||u.error==='move_pending'){
-    const b=node('button',u.state==='failed'?'重新上传':'重新检查');
+    const b=node('button',u.state==='failed'?'重新上传':'重新检查');b.dataset.taskControl=u.id+':retry';
     b.onclick=()=>action(b,async()=>{notice((await api('retry-upload',{id:u.id})).message);await tasks();});el.append(b);
   }
-  if(['openlist_code_401','openlist_code_403'].includes(u.error)){const b=node('button','重新连接云盘');b.onclick=()=>show('settings');el.append(b);}
+  if(['openlist_code_401','openlist_code_403'].includes(u.error)){const b=node('button','重新连接云盘');b.dataset.taskControl=u.id+':reconnect';b.onclick=()=>show('settings');el.append(b);}
   return el;
 }
-let taskTarget=null, tasksBusy=false, taskScope='', taskPreview=0, taskSubmitting=false;
+let tasksAgain=false, taskTarget=null, tasksBusy=false, taskScope='', taskPreview=0, taskSubmitting=false;
 const actionErrors={task_control_failed:'下载器尚未确认，请刷新后重试',task_waiting_for_upload:'等待云盘任务结束后继续处理',upload_unconfirmed:'旧上传状态尚未确认，请检查云盘任务',task_waiting_for_import:'等待站点搜索或剧集入库结束',cleanup_waiting_for_stop:'等待下载器停止',cleanup_waiting_for_removal:'等待下载器移除任务',cleanup_waiting_for_files:'等待本地文件删除完成',cleanup_shared_file:'文件与其他任务共用，已保留；请在高级管理核对',task_changed:'资源已变化，请核对新清单后重新确认',delete_scope_required:'旧删除请求缺少确认清单，请重新预览并确认',cleanup_local_unverified:'无法确认剩余文件的归属，已保留',cleanup_episode_changed:'Sonarr 文件与确认记录不符，已暂停删除',delete_all_not_configured:'Emby 维护连接或索引目录未就绪，尚未完成删除',delete_all_unverified:'缺少云端归属校验记录，保留文件等待核对',delete_all_unsafe_index:'索引内容或备份存在变化，保留索引等待核对',delete_all_waiting_cloud:'等待云盘确认原件已移除',delete_all_waiting_scan:'云端和索引已清理，等待 Emby 扫描完成',delete_all_local_changed:'本地文件内容已变化，已保留，等待核对',remote_hash_mismatch:'云端文件已被替换，已停止以免误删新版本',remote_size_mismatch:'云端文件与归档记录不符，已停止以免误删',remote_hash_unavailable:'云盘校验信息不完整，保留文件等待核对'};
 function keepRemaining(id){
   const keep=node('button','保留剩余文件并结束','quiet');
@@ -376,7 +385,7 @@ $('task-form').onsubmit=async event=>{
   }
 };
 async function tasks() {
-  if(tasksBusy)return;tasksBusy=true;
+  if(tasksBusy){tasksAgain=true;return;}tasksBusy=true;tasksAgain=false;
   const list=$('task-list'), refresh=$('task-refresh-status');
   try {
     const r=await api('tasks');
@@ -438,7 +447,7 @@ async function tasks() {
   } catch(error) {
     refresh.textContent='刷新失败，仍显示上次结果。';
     throw error;
-  } finally {tasksBusy=false;}
+  } finally {tasksBusy=false;if(tasksAgain){tasksAgain=false;tasks().catch(()=>{});}}
 }
 $('watch').onclick=()=>{
   const address=['127.0.0.1','localhost','[::1]'].includes(location.hostname)?location.protocol+'//'+location.hostname+':8095':location.origin;
@@ -486,7 +495,7 @@ async function playbacks(){
 }
 $('refresh-playbacks').onclick=()=>action($('refresh-playbacks'),playbacks);
 async function metrics() { if (metricsBusy || !csrf) return; metricsBusy = true; try { const r = await api('metrics'); $('metrics-time').textContent = '刚刚更新 · 每 10 秒刷新'; for (const name of ['disk', 'memory']) { const v = r[name]; $(name + '-label').textContent = v ? `${size(v.used)} / ${size(v.total)}` : '暂不可用'; if (v) {$(name + '-meter').value = 100 * v.used / v.total; $(name+'-meter').classList.toggle('high',name==='disk'&&v.used/v.total>.85);} } $('cpu-label').textContent = r.cpu === null ? '采样中' : `${r.cpu.toFixed(1)}%`; if (r.cpu !== null) $('cpu-meter').value = r.cpu; } catch { $('metrics-time').textContent = '状态暂不可用，稍后自动重试'; } finally { metricsBusy = false; } }
-setInterval(() => { if (!document.hidden && csrf) { metrics(); if (currentView === 'tasks') tasks().catch(() => {}); if(currentView==='playbacks')playbacks().catch(e=>notice(e.message,true)); } }, 10000);
+setInterval(() => { if (!document.hidden && csrf) { metrics(); if (currentView === 'tasks') tasks().catch(() => {}); if(currentView==='playbacks')playbacks().catch(()=>{}); } }, 10000);
 window.addEventListener('focus', () => { if (csrf && currentView === 'settings') status().catch(e => notice(e.message, true)); });
 (async () => {
   try {
@@ -496,6 +505,7 @@ window.addEventListener('focus', () => { if (csrf && currentView === 'settings')
     await status();
     await metrics();
   } catch(error) {
+    if(!csrf)signedIn(false);
     if(error.status!==401)notice(error.message,true);
   }
 })();

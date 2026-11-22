@@ -462,6 +462,10 @@ class Uploader:
         self.library = Path('/library')
         self.activity = {'phase': 'starting', 'job_id': None, 'at': time.time()}
         self.discovery_issue = None
+        # In-memory backoff for pending cancel/delete actions: (id, at) -> (same-code streak, next try).
+        # Each attempt can stop torrents, re-hash every local file and page Emby, so a long wait
+        # (e.g. for an Emby scan) must not repeat that work every 5 seconds.
+        self.action_backoff, self.clock = {}, time.monotonic
         self.db = sqlite3.connect(Path(state) / "uploads.sqlite3")
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -829,9 +833,17 @@ class Uploader:
             if any((self.library / p['dest'].lstrip('/')).exists() for p in payload['delete_plan']):
                 raise Failure('delete_all_waiting_scan')
 
+    ACTION_FREE_RETRIES, ACTION_MAX_DELAY = 3, 300
+
     def process_actions(self, sources):
-        for action in task_actions(self.state/'uploads.sqlite3'):
+        actions = task_actions(self.state/'uploads.sqlite3')
+        live = {(a['id'], a['at']) for a in actions if a['state'] == 'pending'}
+        self.action_backoff = {k: v for k, v in self.action_backoff.items() if k in live}
+        for action in actions:
             if action['state'] != 'pending' or action['action'] not in {'cancel', 'delete'}:
+                continue
+            key = (action['id'], action['at'])
+            if self.action_backoff.get(key, (0, 0))[1] > self.clock():
                 continue
             with watch_lock(self.state), watch_lock(self.state/'task-controls'):
                 row = self.db.execute('SELECT state,at FROM task_actions WHERE id=?', (action['id'],)).fetchone()
@@ -847,6 +859,12 @@ class Uploader:
                         self.db.execute('UPDATE task_actions SET state=?,error=? WHERE id=?', (state, code, action['id']))
                     if code != action['error']:
                         log(action['id'], code)
+                    # The first few repeats stay immediate; a persistent identical wait backs off up to 5 minutes.
+                    streak = self.action_backoff.get(key, (0, 0))[0] + 1 if code == action['error'] else 1
+                    delay = 0 if streak <= self.ACTION_FREE_RETRIES else min(self.ACTION_MAX_DELAY, 5 * 2 ** (streak - self.ACTION_FREE_RETRIES))
+                    self.action_backoff[key] = (streak, self.clock() + delay)
+                else:
+                    self.action_backoff.pop(key, None)
 
     def process_action(self, sources, action):
         payload = action['payload']

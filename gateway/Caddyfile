@@ -6,7 +6,11 @@
 
 {$MOVIE_DOMAIN} {
     encode zstd gzip
-    header Referrer-Policy "no-referrer"
+    header {
+        Referrer-Policy "no-referrer"
+        # HTTPS-only site; no includeSubDomains or preload so other hosts on the domain are unaffected.
+        Strict-Transport-Security "max-age=31536000"
+    }
     redir /search /search/ 308
     redir /discover /discover/ 308
     redir /sonarr /sonarr/ 308
@@ -44,7 +48,11 @@
     }
     respond @management "Not found" 404
     handle {
-        reverse_proxy relay:8095
+        # The admin gate cookie is only for /discover/ and the native consoles; Emby never needs it.
+        header X-Frame-Options "SAMEORIGIN"
+        reverse_proxy relay:8095 {
+            header_up Cookie "(?:^|(;)\s*)cinema=[^;]*(?:;\s*)?" "$1"
+        }
     }
 }
 

@@ -94,6 +94,39 @@ class CleanupTests(unittest.TestCase):
         self.sources.sonarr.request.assert_not_called()
         self.remote.call.assert_not_called()
 
+    def test_unarchived_media_in_the_torrent_blocks_automatic_deletion(self):
+        # film.mkv is published, but the torrent also carries files the uploader never archives.
+        for name in ('film.sup', 'film.mka', 'extras/film.rmvb'):
+            extra = self.path.parent / name
+            extra.parent.mkdir(parents=True, exist_ok=True)
+            extra.write_bytes(b'not in the cloud')
+            self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
+                          {'name': name, 'size': extra.stat().st_size, 'priority': 1, 'progress': 1}]
+            self.uploader.db.execute('DELETE FROM cleanups'); self.uploader.db.commit()
+            self.run_cleanup()
+            self.assertTrue(extra.exists(), name)
+            self.assertTrue(self.path.exists())
+            self.assertEqual(self.deleted, [])
+            self.assertEqual(self.uploader.db.execute('SELECT state, reason FROM cleanups').fetchone()[:], ('deferred', 'cleanup_unarchived_media'))
+            extra.unlink()
+        # Disposable extras (artwork, NFO, fonts) still allow cleanup after the video is verified.
+        (self.path.parent / 'film.nfo').write_text('info')
+        self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
+                      {'name': 'film.nfo', 'size': 4, 'priority': 1, 'progress': 1}]
+        self.uploader.db.execute('DELETE FROM cleanups'); self.uploader.db.commit()
+        self.run_cleanup()
+        self.assertEqual(self.deleted, ['a' * 40])
+
+    def test_large_sample_named_video_is_not_treated_as_disposable(self):
+        big = self.path.parent / 'Sample.People.2000.1080p.mkv'
+        big.write_bytes(b'x')
+        self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
+                      {'name': big.name, 'size': 3 * 1024 ** 3, 'priority': 1, 'progress': 1}]
+        self.run_cleanup()
+        self.assertTrue(big.exists())
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_not_archived')
+
     def test_missing_cloud_changed_source_and_shared_payload_are_preserved(self):
         self.remote.find.return_value = None
         self.run_cleanup()
