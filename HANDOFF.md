@@ -2,9 +2,9 @@
 
 更新于 2026-11-22（北京时间）。项目把 PT 搜索、下载做种、云盘归档和 Emby 播放串在一起。`/discover/` 是管理员操作台，域名根路径是 Emby 电影墙。Python 服务使用标准库，前端直接提供静态文件，relay 通过固定版本的 Go 上游和本仓库补丁构建。
 
-## 当前修复分支
+## 2026-11-22 交付范围
 
-`codex/cinema-review-fixes` 基于 `main` 的 `02eb4cd`。本批覆盖全库审查中可以在代码和配置中处理的问题。源码回归、安装包解包回归和模拟部署已完成，真实 VPS 升级与实际客户端验收待执行。GitHub 上的回归结果按提交查看。[修复分支](https://github.com/WenLiCG/movie/tree/codex/cinema-review-fixes) · [分支回归](https://github.com/WenLiCG/movie/actions?query=branch%3Acodex%2Fcinema-review-fixes)
+本批修复从 `02eb4cd` 开始，在 `codex/cinema-review-fixes` 完成后并入 `main`。源码回归、安装包解包回归和模拟部署已完成，真实 VPS 升级与实际客户端验收待执行。接手从 `main` 取得源码，GitHub 回归结果按提交查看。[修复提交](https://github.com/WenLiCG/movie/commit/58c4b6c65aa44eb12691819bed507528e33835c2) · [修复分支回归](https://github.com/WenLiCG/movie/actions/runs/45018426641) · [main 回归](https://github.com/WenLiCG/movie/actions?query=branch%3Amain)
 
 | 范围 | 接手时需要知道的行为 |
 | --- | --- |
@@ -16,7 +16,7 @@
 
 ## 接手当天
 
-1. **取得源码。** 从 GitHub 克隆 `WenLiCG/movie`。复核本批修复时检出 `codex/cinema-review-fixes`，构建安装包前记录 `git rev-parse HEAD`。打包范围见 [scripts/build_all_in_one.py](scripts/build_all_in_one.py)。
+1. **取得源码。** 从 GitHub 克隆 `WenLiCG/movie` 的 `main`，构建安装包前记录 `git rev-parse HEAD`。打包范围见 [scripts/build_all_in_one.py](scripts/build_all_in_one.py)。
 2. **跑本地回归。** 从项目根目录运行下一节的命令。做 UI 改动可先用模拟 API 跑页面，验证真实下载或播放再使用隔离测试环境。
 3. **需要接管现有部署时，先取得权限。** 请项目所有者单独交接 VPS 的 SSH/sudo、域名和 Cloudflare DNS 管理、Emby 管理员、各原生应用的管理入口，以及阿里云盘和 PT 的授权途径。先在 VPS 核对当前服务和配置，再参照有日期的 [部署记录](docs/DEPLOYMENT.md)。
 
