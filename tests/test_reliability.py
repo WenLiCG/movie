@@ -66,6 +66,38 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.service.puts, 1)
         self.assertEqual(self.service.moves, 0)
 
+    def test_quarantined_upload_allows_other_work_with_reserved_space(self):
+        self.service.task_state = 1
+        self.run_upload()
+        job = self.row()
+        self.uploader.update(job, state='uploading', task_id=None)
+        self.remote.tasks = lambda: []
+        self.service.objects[job['stage']].pop('hash_info')
+        other = test_uploader.candidate('movie:456:0', self.source, '/aliyun/Movies/Other/Movie.mkv', self.item['size'])
+        self.service.task_state = 2
+        with patch('uploader.shutil.disk_usage', return_value=Mock(free=2*1024**3+other['size'])):
+            self.run_upload([self.item, other])
+        self.assertEqual(self.service.puts, 1)
+        self.assertEqual(self.uploader.db.execute('SELECT error FROM jobs WHERE id=?', (other['id'],)).fetchone()[0],
+                         'upload_cache_space_low')
+        with self.uploader.db:
+            self.uploader.db.execute('UPDATE jobs SET retry_at=0 WHERE id=?', (other['id'],))
+        self.run_upload([self.item, other])
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?', (other['id'],)).fetchone()[0], 'published')
+        self.assertEqual((self.service.puts, self.service.moves), (2, 1))
+        self.assertIn(job['stage'], self.service.objects)
+
+    def test_episode_zero_and_invalid_legacy_mapping_are_isolated(self):
+        self.item.update(tvdb_id=42, episode_keys='[[1,0]]')
+        self.run_upload()
+        self.assertEqual(archived_keys(self.state/'uploads.sqlite3', 42), {(1,0)})
+        other = test_uploader.candidate('movie:456:0', self.source, '/aliyun/Movies/Other/Movie.mkv', self.item['size'])
+        with self.uploader.db:
+            self.uploader.db.execute("UPDATE jobs SET state='moving',episode_keys='[[1,-1]]'")
+        self.run_upload([other])
+        self.assertEqual(self.uploader.db.execute('SELECT error FROM jobs WHERE id=?', (self.item['id'],)).fetchone()[0], 'archive_job_invalid')
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?', (other['id'],)).fetchone()[0], 'published')
+
     def test_strong_evidence_recovers_lost_put_response(self):
         self.service.task_state = 1
         self.run_upload()

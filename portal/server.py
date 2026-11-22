@@ -20,17 +20,25 @@ import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from configure import private_write
-from integration import Client, connect_services, read_api_key, emby_defaults
+from configure import private_write, write_relay_token
+from integration import APIError, Client, connect_services, read_api_key, emby_defaults
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, video, SUBTITLES, create_actions, task_actions
+from archive import archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, video, SUBTITLES, create_actions, task_actions, delete_target
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
         "prowlarr": "http://prowlarr:9696/search"}
 STATIC = Path(__file__).parent
+
+
+class TaskScopeChanged(ValueError):
+    pass
+
+
+class SessionCheckUnavailable(Exception):
+    pass
 
 
 def archive_error(code):
@@ -57,6 +65,9 @@ def archive_error(code):
         'subtitle_pending': '等待同名外挂字幕发布。',
         'remote_hash_unavailable': '云盘尚未提供完整校验证据，保留源文件并等待确认。',
         'move_retry_ready': '云端移动已结束，等待重新发布。',
+        'archive_job_invalid': '归档资料未通过核对，请检查剧集编号及上传任务。',
+        'invalid_episode_mapping': '剧集编号无效，等待 Sonarr 提供可确认的集数。',
+        'destination_reserved': '已有归档任务占用此云端路径，请核对旧任务和保留的版本。',
     }
     return messages.get(code, '归档暂未完成，请查看云盘任务。') if code else ''
 
@@ -174,20 +185,32 @@ class App:
         return sid, session
 
     def authenticate(self, sid):
-        session = self.sessions.get(sid)
-        if not session or session["expires"] <= time.time():
-            raise PermissionError("请重新登录。")
+        with self.lock:
+            session = self.sessions.get(sid)
+            if not session or session["expires"] <= time.time():
+                self.sessions.pop(sid, None)
+                raise PermissionError("请重新登录。")
         client = self.client("emby")
+        client.timeout = 10
         client.opener.addheaders = [("X-Emby-Token", session["token"])]
         try:
             user = client.json("GET", "/Users/" + session["user"])
-        except ValueError:
-            self.sessions.pop(sid, None)
-            raise PermissionError("会话失效。") from None
-        if user.get("Policy", {}).get("IsAdministrator") is not True or user.get("Policy", {}).get("IsDisabled"):
-            self.sessions.pop(sid, None)
-            raise PermissionError("管理员权限已失效。")
-        return session
+            policy = user.get('Policy') if isinstance(user, dict) else None
+            if not isinstance(policy, dict) or type(policy.get('IsAdministrator')) is not bool:
+                raise SessionCheckUnavailable()
+        except APIError as error:
+            if error.status not in {401, 403, 404}:
+                raise SessionCheckUnavailable() from None
+            policy = {}
+        except (ValueError, OSError):
+            raise SessionCheckUnavailable() from None
+        with self.lock:
+            if policy.get('IsAdministrator') is not True or policy.get('IsDisabled'):
+                self.sessions.pop(sid, None)
+                raise PermissionError("管理员权限已失效。")
+            if self.sessions.get(sid) is not session or session['expires'] <= time.time():
+                raise PermissionError("请重新登录。")
+            return session
 
     def watch_session(self, session):
         info=self.client('emby').json('GET','/System/Info/Public')
@@ -268,7 +291,7 @@ class App:
         private_write(self.state / "config.json", json.dumps({**{k:v for k,v in config.items() if k in {'emby_url','emby_token'}}, "openlist_url": self.origins["openlist"],
                       "openlist_token": token, "qb_url": self.origins["qb"], "qb_username": username,
                       "qb_password": password, "sonarr_url": self.origins["sonarr"], "sonarr_api_key": sonarr_key}))
-        private_write(self.state / "openlist-token", token)
+        write_relay_token(self.state / 'relay-token', token)
         return {"message": "阿里云盘与下载器已连接，自动上传已就绪。"}
 
     def playbacks(self, session):
@@ -324,14 +347,10 @@ class App:
         if query and missing:
             found = fetch(query)
             matches.extend(found or [])
-            for v in missing:
-                self.localized[v['tvdbId']] = {'expires': time.time() + (86400 if found is not None else 300)}
         if not query:
-            missing = [v for v in values if self.localized.get(v['tvdbId'], {}).get('expires', 0) < time.time()]
             with ThreadPoolExecutor(max_workers=4) as pool:
-                for v, result in zip(missing, pool.map(lambda v: fetch(v['title'], v), missing)):
+                for result in pool.map(lambda v: fetch(v['title'], v), missing):
                     matches.extend(result or [])
-                    self.localized[v['tvdbId']] = {'expires': time.time() + (86400 if result is not None else 300)}
         for value in values:
             for match in matches:
                 ids = match.get('ProviderIds') or {}
@@ -341,6 +360,12 @@ class App:
                     self.localized[value['tvdbId']] = {'title': match['Name'], 'overview': match.get('Overview'), 'expires': time.time() + 86400}
                     break
         result = {}
+        if not query:
+            with self.lock:
+                for value in missing:
+                    key = value['tvdbId']
+                    if self.localized.get(key, {}).get('expires', 0) < time.time():
+                        self.localized[key] = {'expires': time.time() + 300}
         for value in values:
             cached = self.localized.get(value['tvdbId'], {})
             aliases = value.get('alternateTitles') or []
@@ -421,11 +446,14 @@ class App:
                 try:
                     return indexer['id'], metadata(indexer, query, kind)
                 except (ValueError, OSError, KeyError, TypeError, LookupError):
-                    return indexer['id'], {}
+                    return indexer['id'], None
             with ThreadPoolExecutor(max_workers=4) as pool:
                 supplements = dict(pool.map(load, indexers))
+            if any(value is None for value in supplements.values()):
+                warnings.append('部分站点的附加资料暂时不可用。')
         except (ValueError, OSError):
-            pass
+            if values:
+                warnings.append('站点附加资料暂时不可用。')
         session['results'] = {k:v for k,v in session.get('results',{}).items() if v[0] > time.time()}
         if len(session['results']) > 5000:
             session['results'] = {}
@@ -434,7 +462,7 @@ class App:
             rid = secrets.token_urlsafe(12)
             session["results"][rid] = (time.time() + 1800, {**value, '_kind': kind, '_query': query})
             resolution, codec = tags(value["title"])
-            extra = supplements.get(value['indexerId'], {}).get(resource_id(value), {})
+            extra = (supplements.get(value['indexerId']) or {}).get(resource_id(value), {})
             version, span = details(value['title'])
             resolution, codec = version['resolution'] or resolution, version['codec'] or codec
             items.append({"id": rid, "title": value["title"], "size": value["size"], "seeders": value.get("seeders"),
@@ -685,7 +713,7 @@ class App:
         key='series:'+str(tvdb)
         value=next((a for a in task_actions(self.data/'uploads.sqlite3') if a['id']==key),None)
         if value and value['action'] in {'cancel','delete'}:
-            if value['state']=='pending':
+            if value['state'] in {'pending', 'blocked'}:
                 raise ValueError('请等待任务取消或删除完成，再恢复追更。')
             with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                 db.execute("UPDATE task_actions SET state='released' WHERE id=?",(key,))
@@ -796,24 +824,29 @@ class App:
             sonarr.json('POST','/api/v3/command',{'name':'EpisodeSearch','episodeIds':ids[start:start+100]})
         return {'message': f'已提交 {len(ids)} 集的搜索任务；仅下载符合该剧版本规则的资源；没有匹配就等待。'}
 
-    def uploads(self):
+    def uploads(self, all_jobs=False):
         path = self.state / "data/uploads.sqlite3"
         if not path.exists():
             return []
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db, db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db, db:
             db.row_factory = sqlite3.Row
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
                 return []
             columns={r[1] for r in db.execute('PRAGMA table_info(jobs)')}
             where='WHERE hidden=0' if 'hidden' in columns else ''
-            values = [dict(r) for r in db.execute('SELECT * FROM jobs '+where+' ORDER BY rowid DESC LIMIT 1000')]
+            limit = '' if all_jobs else ' LIMIT 1000'
+            values = [dict(r) for r in db.execute('SELECT * FROM jobs '+where+' ORDER BY rowid DESC'+limit)]
         position = 0
         values.reverse()
+        fields = {'id', 'source', 'dest', 'state', 'error', 'progress', 'retry_at', 'torrent_hash', 'parent_id',
+                  'queue_position', 'size', 'tvdb_id', 'download_source', 'added_on'}
+        if all_jobs:
+            fields.update({'identity', 'sha1'})
         for item in values:
             if item['state'] == 'pending':
                 position += 1
             item['queue_position'] = position if item['state'] == 'pending' else None
-        return [{k:v for k,v in item.items() if k in {'id','source','dest','state','error','progress','retry_at','torrent_hash','parent_id','queue_position','size','tvdb_id','download_source','added_on'}}
+        return [{k:v for k,v in item.items() if k in fields}
                 | {'error_message': archive_error(item['error'])} for item in values]
 
     def retry_upload(self, body):
@@ -825,11 +858,16 @@ class App:
             db.execute('UPDATE jobs SET retry_requested=?,retry_at=0 WHERE id=?', (int(job[0]=='failed'),job_id))
         return {'message':'已请求重新检查；只有确认旧任务结束后才会重传。'}
 
-    def tasks(self, session=None):
+    def tasks(self, session=None, all_jobs=False):
         # shortcut: cap queue/history views at 1000 files; paginate for a larger multi-user library.
         qb = self.qb()
         torrents = [v for v in qb.json('GET','/api/v2/torrents/info') if v.get('category') in {'cinema-movies','cinema-tv','sonarr-tv'}]
-        uploads = self.uploads()
+        uploads = self.uploads(all_jobs)
+        by_hash, children = collections.defaultdict(list), collections.defaultdict(list)
+        visible_ids = {j['id'] for j in uploads}
+        for job in uploads:
+            by_hash[job.get('torrent_hash')].append(job)
+            children[job.get('parent_id')].append(job)
         sonarr=self.client('sonarr')
         series=sonarr.json('GET','/api/v3/series')
         by_id={s['id']:s for s in series}
@@ -838,7 +876,8 @@ class App:
         native_hash={q['downloadId'].lower():by_id.get(q.get('seriesId') or (q.get('series') or {}).get('id')) for q in queue if q.get('downloadId')}
         names=self.localize(session,series) if session else {}
         def build(t):
-            jobs = [j for j in uploads if j.get('torrent_hash') == t['hash']]
+            jobs = [j for j in by_hash.get(t['hash'], []) if not j.get('added_on') or j['added_on'] == t.get('added_on')]
+            jobs = list({v['id']:v for j in jobs for v in [j, *children.get(j['id'], [])]}.values())
             files=[{k:v.get(k) for k in ('index','name','progress','size','priority')} for v in qb.json('GET','/api/v2/torrents/files?'+urlencode({'hash':t['hash']}))]
             for file in files:
                 path=Path(t['save_path'])/file['name']
@@ -848,7 +887,7 @@ class App:
             native=native_hash.get(t['hash'].lower())
             if native:tvdbs.add(native['tvdbId'])
             tvdb=next(iter(tvdbs)) if len(tvdbs)==1 and t['category']=='sonarr-tv' else None
-            return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb}
+            return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','download_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb}
         with ThreadPoolExecutor(max_workers=4) as pool:
             resources=list(pool.map(build,torrents))
         groups={}
@@ -863,11 +902,11 @@ class App:
             value=group(key,resource['tvdb_id'],resource['name'])
             value['resources'].append(resource);value['uploads'].extend(resource['uploads']);linked.update(j['id'] for j in resource['uploads'])
         for job in uploads:
-            if job['id'] in linked or job.get('parent_id'):
+            if job['id'] in linked or job.get('parent_id') in visible_ids:
                 continue
             key='series:'+str(job['tvdb_id']) if job.get('tvdb_id') else ('torrent:'+job['torrent_hash'] if job.get('torrent_hash') else 'job:'+job['id'])
             value=group(key,job.get('tvdb_id'),job['dest'].removeprefix('/aliyun/').split('/')[1])
-            value['uploads'].extend([job,*[j for j in uploads if j.get('parent_id')==job['id']]])
+            value['uploads'].extend([job, *[j for j in children[job['id']] if j['id'] not in linked]])
         for action in task_actions(self.data/'uploads.sqlite3'):
             if action['action']=='delete' and action['state']=='done':
                 continue
@@ -878,14 +917,23 @@ class App:
                 if action['id'].startswith('torrent:'):
                     current=next((r for r in groups[key]['resources'] if 'torrent:'+r['hash']==action['id']),None)
                     old=next((t for t in payload['torrents'] if 'torrent:'+t['hash']==action['id']),None)
-                    if current and old and current['added_on']!=old['added_on']:
+                    if current and old and current['added_on']!=old['added_on'] and action['state'] not in {'pending','blocked'}:
                         continue
                 status={k:action[k] for k in ('id','action','state','error')}
+                status['can_keep'] = bool(payload.get('delete_files') and action['state'] in {'pending', 'blocked'} and action['error'])
                 if action['id']==key:groups[key]['action']=status
                 else:groups[key]['resource_actions'][action['id']]=status
         for value in groups.values():
             value['file_count']=len(value['uploads'])+sum(sum(1 for f in r['files'] if not f.get('job_id')) for r in value['resources'])
-        return {'items':list(groups.values())}
+        issue = None
+        try:
+            heartbeat = json.loads((self.data/'heartbeat.json').read_text())
+            found = heartbeat.get('discovery_issue')
+            if isinstance(found, dict) and time.time()-heartbeat['at'] < 300:
+                issue = {'dest':found['dest'],'message':archive_error(found['error'])}
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        return {'items':list(groups.values()), 'discovery_issue':issue}
 
     def ensure_emby_maintenance(self, session):
         client = self.client('emby')
@@ -903,13 +951,24 @@ class App:
 
     def task_action(self, session, body):
         action=body.get('action')
-        if (action not in {'pause','resume','cancel','delete'} or type(body.get('delete_files',False)) is not bool
+        if (action not in {'pause','resume','cancel','delete','keep-remaining'} or type(body.get('delete_files',False)) is not bool
                 or type(body.get('delete_all',False)) is not bool
+                or type(body.get('preview',False)) is not bool
+                or (body.get('preview') and (action != 'delete' or body.get('delete_files') is not True))
+                or (body.get('delete_files') and action != 'delete')
                 or (body.get('delete_all') and (action != 'delete' or body.get('delete_files') is not True))):
             raise ValueError('请选择有效的任务操作。')
         key=text(body.get('id'),100)
         with watch_lock(self.data), watch_lock(self.data/'task-controls'):
-            groups=self.tasks(session)['items']
+            actions = {a['id']: a for a in task_actions(self.data/'uploads.sqlite3')}
+            previous = actions.get(key)
+            if action == 'keep-remaining':
+                if not previous or previous['state'] not in {'pending', 'blocked'} or not previous['payload'].get('delete_files'):
+                    raise ValueError('请刷新任务列表，删除请求已处理。')
+                with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
+                    db.execute("UPDATE task_actions SET state='done',error=NULL WHERE id=?", (key,))
+                return {'message': '已结束删除请求，保留仍存在的文件。'}
+            groups=self.tasks(all_jobs=action=='delete')['items']
             group=next((g for g in groups if g['id']==key),None)
             resource=None
             if not group:
@@ -917,21 +976,44 @@ class App:
                 if not pair:raise ValueError('请刷新任务列表，项目已变化。')
                 group,resource=pair
             resources=[resource] if resource else group['resources']
-            jobs=resource['uploads'] if resource else group['uploads']
+            jobs=list({j['id']:j for j in (resource['uploads'] if resource else group['uploads'])}.values())
+            torrents = [{k:r[k] for k in ('hash','name','category','save_path','download_path','added_on')}
+                        | {'files':[{k:f[k] for k in ('name','size')} for f in r['files']]} for r in resources]
             payload={'name':resource['name'] if resource else group['name'],'group':group['id'],
                      'tvdb_id':group['tvdb_id'] if not resource else None,'series_id':group['series_id'],
-                     'torrents':[{k:r[k] for k in ('hash','name','category','save_path','added_on','files')} for r in resources],
+                     'torrents':torrents,
                      'jobs':[j['id'] for j in jobs],'delete_files':action=='delete' and body.get('delete_files',False),
                      'delete_all':body.get('delete_all',False)}
+            if payload['delete_files']:
+                if not jobs and not torrents:
+                    raise ValueError('请刷新任务列表，当前没有可删除的文件。')
+                if any(type(t['added_on']) is not int or t['added_on'] <= 0 for t in torrents):
+                    raise ValueError('下载器尚未返回资源身份，请稍后重新预览。')
+                payload['delete_targets'] = sorted((delete_target(j) for j in jobs), key=lambda j:j['id'])
+                payload['delete_plan'] = sorted(
+                    ({k:j.get(k) for k in ('id','dest','size','sha1')} for j in jobs
+                     if payload['delete_all'] and j['state']=='published'), key=lambda j:j['id'])
+                scope = hashlib.sha256(json.dumps([
+                    key, payload['group'], payload['series_id'], payload['delete_all'],
+                    sorted(torrents, key=lambda t:t['hash']), payload['delete_targets'], payload['delete_plan'],
+                ], sort_keys=True).encode()).hexdigest()
+                if body.get('preview'):
+                    paths = {str(Path(t['save_path']) / f['name']) for t in torrents for f in t['files']}
+                    paths.update(value for j in jobs for value in (j['source'], j.get('download_source')) if value)
+                    return {'scope':scope, 'local':sorted(paths), 'cloud':sorted(j['dest'] for j in payload['delete_plan'])}
+                if body.get('scope') != scope:
+                    raise TaskScopeChanged('文件清单已变化，请核对新清单后重新确认。')
             qb=self.qb();sonarr=self.client('sonarr')
-            previous=next((a for a in task_actions(self.data/'uploads.sqlite3') if a['id']==key),None)
-            if previous and previous['state']=='pending':
+            if previous and (previous['state']=='pending' or previous['state']=='blocked' and action!='delete'):
                 raise ValueError('请等待当前取消或删除完成，后台会自动重试。')
             if payload['delete_all']:
                 self.ensure_emby_maintenance(session)
-            parent=next((a for a in task_actions(self.data/'uploads.sqlite3') if a['id']==group['id']),None)
-            if action=='resume' and resource and parent and parent['state']=='pending':
+            parent=actions.get(group['id'])
+            if resource and parent and parent['state'] in {'pending','blocked'}:
                 raise ValueError('请等待项目操作完成，再继续单个资源。')
+            if not resource and any(a['state'] in {'pending','blocked'} and a['id'] != key
+                                    and a['payload'].get('group') == group['id'] for a in actions.values()):
+                raise ValueError('请先完成项目内各资源的操作。')
             if action=='resume' and previous and previous['action'] in {'cancel','delete'} and (previous['state']!='done' or previous['action']=='delete'):
                 raise ValueError('请等待取消或删除完成，再操作任务。')
             if resource and group['series_id'] and action in {'cancel','delete'}:
@@ -943,17 +1025,25 @@ class App:
             if resource and action=='resume' and previous and previous['payload'].get('episode_ids'):
                 series=sonarr.json('GET','/api/v3/series/'+str(group['series_id']))
                 self.require_version(sonarr,series)
-                sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':previous['payload']['episode_ids'],'monitored':True})
+                payload['episode_ids'] = previous['payload']['episode_ids']
+                sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':payload['episode_ids'],'monitored':True})
             if group['series_id'] and not resource:
                 series=sonarr.json('GET','/api/v3/series/'+str(group['series_id']))
                 if action=='resume':
-                    series['monitored']=bool(previous and previous['payload'].get('was_monitored'))
-                    if series['monitored']:self.require_version(sonarr,series)
+                    original = previous['payload'].get('was_monitored') if previous else None
+                    if type(original) is bool:
+                        if original:
+                            self.require_version(sonarr,series)
+                        payload['was_monitored'] = original
+                        series['monitored'] = original
+                        sonarr.json('PUT','/api/v3/series/'+str(series['id']),series)
                 else:
                     payload['was_monitored']=previous['payload'].get('was_monitored',series['monitored']) if previous else series['monitored']
                     series['monitored']=False;self.cancel_request(series['tvdbId'])
-                sonarr.json('PUT','/api/v3/series/'+str(series['id']),series)
-                if action=='delete':self._remove_series({'id':series['id']})
+                    if action=='delete':
+                        self._remove_series({'id':series['id']})
+                    else:
+                        sonarr.json('PUT','/api/v3/series/'+str(series['id']),series)
             self.data.mkdir(parents=True,exist_ok=True)
             with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                 create_actions(db)
@@ -964,8 +1054,9 @@ class App:
                 disk.pop(r['hash'],None)
             private_write(disk_path,json.dumps(disk))
             try:
-                for r in resources:
-                    qb.request('POST','/api/v2/torrents/'+('start' if action=='resume' else 'stop'),form={'hashes':r['hash']})
+                if action in {'pause','resume'}:
+                    for r in resources:
+                        qb.request('POST','/api/v2/torrents/'+('start' if action=='resume' else 'stop'),form={'hashes':r['hash']})
             except (ValueError,OSError):
                 with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                     db.execute("UPDATE task_actions SET error='task_control_failed' WHERE id=?",(key,))
@@ -1069,7 +1160,7 @@ class App:
         cleanup = {'pending': 0, 'done': 0, 'last': None}
         dbpath = self.state / 'data/uploads.sqlite3'
         if dbpath.exists():
-            with closing(sqlite3.connect(dbpath.as_uri() + '?mode=ro', uri=True)) as db, db:
+            with closing(sqlite3.connect(dbpath.resolve().as_uri() + '?mode=ro', uri=True)) as db, db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanups'").fetchone():
                     cleanup.update(dict(db.execute('SELECT state, count(*) FROM cleanups GROUP BY state')))
                     cleanup['last'] = db.execute('SELECT max(finished_at) FROM cleanups').fetchone()[0]
@@ -1199,7 +1290,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply({}, cookie="cinema=; Max-Age=0")
                     if path == "/api/settings":
                         days = integer(body.get("retention_days"), 0, 3650)
-                        private_write(app.state / "settings.json", json.dumps({"retention_days": days}))
+                        with watch_lock(app.data):
+                            private_write(app.state / "settings.json", json.dumps({"retention_days": days}))
                         return self.reply({"message": "清理设置已保存。"})
                     if path == "/api/configure":
                         return self.reply(app.configure(session, body))
@@ -1228,6 +1320,10 @@ class Handler(BaseHTTPRequestHandler):
                     if path == "/api/download":
                         return self.reply(app.download_release(session, {'release_id': body.get('id')}, 'movie'))
             self.reply({"error": "接口不存在。"}, 404)
+        except TaskScopeChanged as error:
+            self.reply({'error':str(error)}, 409)
+        except SessionCheckUnavailable:
+            self.reply({'error':'Emby 暂时无法验证会话，请稍后重试。'}, 503)
         except PermissionError:
             if path == '/api/admin-check':
                 self.send_response(302)

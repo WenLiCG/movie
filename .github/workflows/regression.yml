@@ -1,0 +1,42 @@
+name: Regression
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, MIT
+        with:
+          persist-credentials: false
+      - name: Check Python and JavaScript
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          node --test tests/*.test.cjs
+          for script in install.sh scripts/*.sh; do bash -n "$script"; done
+      - name: Verify and test the installer payload
+        run: |
+          python3 scripts/build_all_in_one.py --output "$RUNNER_TEMP/cinema.sh"
+          (cd "$RUNNER_TEMP" && sha256sum -c cinema.sh.sha256)
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import base64
+          import hashlib
+          from pathlib import Path
+          import sys
+          from scripts.build_all_in_one import extract_payload
+
+          work = Path(sys.argv[1])
+          data = base64.b64decode((work/'cinema.sh').read_bytes().split(b'\n__CINEMA_PAYLOAD__\n', 1)[1])
+          extract_payload(data, work/'cinema', hashlib.sha256(data).hexdigest())
+          PY
+          cd "$RUNNER_TEMP/cinema"
+          python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Validate Compose and build the tested relay
+        env:
+          MOVIE_DOMAIN: cinema.example.invalid
+        run: |
+          docker compose --profile '*' config --quiet
+          docker compose --profile connected build relay

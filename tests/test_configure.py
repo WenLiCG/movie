@@ -57,6 +57,11 @@ class ConfigurationTests(unittest.TestCase):
             configure.set_token(root, token)
             line = next(x for x in config_path.read_text().splitlines() if x.startswith("  token: "))
             self.assertEqual(json.loads(line.removeprefix("  token: ")), token)
+            credential = root / "state/relay-token/openlist-token"
+            self.assertEqual(credential.read_text(), token)
+            configure.write_relay_token(credential.parent, 'rotated-token')
+            self.assertEqual(credential.read_text(), 'rotated-token')
+            self.assertFalse((root / "state/uploader/openlist-token").exists())
             with self.assertRaises(ValueError):
                 configure.set_token(root, "replacement")
 

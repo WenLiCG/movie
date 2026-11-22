@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from scripts import update_files
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('bundle', ROOT / 'scripts/build_all_in_one.py')
@@ -47,7 +48,6 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(result.returncode, status, target)
 
     def test_portal_update_backs_up_and_preserves_state_and_media(self):
-        code = (ROOT / 'scripts/update_portal.sh').read_text(encoding='utf-8').split("<<'PY_UPDATE'\n", 1)[1].split('\nPY_UPDATE', 1)[0]
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             source, target = base / 'source', base / 'existing'
@@ -61,15 +61,27 @@ class InstallerTests(unittest.TestCase):
             (target / 'compose.override.yaml').write_text('machine-specific-network-settings')
             (target / 'state/relay').mkdir(parents=True)
             (target / 'state/relay/config.yml').write_text('private-relay')
+            (target / 'state/uploader').mkdir()
+            (target / 'state/uploader/openlist-token').write_text('legacy-token')
             (target / 'media').mkdir()
             (target / 'media/video.mkv').write_bytes(b'keep-video')
-            with patch('sys.argv', ['-', str(source), str(target)]), patch('os.chown', create=True):
-                exec(compile(code, 'update-portal', 'exec'), {})
+            for name in ('removed.js', 'local.js'):
+                (target/'relay').mkdir(exist_ok=True)
+                (target/'relay'/name).write_text(name)
+            (source/'relay/added.js').write_text('new')
+            old_manifest = json.dumps(['compose.yaml', 'relay/removed.js'])
+            (target/update_files.MANIFEST).write_text(old_manifest)
+            with patch('os.chown', create=True):
+                backup = update_files.snapshot(source, target)
+                update_files.apply(source, target, backup)
             self.assertEqual((target / '.env').read_text(), 'private-settings')
             self.assertEqual((target / 'state/relay/config.yml').read_text(), 'private-relay')
             self.assertEqual((target / 'media/video.mkv').read_bytes(), b'keep-video')
             self.assertEqual((target / 'compose.yaml').read_text(), 'new source')
             self.assertEqual((target / 'compose.override.yaml').read_text(), 'machine-specific-network-settings')
+            self.assertEqual((target/'state/relay-token/openlist-token').read_text(), 'legacy-token')
+            self.assertEqual((target/'relay/added.js').read_text(), 'new')
+            self.assertFalse((target/'relay/removed.js').exists())
             backups = list((target / 'backups').glob('*.tar.gz'))
             self.assertEqual(len(backups), 1)
             with tarfile.open(backups[0]) as tar:
@@ -77,6 +89,19 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(tar.extractfile('.env').read(), b'private-settings')
                 self.assertEqual(tar.extractfile('compose.override.yaml').read(), b'machine-specific-network-settings')
                 self.assertFalse(any(n.startswith('media/') for n in tar.getnames()))
+            update_files.restore(target, backup)
+            self.assertFalse((target/'relay/added.js').exists())
+            self.assertEqual((target/'relay/removed.js').read_text(), 'removed.js')
+            self.assertEqual((target/'relay/local.js').read_text(), 'local.js')
+            self.assertEqual((target/'compose.yaml').read_text(), 'old source')
+            self.assertEqual((target/update_files.MANIFEST).read_text(), old_manifest)
+
+    def test_release_payload_contains_required_emby_fixtures(self):
+        data = bundle.make_payload(ROOT)
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+            names = set(tar.getnames())
+            self.assertTrue(bundle.FIXTURES <= names)
+            self.assertNotIn('docs/DEPLOYMENT.md', names)
 
     def test_safe_unpack_and_resume_preserve_configuration(self):
         data = archive()
@@ -159,7 +184,7 @@ class InstallerTests(unittest.TestCase):
             compile(python_source, 'embedded-extractor', 'exec')
 
     def test_port_conflicts_and_other_project_are_rejected(self):
-        code = (ROOT / 'install.sh').read_text(encoding='utf-8').split("<<'PY_PORTS'\n", 1)[1].split('\nPY_PORTS', 1)[0]
+        code = (ROOT / 'scripts/compose_preflight.py').read_text(encoding='utf-8')
         config = {'name': 'cinema', 'services': {'emby': {'ports': [{'published': '8096', 'host_ip': '127.0.0.1'}]}}}
         def outputs(args, **kwargs):
             if 'config' in args:

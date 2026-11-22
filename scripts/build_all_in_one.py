@@ -14,21 +14,29 @@ FILES = ('install.sh', 'compose.yaml', 'configure.py', 'integration.py', 'archiv
 DIRECTORIES = ('gateway', 'relay', 'uploader', 'portal', 'docs', 'scripts', 'tests')
 SUFFIXES = {'.py', '.md', '.yml', '.yaml', '.js', '.cjs', '.css', '.html', '.sh', '.patch', '.txt', '.go'}
 EXCLUDED = {'state', 'media', '.env', '.upstream', '.tools', '.git', 'dist', '__pycache__'}
+FIXTURES = {'tests/fixtures/emby-4.10.2-default-options-movies.json',
+            'tests/fixtures/emby-4.10.2-default-options-tvshows.json'}
+
+
+def package_path(path):
+    name = path.as_posix()
+    if name in FILES:
+        return True
+    return (len(path.parts) > 1 and path.parts[0] in DIRECTORIES
+            and not any(part in EXCLUDED or part.startswith('.') or ':' in part or '\\' in part for part in path.parts)
+            and name != 'docs/DEPLOYMENT.md'
+            and (name in FIXTURES or path.suffix in SUFFIXES or path.name in ('Dockerfile', 'Caddyfile')
+                 or path.name.startswith('LICENSE')))
 
 
 def source_files(root):
     files = [root / name for name in FILES]
     for folder in DIRECTORIES:
         base = root / folder
-        if not base.is_dir():
+        if not base.is_dir() or base.is_symlink():
             raise ValueError(f'Missing package directory: {folder}')
         for path in base.rglob('*'):
-            relative = path.relative_to(root)
-            if relative.as_posix() == 'docs/DEPLOYMENT.md':
-                continue
-            if any(part in EXCLUDED or part.startswith('.') for part in relative.parts):
-                continue
-            if path.is_file() and (path.suffix in SUFFIXES or path.name in ('Dockerfile', 'Caddyfile') or path.name.startswith('LICENSE')):
+            if path.is_file() and package_path(path.relative_to(root)):
                 files.append(path)
     for path in files:
         if not path.is_file() or path.is_symlink():
@@ -104,6 +112,7 @@ def extract_payload(data, target, expected):
                     shutil.copyfileobj(source, output)
                 destination.chmod(0o755 if destination.suffix == '.sh' else 0o644)
             (staging / '.cinema-package.json').write_text(json.dumps({'sha256': expected}) + '\n')
+            (staging / '.cinema-source-files.json').write_text(json.dumps(sorted(seen)) + '\n', encoding='utf-8')
             for directory in staging.rglob('*'):
                 if directory.is_dir():
                     directory.chmod(0o755)

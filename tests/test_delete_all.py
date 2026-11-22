@@ -72,8 +72,11 @@ class DeleteAllTests(unittest.TestCase):
 
     tearDown=test_tasks.TaskTests.tearDown
 
-    def submit(self):
-        return self.app.task_action({'token':'admin'}, {'id':'torrent:'+'3'*40,'action':'delete','delete_files':True,'delete_all':True})
+    def submit(self, key='torrent:'+'3'*40):
+        session = {'token':'admin'}
+        body = {'id':key,'action':'delete','delete_files':True,'delete_all':True}
+        scope = self.app.task_action(session, {**body, 'preview':True})['scope']
+        return self.app.task_action(session, {**body, 'scope':scope})
 
     def action_state(self):
         return next(a for a in task_actions(self.state/'data/uploads.sqlite3') if a['id']=='torrent:'+'3'*40)
@@ -141,6 +144,62 @@ class DeleteAllTests(unittest.TestCase):
         self.assertEqual(self.action_state()['error'],'delete_all_local_changed')
         self.assertTrue(source.exists())
 
+    def test_changed_local_file_with_native_torrent_prevents_all_deletion(self):
+        self.submit()
+        source = Path(self.selected[0]['source'])
+        source.write_bytes(b'new-data!!')
+        self.uploader.process_actions(self.sources)
+        self.assertEqual(self.action_state()['state'], 'blocked')
+        self.assertEqual(source.read_bytes(), b'new-data!!')
+        self.assertTrue(all(j['dest'] in self.cloud.objects for j in self.selected))
+
+    def test_scope_conflict_and_job_arriving_after_submit(self):
+        body = {'id':'series:42','action':'delete','delete_files':True,'delete_all':True}
+        scope = self.app.task_action({}, {**body, 'preview':True})['scope']
+        first = self.jobs[0]
+        self.cloud.objects.update({'/aliyun/TV':{'is_dir':True}, '/aliyun/TV/Show':{'is_dir':True}})
+        self.cloud.objects[first['dest']] = {'is_dir':False,'size':10,'hash_info':{'sha1':first['sha1']}}
+        def add_episode(n):
+            source = self.media/'library/tv/Show'/f'{n}.mkv'
+            source.write_bytes(b'frame-data')
+            job = candidate(f'tv:{n}', source, f'/aliyun/TV/Show/{n}.mkv', 10, tvdb_id=42)
+            self.uploader.add(job)
+            self.uploader.update(job, state='published', sha1=first['sha1'])
+            self.cloud.objects[job['dest']] = copy.deepcopy(self.cloud.objects[first['dest']])
+            return job
+        earlier = add_episode(18)
+        with self.assertRaisesRegex(ValueError, '清单已变化'):
+            self.app.task_action({}, {**body, 'scope':scope})
+        self.assertTrue(self.native.series[0]['monitored'])
+        self.assertFalse(self.cloud.calls)
+        self.submit('series:42')
+        later = add_episode(19)
+        self.uploader.process_actions(self.sources)
+        self.assertNotIn(earlier['dest'], self.cloud.objects)
+        self.assertIn(later['dest'], self.cloud.objects)
+        self.assertTrue(Path(later['source']).exists())
+
+    def test_legacy_pending_delete_requires_confirmation(self):
+        self.submit()
+        action = self.action_state()
+        payload = action['payload']
+        del payload['delete_targets']
+        with self.uploader.db:
+            self.uploader.db.execute('UPDATE task_actions SET payload=? WHERE id=?', (json.dumps(payload), action['id']))
+        self.uploader.process_actions(self.sources)
+        self.assertEqual(self.action_state()['error'], 'delete_scope_required')
+        self.assertTrue(all(j['dest'] in self.cloud.objects for j in self.selected))
+
+    def test_preview_includes_group_files_older_than_display_limit(self):
+        with self.uploader.db:
+            self.uploader.db.executemany('INSERT INTO jobs (id,source,dest,size) VALUES (?,?,?,?)',
+                ((f'history-{i}', '/unused', f'/aliyun/Movies/History/{i}.mkv', 1) for i in range(1001)))
+        self.assertNotIn(self.jobs[0]['id'], {j['id'] for j in self.app.uploads()})
+        preview = self.app.task_action({}, {'id':'series:42','action':'delete',
+                                             'delete_files':True,'delete_all':True,'preview':True})
+        self.assertEqual(preview['cloud'], [self.jobs[0]['dest']])
+        self.assertIn(self.jobs[0]['source'], preview['local'])
+
     def test_verified_orphan_payload_is_removed_without_a_torrent(self):
         self.qb.items=[t for t in self.qb.items if t['hash']!='3'*40]
         self.submit();self.uploader.process_actions(self.sources)
@@ -175,7 +234,7 @@ class DeleteAllTests(unittest.TestCase):
         job=self.jobs[0]
         self.cloud.objects[job['dest']]={'is_dir':False,'size':job['size'],'hash_info':{'sha1':job['sha1']}}
         path=self.index/job['dest'].lstrip('/');path.parent.mkdir(parents=True);path.write_bytes(b'virtual-index')
-        self.app.task_action({}, {'id':'series:42','action':'delete','delete_files':True,'delete_all':True})
+        self.submit('series:42')
         self.uploader.process_actions(self.sources)
         from archive import archived_keys
         action=next(a for a in task_actions(self.state/'data/uploads.sqlite3') if a['id']=='series:42')
@@ -189,6 +248,9 @@ class DeleteAllTests(unittest.TestCase):
         fresh={**self.selected[0],'added_on':99}
         Path(fresh['source']).write_bytes(b'frame-data');self.uploader.add(fresh)
         self.uploader.update(fresh,state='published',sha1=hashlib.sha1(b'frame-data').hexdigest())
+        self.qb.items.append({'hash':'3'*40,'name':'Movie','category':'cinema-movies',
+                              'save_path':str(self.media/'downloads/movies'),'added_on':99,'state':'uploading','progress':1,'size':10})
+        self.qb.files['3'*40] = self.qb.files['3'*40][:1]
         self.cloud.objects['/aliyun/Movies/Old']={'is_dir':True}
         self.cloud.objects[fresh['dest']]={'is_dir':False,'size':10,'hash_info':{'sha1':fresh['sha1']}}
         path=self.index/fresh['dest'].lstrip('/');path.parent.mkdir(parents=True);path.write_bytes(b'updated duration index')

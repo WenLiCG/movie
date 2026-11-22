@@ -28,7 +28,7 @@ class CleanupTests(unittest.TestCase):
         self.uploader.add(self.job)
         self.uploader.update(self.job, state='published', sha1=hashlib.sha1(self.path.read_bytes()).hexdigest())
         self.cleaner = Cleaner(self.uploader, self.root)
-        self.torrent = {'hash': 'a' * 40, 'category': 'cinema-movies', 'progress': 1, 'amount_left': 0, 'completion_on': 1000, 'state': 'uploading', 'save_path': str(self.path.parent)}
+        self.torrent = {'hash': 'a' * 40, 'category': 'cinema-movies', 'progress': 1, 'amount_left': 0, 'added_on':900, 'completion_on': 1000, 'state': 'uploading', 'save_path': str(self.path.parent)}
         self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1}]
         self.torrents = [self.torrent]
         self.sources = Mock(media=self.media)
@@ -120,6 +120,43 @@ class CleanupTests(unittest.TestCase):
         self.run_cleanup()
         self.assertTrue(self.path.exists())
         self.assertEqual(self.deleted, [])
+
+    def test_pending_plan_cannot_expire_a_new_download_or_override_keep(self):
+        now = 1000 + 8*86400
+        original = self.sources.qb.request.side_effect
+        self.sources.qb.request.side_effect = OSError('temporary stop failure')
+        self.cleaner.run(self.sources, now=now)
+        self.sources.qb.request.side_effect = original
+        self.torrent.update(added_on=now, completion_on=now)
+        self.cleaner.run(self.sources, now=now+65)
+        self.assertEqual(self.deleted, [])
+        self.assertTrue(self.path.exists())
+
+        self.sources.qb.request.side_effect = OSError('temporary stop failure')
+        self.cleaner.run(self.sources, now=now+8*86400)
+        payload = {'torrents':[self.torrent]}
+        with self.uploader.db:
+            self.uploader.db.execute("INSERT INTO task_actions VALUES ('movie','delete',?,'done',NULL,?)",
+                                    (json.dumps(payload),now))
+        self.sources.qb.request.side_effect = original
+        self.cleaner.run(self.sources, now=now+8*86400+65)
+        self.assertEqual(self.deleted, [])
+        self.assertTrue(self.path.exists())
+
+    def test_cleanup_reconciles_acknowledgement_lost_after_native_delete(self):
+        now = 1000 + 8*86400
+        request = self.sources.qb.request.side_effect
+        def disconnect_after_delete(*args):
+            result = request(*args)
+            if args[1].endswith('/delete'):
+                raise OSError('response lost')
+            return result
+        self.sources.qb.request.side_effect = disconnect_after_delete
+        self.cleaner.run(self.sources, now=now)
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM cleanups').fetchone()[0], 'pending')
+        self.cleaner.run(self.sources, now=now+65)
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM cleanups').fetchone()[0], 'done')
+        self.assertEqual(self.deleted, [self.torrent['hash']])
 
     def test_tv_removes_hardlink_and_unmonitors_before_native_delete(self):
         tvroot = self.media / 'downloads/tv'

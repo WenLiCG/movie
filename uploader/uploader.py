@@ -16,7 +16,7 @@ import time
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from archive import VIDEO, SUBTITLES, sample, disc, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, task_actions, action_matches
+from archive import VIDEO, SUBTITLES, sample, disc, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, task_actions, action_matches, delete_target, torrent_instance, episode_keys
 from configure import private_write
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -97,6 +97,23 @@ def open_source(path, root):
 def fingerprint(handle):
     s = os.fstat(handle.fileno())
     return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+
+def matches_payload(path, root, job):
+    with open_source(path, root) as handle:
+        before = fingerprint(handle)
+        if before[2] != job['size'] or hashlib.file_digest(handle, 'sha1').hexdigest() != job['sha1']:
+            return False
+        current = path.stat(follow_symlinks=False)
+        return (current.st_dev, current.st_ino) == before[:2] and fingerprint(handle) == before
+
+
+def torrent_paths(torrent, files):
+    for directory in {torrent['save_path'], torrent.get('download_path')} - {None, ''}:
+        for file in files:
+            path = Path(directory)/relative(file['name'])
+            yield path
+            yield path.with_name(path.name+'.!qB')
 
 
 class HTTP:
@@ -253,7 +270,7 @@ class OpenList:
         values = []
         for status in ('undone', 'done'):
             result = self.result(self.http.json('GET', '/api/admin/task/' + kind + '/' + status))
-            if not isinstance(result, list):
+            if not isinstance(result, list) or any(not isinstance(task, dict) for task in result):
                 raise Failure('invalid_upload_task')
             values.extend(result)
         return values
@@ -294,7 +311,7 @@ class Sources:
         self.sonarr = HTTP(config["sonarr_url"], {"X-Api-Key": config["sonarr_api_key"]})
         self.emby = HTTP(config['emby_url'], {'X-Emby-Token':config['emby_token']}) if config.get('emby_token') else None
 
-    def downloads(self):
+    def login_qb(self):
         credentials = urlencode({"username": self.config["qb_username"],
                                  "password": self.config["qb_password"]}).encode()
         raw, headers = self.qb.request("POST", "/api/v2/auth/login", credentials,
@@ -308,6 +325,9 @@ class Sources:
         if raw.strip() not in (b"", b"Ok.") or len(sessions) != 1:
             raise Failure("qb_login_failed")
         self.qb.headers["Cookie"] = sessions[0].key + "=" + sessions[0].value
+
+    def downloads(self):
+        self.login_qb()
         result = []
         for category in ('cinema-movies', 'cinema-tv'):
             directory, remote, identity = DOWNLOADS[category]
@@ -441,6 +461,7 @@ class Uploader:
         self.remote, self.media, self.state = remote, Path(media), Path(state)
         self.library = Path('/library')
         self.activity = {'phase': 'starting', 'job_id': None, 'at': time.time()}
+        self.discovery_issue = None
         self.db = sqlite3.connect(Path(state) / "uploads.sqlite3")
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -491,10 +512,20 @@ class Uploader:
         return value
 
     def add(self, item):
+        episode_keys(item.get('episode_keys'))
         row = self.db.execute("SELECT * FROM jobs WHERE dest=?", (item["dest"],)).fetchone()
-        if row and (row["id"] != item["id"] or row["source"] != item["source"] or row["size"] != item["size"]):
-            raise Failure("destination_reserved")
+        actions = task_actions(self.state/'uploads.sqlite3')
+        if (not row or row['id'] != item['id']) and any(
+                a['action'] == 'delete' and a['state'] == 'done' and action_matches(item, a) for a in actions):
+            return
         with self.db:
+            if row and any(row[k] != item[k] for k in ('id', 'source', 'size')):
+                if (row['id'] == item['id'] or row['state'] != 'cancelled' or not row['hidden']
+                        or (row['stage'] and not row['terminal_proven'])
+                        or self.db.execute('SELECT 1 FROM archived WHERE job_id=?', (row['id'],)).fetchone()):
+                    raise Failure('destination_reserved')
+                self.db.execute('DELETE FROM jobs WHERE id=?', (row['id'],))
+                row = None
             if row and item.get('added_on') and row['added_on'] and item['added_on']!=row['added_on']:
                 self.db.execute("UPDATE jobs SET hidden=0,state=CASE WHEN state='cancelled' THEN 'pending' ELSE state END WHERE id=?",(item['id'],))
             self.db.execute('''INSERT OR IGNORE INTO jobs (id,source,dest,size,identity,torrent_hash,tvdb_id,episode_keys,parent_id,download_source)
@@ -506,7 +537,7 @@ class Uploader:
                  item.get('episode_keys','[]'), item.get('parent_id'), item.get('download_source'),item.get('added_on',0),item.get('added_on',0), item['id']))
             record_archive(self.db, dict(self.db.execute('SELECT * FROM jobs WHERE id=?', (item['id'],)).fetchone()))
             current=dict(self.db.execute('SELECT * FROM jobs WHERE id=?',(item['id'],)).fetchone())
-            for action in task_actions(self.state/'uploads.sqlite3'):
+            for action in actions:
                 if action['state']=='done' and action['action'] in {'cancel','delete'} and action_matches(current,action):
                     self.db.execute("UPDATE jobs SET hidden=?,state=CASE WHEN state='pending' THEN 'cancelled' ELSE state END WHERE id=?",(int(action['action']=='delete'),item['id']))
 
@@ -531,7 +562,7 @@ class Uploader:
             except Failure as error:
                 if str(error) not in {'http_404', 'openlist_code_404'}:
                     raise
-        elif not changed:
+        if not changed:
             path = str(PurePosixPath(job['stage']).parent).removeprefix('/aliyun') or '/'
             expected = f"upload {PurePosixPath(job['stage']).name} to [/aliyun]({path})"
             tasks = [t for t in self.remote.tasks() if t.get('name') == expected]
@@ -560,9 +591,11 @@ class Uploader:
 
     def upload(self, job):
         self.touch('hashing', job['id'])
-        if self.remote.find(job["dest"]) is not None:
+        if self.remote.lookup(job["dest"]) is not None:
             raise Failure("destination_conflict")
-        if shutil.disk_usage(Path(self.db.execute('PRAGMA database_list').fetchone()[2]).parent).free < job['size'] + 2 * 1024 ** 3:
+        reserved = self.db.execute("""SELECT COALESCE(sum(size),0) FROM jobs
+            WHERE state IN ('uploading','queued') AND error='upload_unconfirmed'""").fetchone()[0]
+        if shutil.disk_usage(self.state).free < reserved + job['size'] + 2 * 1024 ** 3:
             raise Failure('upload_cache_space_low')
         if job['identity'] and job['identity'].startswith('manual-tv:'):
             if not job['dest'].startswith('/aliyun/TV/'):
@@ -628,6 +661,7 @@ class Uploader:
 
     def publish(self, job, finish_only=False):
         self.touch('publishing', job['id'])
+        episode_keys(job.get('episode_keys'))
         if self.blocked(job) and not finish_only:
             raise Failure('task_cancelling')
         if self.db.execute("SELECT 1 FROM jobs WHERE parent_id=? AND state!='published'", (job['id'],)).fetchone():
@@ -658,7 +692,10 @@ class Uploader:
             raise Failure('move_pending')
         if finish_only:
             raise Failure('move_pending')
-        self.update(job, state="moving")
+        with watch_lock(self.state/'task-controls'):
+            if self.blocked(job):
+                raise Failure('task_cancelling')
+            self.update(job, state="moving")
         try:
             result = self.remote.move(job['stage'], job['dest'])
         except Failure as error:
@@ -704,25 +741,20 @@ class Uploader:
                 self.recover_upload(job)
                 if job['state'] not in {'pending','uploaded'}:
                     return False
-        self.update(job,state='cancelled',error=None,retry_at=0,retry_requested=0)
+        self.update(job,state='cancelled',error=None,retry_at=0,retry_requested=0,terminal_proven=1)
         return True
 
     def delete_cloud_and_index(self, jobs, payload, sources, action_id, action_at):
         if not sources.emby or not self.library.is_dir():
             raise Failure('delete_all_not_configured')
         libraries = sources.emby.json('GET', '/Library/VirtualFolders/Query')['Items']
-        if 'delete_plan' not in payload:
-            plans = []
-            for job in jobs:
-                if job['state'] != 'published':
-                    continue
-                parts = relative(job['dest'].removeprefix('/aliyun/')).parts
-                if not job['dest'].startswith('/aliyun/') or len(parts)<2 or parts[0] not in {'Movies','TV'}:
-                    raise Failure('unsafe_remote_path')
-                if not re.fullmatch(r'[a-fA-F0-9]{40}', job.get('sha1') or ''):
-                    raise Failure('delete_all_unverified')
-                plans.append({k:job[k] for k in ('id','dest','size','sha1')})
-            payload['delete_plan'] = plans
+        for plan in payload['delete_plan']:
+            path = plan['dest']
+            if not path.startswith(('/aliyun/Movies/', '/aliyun/TV/')):
+                raise Failure('unsafe_remote_path')
+            relative(path.removeprefix('/aliyun/'))
+            if not re.fullmatch(r'[a-fA-F0-9]{40}', plan.get('sha1') or ''):
+                raise Failure('delete_all_unverified')
         roots = {v['dest'].split('/')[2] for v in payload['delete_plan']}
         selected = [lib for lib in libraries if any('/library/aliyun/'+r in lib['Locations'] for r in roots)]
         if len(selected)!=len(roots):
@@ -799,132 +831,206 @@ class Uploader:
 
     def process_actions(self, sources):
         for action in task_actions(self.state/'uploads.sqlite3'):
-            if action['state']!='pending' or action['action'] not in {'cancel','delete'}:
+            if action['state'] != 'pending' or action['action'] not in {'cancel', 'delete'}:
                 continue
-            try:
-                with watch_lock(self.state), watch_lock(self.state/'task-controls'):
-                    payload=action['payload']
-                    jobs=[dict(r) for r in self.db.execute('SELECT * FROM jobs') if not r['hidden'] and action_matches(dict(r),action)]
-                    if not all([self.cancel_job(j) for j in jobs]):
-                        raise Failure('task_waiting_for_upload')
-                    torrents=sources.qb.json('GET','/api/v2/torrents/info')
-                    protected_paths = set()
-                    if payload.get('delete_all'):
-                        selected_hashes = {t['hash'] for t in payload['torrents']}
-                        for other in torrents:
-                            if other['hash'] not in selected_hashes:
-                                files = sources.qb.json('GET','/api/v2/torrents/files',query={'hash':other['hash']})
-                                protected_paths.update(Path(other['save_path'])/relative(f['name']) for f in files)
-                        selected_jobs = {j['id'] for j in jobs}
-                        for other in self.db.execute('SELECT id,source,download_source FROM jobs'):
-                            if other['id'] not in selected_jobs:
-                                protected_paths.update(Path(v) for v in [other['source'],other['download_source']] if v)
-                        if any(Path(v) in protected_paths for j in jobs for v in [j['source'],j.get('download_source') or j['source']]):
-                            raise Failure('cleanup_shared_file')
-                    for original in payload['torrents']:
-                        current=next((t for t in torrents if t['hash']==original['hash']),None)
-                        if not current:
-                            continue
-                        if any(current.get(k)!=original.get(k) for k in ('category','save_path','added_on')):
-                            raise Failure('task_changed')
-                        root=self.media/'downloads'/DOWNLOADS[current['category']][0]
-                        save=Path(current['save_path'])
-                        if save!=root:
-                            local_path(save,root,missing_ok=True)
-                        if current.get('download_path') and Path(current['download_path'])!=self.media/'incomplete':
-                            local_path(current['download_path'],self.media/'incomplete',missing_ok=True)
-                        files=sources.qb.json('GET','/api/v2/torrents/files',query={'hash':current['hash']})
-                        expected=[(f['name'],f['size']) for f in original['files']]
-                        if [(f['name'],f['size']) for f in files]!=expected:
-                            raise Failure('task_changed')
-                        paths=[local_path(save.joinpath(*relative(f['name']).parts),root,missing_ok=True) for f in files]
-                        if payload['delete_files']:
-                            for other in torrents:
-                                if other['hash'] in {t['hash'] for t in payload['torrents']}:
-                                    continue
-                                others=sources.qb.json('GET','/api/v2/torrents/files',query={'hash':other['hash']})
-                                if any(Path(other['save_path']).joinpath(*relative(f['name']).parts) in paths for f in others):
-                                    raise Failure('cleanup_shared_file')
-                        self.qb_form(sources,'stop',{'hashes':current['hash']})
-                        stopped=sources.qb.json('GET','/api/v2/torrents/info',query={'hashes':current['hash']})
-                        if stopped and stopped[0].get('state') not in {'stoppedDL','pausedDL','stoppedUP','pausedUP','error','missingFiles'}:
-                            raise Failure('cleanup_waiting_for_stop')
-                    if payload.get('series_id'):
-                        busy=sources.sonarr.json('GET','/api/v3/command')
-                        if any(c.get('status') in {'queued','started'} and c.get('name') in {'RssSync','MissingEpisodeSearch','EpisodeSearch','SeasonSearch','SeriesSearch','DownloadedEpisodesScan','ManualImport','RefreshMonitoredDownloads'} for c in busy):
-                            raise Failure('task_waiting_for_import')
-                    if payload.get('delete_all'):
-                        self.delete_cloud_and_index(jobs, payload, sources, action['id'], action['at'])
-                    if payload['delete_files']:
-                        for job in jobs:
-                            if not re.fullmatch(r'tv:[0-9]+',job.get('identity') or ''):
-                                continue
-                            series_id=payload.get('series_id')
-                            if not series_id:
-                                raise Failure('cleanup_episode_mapping_missing')
-                            native=sources.sonarr.json('GET','/api/v3/episodefile',query={'seriesId':series_id})
-                            file=next((f for f in native if f['id']==int(job['identity'][3:])),None)
-                            if file:
-                                if file.get('path')!=job['source'] or file.get('seriesId')!=series_id:
-                                    raise Failure('cleanup_episode_changed')
-                                local_path(file['path'],self.media/'library/tv')
-                                episodes=sources.sonarr.json('GET','/api/v3/episode',query={'seriesId':series_id})
-                                ids=[e['id'] for e in episodes if e.get('episodeFileId')==file['id']]
-                                if ids:sources.sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':ids,'monitored':False})
-                                sources.sonarr.request('DELETE','/api/v3/episodefile/'+str(file['id']))
-                    if action['action']=='delete':
-                        for original in payload['torrents']:
-                            if any(t['hash']==original['hash'] for t in torrents):
-                                self.qb_form(sources,'delete',{'hashes':original['hash'],'deleteFiles':str(payload['delete_files']).lower()})
-                        remaining=sources.qb.json('GET','/api/v2/torrents/info')
-                        if any(t['hash'] in {v['hash'] for v in payload['torrents']} for t in remaining):
-                            raise Failure('cleanup_waiting_for_removal')
-                    if payload.get('delete_all'):
-                        for job in jobs:
-                            for value in {job['source'],job.get('download_source') or job['source']}:
-                                path = Path(value)
-                                if not path.exists() and not path.is_symlink():
-                                    continue
-                                root = next((r for r in [self.media/'downloads'/v for v in ('movies','tv','tv-manual')]+[self.media/'library/tv'] if path.is_relative_to(r)), None)
-                                if root is None:
-                                    raise Failure('unsafe_or_missing_source')
-                                path = local_path(path, root)
-                                if path in protected_paths:
-                                    raise Failure('cleanup_shared_file')
-                                with open_source(path,root) as handle:
-                                    before = fingerprint(handle)
-                                    if before[2]!=job['size'] or not job.get('sha1') or hashlib.file_digest(handle,'sha1').hexdigest()!=job['sha1'] or fingerprint(handle)!=before:
-                                        raise Failure('delete_all_local_changed')
-                                    current = path.stat(follow_symlinks=False)
-                                    if (current.st_dev,current.st_ino)!=(before[0],before[1]):
-                                        raise Failure('delete_all_local_changed')
-                                path.unlink()
-                    if payload['delete_files'] and any(Path(j['source']).exists() for j in jobs):
-                        raise Failure('cleanup_waiting_for_files')
+            with watch_lock(self.state), watch_lock(self.state/'task-controls'):
+                row = self.db.execute('SELECT state,at FROM task_actions WHERE id=?', (action['id'],)).fetchone()
+                if not row or tuple(row) != ('pending', action['at']):
+                    continue
+                try:
+                    self.process_action(sources, action)
+                except (Failure, OSError, ValueError, KeyError, TypeError) as error:
+                    code = str(error) if isinstance(error, Failure) else 'task_check_failed'
+                    state = 'blocked' if code in {'delete_scope_required', 'task_changed', 'delete_all_local_changed',
+                                                   'cleanup_local_unverified', 'cleanup_episode_changed'} else 'pending'
                     with self.db:
-                        if action['action']=='delete':
-                            if payload.get('delete_all'):
-                                self.db.executemany('DELETE FROM archived WHERE job_id=?',[(j['id'],) for j in jobs])
-                                self.db.executemany('DELETE FROM jobs WHERE id=?',[(j['id'],) for j in jobs])
-                            else:
-                                self.db.executemany('UPDATE jobs SET hidden=1 WHERE id=?',[(j['id'],) for j in jobs])
-                        self.db.execute("UPDATE task_actions SET state='done',error=NULL WHERE id=?",(action['id'],))
-            except (Failure,OSError,ValueError,KeyError,TypeError) as error:
-                code=str(error) if isinstance(error,Failure) else 'task_check_failed'
-                with self.db:self.db.execute('UPDATE task_actions SET error=? WHERE id=?',(code,action['id']))
+                        self.db.execute('UPDATE task_actions SET state=?,error=? WHERE id=?', (state, code, action['id']))
+                    if code != action['error']:
+                        log(action['id'], code)
+
+    def process_action(self, sources, action):
+        payload = action['payload']
+        delete = action['action'] == 'delete'
+        delete_files = delete and payload['delete_files']
+        if delete_files and ('delete_targets' not in payload or 'delete_plan' not in payload):
+            raise Failure('delete_scope_required')
+        jobs = [dict(row) for row in self.db.execute('SELECT * FROM jobs WHERE hidden=0')
+                if action_matches(dict(row), action)]
+        if delete_files:
+            approved = sorted((delete_target(job) for job in jobs), key=lambda job: job['id'])
+            if approved != payload['delete_targets']:
+                raise Failure('task_changed')
+        if not all([self.cancel_job(job) for job in jobs]):
+            raise Failure('task_waiting_for_upload')
+
+        torrents = {t['hash']: t for t in sources.qb.json('GET', '/api/v2/torrents/info')}
+        active = []
+        for original in payload['torrents']:
+            current = torrents.get(original['hash'])
+            if current is None:
+                continue
+            files = self.check_torrent_files(sources, current, original)
+            folder = self.media/'downloads'/DOWNLOADS[current['category']][0]
+            if Path(current['save_path']) != folder:
+                local_path(current['save_path'], folder, missing_ok=True)
+            interim = current.get('download_path')
+            if interim and Path(interim) != self.media/'incomplete':
+                local_path(interim, self.media/'incomplete', missing_ok=True)
+            for file in files:
+                local_path(Path(current['save_path'])/relative(file['name']), folder, missing_ok=True)
+            self.qb_form(sources, 'stop', {'hashes':current['hash']})
+            stopped = sources.qb.json('GET', '/api/v2/torrents/info', query={'hashes':current['hash']})
+            if not stopped or torrent_instance(stopped[0]) != torrent_instance(original):
+                raise Failure('task_changed')
+            if stopped[0].get('state') not in {'stoppedDL','pausedDL','stoppedUP','pausedUP','error','missingFiles'}:
+                raise Failure('cleanup_waiting_for_stop')
+            active.append(original)
+        if payload.get('series_id'):
+            busy = sources.sonarr.json('GET', '/api/v3/command')
+            if any(c.get('status') in {'queued','started'} and c.get('name') in {
+                'RssSync','MissingEpisodeSearch','EpisodeSearch','SeasonSearch','SeriesSearch',
+                'DownloadedEpisodesScan','ManualImport','RefreshMonitoredDownloads'} for c in busy):
+                raise Failure('task_waiting_for_import')
+
+        if delete_files:
+            approved_cloud = payload['delete_plan']
+            if payload.get('delete_all') and approved_cloud != sorted(
+                    ({key:job[key] for key in ('id','dest','size','sha1')}
+                     for job in jobs if job['state'] == 'published'), key=lambda job: job['id']):
+                raise Failure('task_changed')
+            episode_files = self.episode_deletions(sources, jobs, payload.get('series_id'))
+            paths, verified = self.check_local_deletion(sources, payload, jobs, torrents, active, episode_files)
+            if payload.get('delete_all'):
+                self.delete_cloud_and_index(jobs, payload, sources, action['id'], action['at'])
+            for file, ids in episode_files:
+                if ids:
+                    sources.sonarr.json('PUT', '/api/v3/episode/monitor', {'episodeIds':ids,'monitored':False})
+                sources.sonarr.request('DELETE', '/api/v3/episodefile/'+str(file['id']))
+
+        if delete:
+            for original in active:
+                latest = sources.qb.json('GET', '/api/v2/torrents/info', query={'hashes':original['hash']})
+                if latest:
+                    self.check_torrent_files(sources, latest[0], original)
+                    self.qb_form(sources, 'delete', {'hashes':original['hash'],'deleteFiles':str(delete_files).lower()})
+            remaining = sources.qb.json('GET', '/api/v2/torrents/info')
+            if any(t['hash'] in {v['hash'] for v in payload['torrents']} for t in remaining):
+                raise Failure('cleanup_waiting_for_removal')
+        if delete_files:
+            for path, (root, job) in verified.items():
+                if path.exists() or path.is_symlink():
+                    if not matches_payload(path, root, job):
+                        raise Failure('delete_all_local_changed')
+                    path.unlink()
+            if any(path.exists() for path in paths):
+                raise Failure('cleanup_waiting_for_files')
+        with self.db:
+            if delete:
+                ids = [(job['id'],) for job in jobs]
+                if payload.get('delete_all'):
+                    self.db.executemany('DELETE FROM archived WHERE job_id=?', ids)
+                    self.db.executemany('DELETE FROM jobs WHERE id=?', ids)
+                else:
+                    self.db.executemany('UPDATE jobs SET hidden=1 WHERE id=?', ids)
+            self.db.execute("UPDATE task_actions SET state='done',error=NULL WHERE id=?", (action['id'],))
+
+    def check_torrent_files(self, sources, current, original):
+        if (torrent_instance(current) != torrent_instance(original) or 'download_path' in original
+                and (current.get('download_path') or '') != (original.get('download_path') or '')):
+            raise Failure('task_changed')
+        files = sources.qb.json('GET', '/api/v2/torrents/files', query={'hash':current['hash']})
+        if [(f['name'], f['size']) for f in files] != [(f['name'], f['size']) for f in original['files']]:
+            raise Failure('task_changed')
+        return files
+
+    def episode_deletions(self, sources, jobs, series_id):
+        file_jobs = {int(j['identity'][3:]): j for j in jobs if re.fullmatch(r'tv:[0-9]+', j.get('identity') or '')}
+        if not file_jobs:
+            return []
+        if not series_id:
+            raise Failure('cleanup_episode_mapping_missing')
+        files = sources.sonarr.json('GET', '/api/v3/episodefile', query={'seriesId':series_id})
+        episodes = sources.sonarr.json('GET', '/api/v3/episode', query={'seriesId':series_id})
+        result = []
+        for file in files:
+            job = file_jobs.get(file['id'])
+            if job is None:
+                continue
+            if any((file.get('path') != job['source'], file.get('seriesId') != series_id, file.get('size') != job['size'])):
+                raise Failure('cleanup_episode_changed')
+            local_path(file['path'], self.media/'library/tv', missing_ok=True)
+            result.append((file, [e['id'] for e in episodes if e.get('episodeFileId') == file['id']]))
+        return result
+
+    def protected_paths(self, sources, torrents, selected_hashes, selected_jobs):
+        claimed = set()
+        for torrent in torrents:
+            if torrent['hash'] not in selected_hashes:
+                files = sources.qb.json('GET', '/api/v2/torrents/files', query={'hash':torrent['hash']})
+                claimed.update(torrent_paths(torrent, files))
+        for row in self.db.execute('SELECT id,source,download_source FROM jobs'):
+            if row['id'] not in selected_jobs:
+                claimed.update(Path(p) for p in (row['source'],row['download_source']) if p)
+        try:
+            claimed.update(path.resolve() for path in list(claimed))
+        except RuntimeError:
+            raise Failure('unsafe_or_missing_source') from None
+        return claimed
+
+    def check_local_deletion(self, sources, payload, jobs, torrents, active, episode_files):
+        claimed = self.protected_paths(sources, torrents.values(), {t['hash'] for t in payload['torrents']},
+                                       {j['id'] for j in jobs})
+        qb_paths = {p for t in active for p in torrent_paths(t, t['files'])}
+        native_paths = qb_paths | {Path(f['path']) for f,_ in episode_files}
+        paths = {p for t in payload['torrents'] for p in torrent_paths(t, t['files'])}
+        known = {}
+        for job in jobs:
+            for value in {job['source'], job.get('download_source') or job['source']}:
+                path = Path(value)
+                paths.add(path)
+                if job.get('sha1') or path not in known:
+                    known[path] = job
+
+        verified = {}
+        roots = [self.media/'downloads'/v[0] for v in DOWNLOADS.values()] + [self.media/'incomplete', self.media/'library/tv']
+        for path in paths:
+            if not path.exists() and not path.is_symlink():
+                continue
+            root = next((root for root in roots if path.is_relative_to(root)), None)
+            if root is None:
+                raise Failure('unsafe_or_missing_source')
+            local_path(path, root)
+            if path in claimed:
+                raise Failure('cleanup_shared_file')
+            if not path.is_file():
+                raise Failure('unsafe_or_missing_source')
+            job = known.get(path)
+            if job and job.get('sha1'):
+                if not matches_payload(path, root, job):
+                    raise Failure('delete_all_local_changed')
+                verified[path] = root, job
+            elif path not in native_paths:
+                raise Failure('cleanup_local_unverified')
+        return paths, verified
 
     @staticmethod
     def qb_form(sources, action, values):
         return sources.qb.request('POST','/api/v2/torrents/'+action,urlencode(values).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
 
     def run(self, candidates, sources=None):
+        if candidates is not None:
+            self.discovery_issue = None
         available = set()
-        for item in candidates:
+        for item in candidates or ():
             try:
                 self.add(item)
                 available.add(item["id"])
-            except Failure as error:
-                log(item["id"], str(error))
+            except (Failure, ValueError, TypeError) as error:
+                code = str(error) if isinstance(error, Failure) else 'invalid_episode_mapping'
+                if not self.discovery_issue:
+                    # ponytail: surface the first discovery conflict here; paginate conflicts if one is insufficient.
+                    self.discovery_issue = {'dest':item['dest'],'error':code}
+                log(item['id'], code)
         if sources:
             self.process_actions(sources)
         for row in self.db.execute("SELECT * FROM jobs WHERE state NOT IN ('published','cancelled') AND (state!='failed' OR retry_requested=1) AND retry_at<=? ORDER BY rowid", (time.time(),)).fetchall():
@@ -934,21 +1040,21 @@ class Uploader:
             if job['state'] == 'pending' and job['id'] not in available:
                 continue
             try:
-                self.remote.mkdir(str(PurePosixPath(job["dest"]).parent))
-                if job['state'] in {'uploading','failed'}:
+                if job['state'] in {'uploading','queued','failed'}:
                     self.recover_upload(job, manual=bool(job.get('retry_requested')))
                 elif job['state'] == 'pending':
-                    if self.db.execute("SELECT 1 FROM jobs WHERE state IN ('uploading','queued') AND id!=?", (job['id'],)).fetchone():
+                    if self.db.execute("""SELECT 1 FROM jobs WHERE state IN ('uploading','queued')
+                                          AND error IS NOT 'upload_unconfirmed' AND id!=?""", (job['id'],)).fetchone():
                         self.update(job, state='pending', error=None, retry_at=0)
                         continue
                     # An interrupted PUT has no receipt. Its old staging directory stays quarantined.
                     self.upload(job)
-                if job['state'] == 'queued':
-                    self.recover_upload(job)
                 if job['state'] in {'uploaded', 'moving'}:
+                    if job['state'] == 'uploaded':
+                        self.remote.mkdir(str(PurePosixPath(job['dest']).parent))
                     self.publish(job)
-            except (Failure, OSError) as error:
-                code = str(error) if isinstance(error, Failure) else "local_io_error"
+            except (Failure, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+                code = str(error) if isinstance(error, Failure) else 'local_io_error' if isinstance(error, OSError) else 'archive_job_invalid'
                 failures = job["failures"] + 1
                 self.update(job, error=code, failures=failures,
                             retry_at=time.time() + min(3600, 60 * 2 ** min(failures - 1, 6)))
@@ -1046,22 +1152,21 @@ def _disk_guard(sources, state, now=None):
 
 
 def monitor(uploader, config_dir, stop):
+    config_path = Path(config_dir)/'config.json'
+    active_config, sources = None, None
     while not stop.is_set():
-        status = {'at':time.time(), 'activity':uploader.activity, 'disk_paused':0, 'error':None}
+        status = {'at':time.time(), 'activity':uploader.activity, 'discovery_issue':uploader.discovery_issue,
+                  'disk_paused':0, 'error':None}
         try:
-            config=json.loads((Path(config_dir)/'config.json').read_text())
-            sources=Sources(config,uploader.media)
-            sources.qb.timeout=15
-            raw,headers=sources.qb.request('POST','/api/v2/auth/login',urlencode({'username':config['qb_username'],'password':config['qb_password']}).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
-            cookies=http.cookies.SimpleCookie()
-            for name,value in headers:
-                if name.lower()=='set-cookie':cookies.load(value)
-            sessions=[c for name,c in cookies.items() if re.fullmatch(r'SID|QBT_SID_[0-9]+',name) and c.value]
-            if raw.strip() not in (b'',b'Ok.') or len(sessions)!=1:
-                raise Failure('qb_login_failed')
-            sources.qb.headers['Cookie']=sessions[0].key+'='+sessions[0].value
+            config = json.loads(config_path.read_text())
+            if sources is None or config != active_config:
+                sources = Sources(config, uploader.media)
+                sources.qb.timeout = 15
+                sources.login_qb()
+                active_config = config
             status['disk_paused']=disk_guard(sources,uploader.state)
         except (Failure,OSError,ValueError,KeyError,TypeError,sqlite3.Error):
+            sources = None
             status['error']='disk_check_unavailable'
         try:
             private_write(uploader.state/'heartbeat.json',json.dumps(status))
@@ -1085,38 +1190,45 @@ def main():
         uploader = Uploader(OpenList(config["openlist_url"], config["openlist_token"]), state, media)
         sys.modules.setdefault("uploader", sys.modules[__name__])
         from cleanup import Cleaner
-        cleaner = Cleaner(uploader, state)
+        cleaner = Cleaner(uploader, state, Path('/config/settings.json'))
         stop = threading.Event()
         observer = threading.Thread(target=monitor,args=(uploader,Path('/config'),stop),daemon=True)
         observer.start()
+        active_config, next_discovery = None, 0
         try:
             while True:
                 config = json.loads(Path("/config/config.json").read_text())
-                uploader.remote = OpenList(config["openlist_url"], config["openlist_token"])
-                sources = Sources(config, media)
-                uploader.touch('discovering')
-                try:
-                    reconcile_watches(sources,state,Path('/config'))
-                except (Failure,OSError,ValueError,KeyError,TypeError):
-                    log('watch','reconcile_deferred')
-                candidates = []
-                for name, discover in (("downloads", sources.downloads), ("tv", sources.tv)):
+                if config != active_config:
+                    uploader.remote = OpenList(config["openlist_url"], config["openlist_token"])
+                    sources = Sources(config, media)
+                    active_config, next_discovery = config, 0
+                discover = time.monotonic() >= next_discovery
+                candidates = None
+                if discover:
+                    candidates = []
+                    uploader.touch('discovering')
                     try:
-                        candidates.extend(discover())
-                    except (Failure, KeyError, TypeError, ValueError):
-                        log(name, "discovery_failed")
+                        reconcile_watches(sources,state,Path('/config'))
+                    except (Failure,OSError,ValueError,KeyError,TypeError):
+                        log('watch','reconcile_deferred')
+                    for name, collect in (("downloads", sources.downloads), ("tv", sources.tv)):
+                        try:
+                            candidates.extend(collect())
+                        except (Failure, KeyError, TypeError, ValueError):
+                            log(name, "discovery_failed")
                 uploader.run(candidates,sources)
-                try:
-                    settings_path = Path("/config/settings.json")
-                    settings = json.loads(settings_path.read_text()) if settings_path.exists() else {"retention_days": 7}
-                    uploader.touch('cleaning')
-                    cleaner.run(sources, settings.get("retention_days", 7))
-                except (Failure, OSError, ValueError, KeyError, TypeError):
-                    log("cleanup", "deferred_check_failed")
+                if discover:
+                    try:
+                        uploader.touch('cleaning')
+                        cleaner.run(sources)
+                    except (Failure, OSError, ValueError, KeyError, TypeError):
+                        log("cleanup", "deferred_check_failed")
+                    next_discovery = time.monotonic()+60
                 uploader.touch('idle')
                 if "--once" in sys.argv:
                     break
-                time.sleep(5 if uploader.db.execute("SELECT 1 FROM jobs WHERE state='queued' UNION SELECT 1 FROM task_actions WHERE state='pending'").fetchone() else 60)
+                busy = uploader.db.execute("SELECT 1 FROM jobs WHERE state='queued' UNION SELECT 1 FROM task_actions WHERE state='pending'").fetchone()
+                time.sleep(min(5 if busy else 60, max(0, next_discovery-time.monotonic())))
         finally:
             stop.set()
             observer.join(timeout=1)

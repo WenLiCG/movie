@@ -96,6 +96,15 @@ def task_actions(path):
         return [{**dict(row),'payload':json.loads(row['payload'])} for row in db.execute("SELECT * FROM task_actions WHERE state!='released'")]
 
 
+def torrent_instance(torrent):
+    return tuple(torrent.get(k) for k in ('hash', 'category', 'save_path', 'added_on'))
+
+
+def delete_target(job):
+    return {key: job.get(key) for key in ('id', 'dest', 'size', 'source', 'download_source',
+                                          'torrent_hash', 'added_on', 'identity', 'parent_id')}
+
+
 def action_matches(job, action):
     payload=action['payload']
     matching=[t for t in payload.get('torrents',[]) if t['hash']==job.get('torrent_hash')]
@@ -103,19 +112,29 @@ def action_matches(job, action):
         return False
     if job['id'] in payload.get('jobs',[]):
         return True
+    if action['action'] == 'delete':
+        return False
     if payload.get('tvdb_id') and job.get('tvdb_id') == payload['tvdb_id']:
         return True
     return any(job.get('torrent_hash')==t['hash'] and (not job.get('added_on') or job.get('added_on',0)==t.get('added_on',0))
                for t in payload.get('torrents',[]))
 
 
+def episode_keys(value):
+    keys = json.loads(value or '[]')
+    if not isinstance(keys, list):
+        raise ValueError('invalid_episode_mapping')
+    for key in keys:
+        if not isinstance(key, list) or len(key) != 2 or any(type(n) is not int or n < 0 for n in key):
+            raise ValueError('invalid_episode_mapping')
+    return keys
+
+
 def record_archive(db, job):
     if job.get('state') != 'published' or not job.get('tvdb_id'):
         return
-    keys = json.loads(job.get('episode_keys') or '[]')
+    keys = episode_keys(job.get('episode_keys'))
     for season, episode in keys:
-        if type(season) is not int or type(episode) is not int or season < 0 or episode < 1:
-            raise ValueError('invalid_episode_mapping')
         db.execute('INSERT OR IGNORE INTO archived VALUES (?,?,?,?,?)',
                    (job['tvdb_id'], season, episode, job['id'], time.time()))
 

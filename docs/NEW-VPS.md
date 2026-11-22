@@ -55,7 +55,7 @@ ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:809
 | `http://127.0.0.1:8989/sonarr/` | 创建 Sonarr 管理员，同样启用 Forms 和始终认证。 |
 | `http://127.0.0.1:8080` | 用 qB 初始 admin 和临时密码登录，设置正式用户名、密码；关闭本地地址/子网免认证。 |
 
-用户名可以使用 `jsjcjsjc`，密码在自己的页面输入。稍后在设置页填写 OpenList 和 qB 各自的账号。交付包不预置服务器密码或管理账号密码。
+用户名可以使用 `cinema-admin`，密码在自己的页面输入。稍后在设置页填写 OpenList 和 qB 各自的账号。交付包不预置服务器密码或管理账号密码。
 
 qB 临时密码在 VPS 查看：
 

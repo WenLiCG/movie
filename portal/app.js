@@ -32,7 +32,7 @@ async function api(path, body) {
   let data;
   try { data = await response.json(); } catch { throw new Error('服务暂时不可用，请稍后重试。'); }
   if (response.status === 401) signedIn(false);
-  if (!response.ok) throw new Error(data.error || '操作失败，请稍后重试。');
+  if (!response.ok) throw Object.assign(new Error(data.error || '操作失败，请稍后重试。'), {status: response.status});
   return data;
 }
 async function action(button, work) { button.disabled = true; try { await work(); } catch (error) { notice(error.message, true); } finally { button.disabled = false; } }
@@ -279,8 +279,17 @@ function uploadRow(u, compact=false, short=false) {
   if(['openlist_code_401','openlist_code_403'].includes(u.error)){const b=node('button','重新连接云盘');b.onclick=()=>show('settings');el.append(b);}
   return el;
 }
-let taskTarget=null, tasksBusy=false;
-const actionErrors={task_control_failed:'下载器尚未确认，请刷新后重试',task_waiting_for_upload:'等待云盘任务结束后继续处理',upload_unconfirmed:'旧上传状态尚未确认，请检查云盘任务',task_waiting_for_import:'等待站点搜索或剧集入库结束',cleanup_waiting_for_stop:'等待下载器停止',cleanup_waiting_for_removal:'等待下载器移除任务',cleanup_waiting_for_files:'等待本地文件删除完成',cleanup_shared_file:'文件与其他任务共用，已保留；请在高级管理核对',task_changed:'资源已变化，请刷新后重新操作',delete_all_not_configured:'Emby 维护连接或索引目录未就绪，尚未完成删除',delete_all_unverified:'缺少云端归属校验记录，保留文件等待核对',delete_all_unsafe_index:'索引内容或备份存在变化，保留索引等待核对',delete_all_waiting_cloud:'等待云盘确认原件已移除',delete_all_waiting_scan:'云端和索引已清理，等待 Emby 扫描完成',delete_all_local_changed:'本地文件内容已变化，已保留，等待核对',remote_hash_mismatch:'云端文件已被替换，已停止以免误删新版本',remote_size_mismatch:'云端文件与归档记录不符，已停止以免误删',remote_hash_unavailable:'云盘校验信息不完整，保留文件等待核对'};
+let taskTarget=null, tasksBusy=false, taskScope='', taskPreview=0, taskSubmitting=false;
+const actionErrors={task_control_failed:'下载器尚未确认，请刷新后重试',task_waiting_for_upload:'等待云盘任务结束后继续处理',upload_unconfirmed:'旧上传状态尚未确认，请检查云盘任务',task_waiting_for_import:'等待站点搜索或剧集入库结束',cleanup_waiting_for_stop:'等待下载器停止',cleanup_waiting_for_removal:'等待下载器移除任务',cleanup_waiting_for_files:'等待本地文件删除完成',cleanup_shared_file:'文件与其他任务共用，已保留；请在高级管理核对',task_changed:'资源已变化，请核对新清单后重新确认',delete_scope_required:'旧删除请求缺少确认清单，请重新预览并确认',cleanup_local_unverified:'无法确认剩余文件的归属，已保留',cleanup_episode_changed:'Sonarr 文件与确认记录不符，已暂停删除',delete_all_not_configured:'Emby 维护连接或索引目录未就绪，尚未完成删除',delete_all_unverified:'缺少云端归属校验记录，保留文件等待核对',delete_all_unsafe_index:'索引内容或备份存在变化，保留索引等待核对',delete_all_waiting_cloud:'等待云盘确认原件已移除',delete_all_waiting_scan:'云端和索引已清理，等待 Emby 扫描完成',delete_all_local_changed:'本地文件内容已变化，已保留，等待核对',remote_hash_mismatch:'云端文件已被替换，已停止以免误删新版本',remote_size_mismatch:'云端文件与归档记录不符，已停止以免误删',remote_hash_unavailable:'云盘校验信息不完整，保留文件等待核对'};
+function keepRemaining(id){
+  const keep=node('button','保留剩余文件并结束','quiet');
+  keep.dataset.taskControl=id+':keep';
+  keep.onclick=()=>action(keep,async()=>{
+    notice((await api('task-action',{id,action:'keep-remaining'})).message);
+    await tasks();
+  });
+  return keep;
+}
 function taskButtons(target, status, disabled=false) {
   const box=node('div',undefined,'task-actions');
   const resources=target.resources||[target],unfinished=resources.filter(r=>r.progress<1),downloading=unfinished.length>0;
@@ -288,14 +297,20 @@ function taskButtons(target, status, disabled=false) {
   const cancelled=status?.action==='cancel'||(target.uploads||[]).some(u=>u.state==='cancelled');
   const stopped=value=>['stoppedDL','pausedDL','stoppedUP','pausedUP'].includes(value);
   const paused=downloading&&unfinished.every(r=>stopped(r.state));
-  const resume=node('button',downloading?(paused?'继续下载':'暂停下载'):'继续归档',undefined,downloading&&!paused?'pause':'play');
-  resume.disabled=disabled||status?.state==='pending';
-  resume.onclick=()=>action(resume,async()=>{const r=await api('task-action',{id:target.id,action:downloading&&!paused?'pause':'resume'});notice(downloading?r.message:'已继续归档。');await tasks();});
-  const cancel=node('button',downloading?'取消下载':'取消归档');cancel.disabled=disabled||status?.state==='pending'||status?.action==='cancel';cancel.onclick=()=>openTaskDialog({...target,archiveOnly:!downloading},'cancel');
+  const retryResume=status?.action==='resume'&&!!status?.error;
+  const pause=downloading&&!paused&&!retryResume;
+  const resume=node('button',retryResume?'重试继续':downloading?(paused?'继续下载':'暂停下载'):'继续归档',undefined,pause?'pause':'play');
+  resume.disabled=disabled||['pending','blocked'].includes(status?.state);
+  resume.dataset.taskControl=target.id+':resume';
+  resume.onclick=()=>action(resume,async()=>{const r=await api('task-action',{id:target.id,action:pause?'pause':'resume'});notice(downloading?r.message:'已继续归档。');await tasks();});
+  const cancel=node('button',downloading?'取消下载':'取消归档');cancel.disabled=disabled||['pending','blocked'].includes(status?.state)||status?.action==='cancel';cancel.onclick=()=>openTaskDialog({...target,archiveOnly:!downloading},'cancel');
+  cancel.dataset.taskControl=target.id+':cancel';
   const remove=node('button',target.tvdb_id?'删除追剧项目':'删除项目','quiet danger','trash');remove.disabled=status?.state==='pending';remove.onclick=()=>openTaskDialog(target,'delete');
+  remove.dataset.taskControl=target.id+':delete';
+  if(status?.can_keep)box.append(keepRemaining(status.id||target.id));
   if(!downloading&&resources.length)box.append(node('span',resources.length===1?(seedStates[resources[0].state]||'下载已完成'):'下载已完成','task-seed-state muted'));
   if(downloading)box.append(resume,cancel);
-  else if(archiving)box.append(cancelled?resume:cancel);
+  else if(retryResume||archiving)box.append(retryResume||cancelled?resume:cancel);
   box.append(remove);return box;
 }
 function openTaskDialog(target, operation){
@@ -306,22 +321,70 @@ function openTaskDialog(target, operation){
   $('task-delete-options').hidden=operation!=='delete';document.querySelector('[name=delete-files][value=false]').checked=true;
   $('confirm-task').textContent=operation==='delete'?'确认删除':target.archiveOnly?'确认取消归档':'确认取消下载';updateTaskDeleteMode();$('task-dialog-error').hidden=true;$('task-dialog').showModal();
 }
-function updateTaskDeleteMode(){
-  const all=taskTarget?.operation==='delete'&&document.querySelector('[name=delete-files]:checked').value==='all';
-  $('task-all-details').hidden=!all;
+function taskRequest(){
+  const mode=document.querySelector('[name=delete-files]:checked').value;
+  return {id:taskTarget.id,action:taskTarget.operation,delete_files:taskTarget.operation==='delete'&&mode!=='false',
+    delete_all:taskTarget.operation==='delete'&&mode==='all'};
+}
+async function updateTaskDeleteMode(){
+  const request=taskRequest(), all=request.delete_all;
+  const generation=++taskPreview, confirm=$('confirm-task');
+  taskScope='';
+  $('task-all-details').hidden=!request.delete_files;
+  $('task-cloud-files').hidden=!all;
   $('task-dialog-cloud-note').textContent=all?'将停止做种，删除所选范围的 VPS 文件、云端原件及已归档字幕，清理 Emby 索引并扫描。云端删除无法在此撤销；未选中的项目／资源保留。':'云端已归档影片保留。合集或资源包的操作会影响包内全部文件。';
-  if(taskTarget?.operation==='delete')$('confirm-task').textContent=all?'确认删除所有':'确认删除';
-  $('task-all-files').replaceChildren(...[...new Set((taskTarget?.uploads||[]).map(v=>v.dest))].map(v=>node('li',v)));
-  if(!$('task-all-files').children.length)$('task-all-files').append(node('li','尚无归档记录，不会按片名猜测云端文件。'));
+  if(request.action==='delete')confirm.textContent=all?'确认删除所有':'确认删除';
+  confirm.disabled=taskSubmitting||request.delete_files;
+  if(!request.delete_files)return;
+  $('task-preview-status').textContent='正在核对文件清单…';
+  $('task-local-files').replaceChildren();
+  $('task-all-files').replaceChildren();
+  try {
+    const result=await api('task-action',{...request,preview:true});
+    if(generation!==taskPreview)return;
+    $('task-local-files').replaceChildren(...(result.local.length ? result.local : ['没有本地文件记录']).map(v=>node('li',v)));
+    $('task-all-files').replaceChildren(...(result.cloud.length ? result.cloud : ['没有已归档的云端文件']).map(v=>node('li',v)));
+    $('task-preview-status').textContent='请核对以下文件。';
+    taskScope=result.scope;
+    confirm.disabled=taskSubmitting;
+  } catch(error) {
+    if(generation===taskPreview)$('task-preview-status').textContent=error.message+'。可重新选择删除范围以重试。';
+  }
 }
 document.querySelectorAll('[name=delete-files]').forEach(input=>input.onchange=updateTaskDeleteMode);
 $('close-task-dialog').onclick=()=>$('task-dialog').close();
-$('task-form').onsubmit=event=>{event.preventDefault();action(event.submitter,async()=>{try{const mode=document.querySelector('[name=delete-files]:checked').value;const r=await api('task-action',{id:taskTarget.id,action:taskTarget.operation,delete_files:taskTarget.operation==='delete'&&mode!=='false',delete_all:taskTarget.operation==='delete'&&mode==='all'});$('task-dialog').close();notice(taskTarget.operation==='cancel'&&taskTarget.archiveOnly?'已请求取消尚未发布的归档；文件和已发布的云端影片保留。':r.message);await tasks();}catch(e){$('task-dialog-error').textContent=e.message;$('task-dialog-error').hidden=false;}});};
+$('task-form').onsubmit=async event=>{
+  event.preventDefault();
+  const request=taskRequest(), target=taskTarget, confirm=$('confirm-task');
+  if(taskSubmitting||request.delete_files&&!taskScope)return;
+  if(request.delete_files)request.scope=taskScope;
+  taskSubmitting=confirm.disabled=true;
+  $('task-dialog-error').hidden=true;
+  try {
+    const result=await api('task-action',request);
+    if(taskTarget===target)$('task-dialog').close();
+    notice(target.operation==='cancel'&&target.archiveOnly?'已请求取消尚未发布的归档；文件和已发布的云端影片保留。':result.message);
+    await tasks();
+  } catch(error) {
+    if(taskTarget!==target)return;
+    $('task-dialog-error').textContent=error.message;
+    $('task-dialog-error').hidden=false;
+    if(error.status===409)await updateTaskDeleteMode();
+  } finally {
+    taskSubmitting=false;
+    confirm.disabled=taskRequest().delete_files&&!taskScope;
+  }
+};
 async function tasks() {
   if(tasksBusy)return;tasksBusy=true;
-  const expanded=new Set([...document.querySelectorAll('#task-list details[open]')].map(e=>e.dataset.key));
+  const list=$('task-list'), refresh=$('task-refresh-status');
   try {
-    const r=await api('tasks'); $('task-list').replaceChildren();
+    const r=await api('tasks');
+    const expanded=new Set([...list.querySelectorAll('details[open]')].map(e=>e.dataset.key));
+    const control=document.activeElement?.dataset.taskControl;
+    const detailKey=document.activeElement?.matches('summary')&&document.activeElement.parentElement.dataset.key;
+    list.replaceChildren();
+    if(r.discovery_issue)list.append(node('p',r.discovery_issue.message+' '+r.discovery_issue.dest,'warning-text'));
     if(!r.items.length)$('task-list').append(node('p','当前没有下载或归档任务。','empty','download'));
     r.items.forEach(g=>{
       const completed=g.uploads.filter(u=>!u.parent_id&&u.state==='published').length;
@@ -336,6 +399,11 @@ async function tasks() {
       el.dataset.id=g.id;
       if(progressKnown){const bar=node('progress',undefined,'task-download-progress');bar.max=1;bar.value=progress;bar.setAttribute('aria-label','当前资源下载进度');el.firstChild.append(bar);}
       if(Object.values(g.resource_actions||{}).some(a=>a.state==='pending'))el.firstChild.append(node('p','部分资源正在处理，展开查看进度。','muted'));
+      for(const status of Object.values(g.resource_actions||{})){
+        if(status.can_keep&&(g.resources.length<=1||!g.resources.some(t=>'torrent:'+t.hash===status.id))){
+          el.firstChild.append(node('p',actionErrors[status.error]||'资源删除暂未完成。','warning-text'),keepRemaining(status.id));
+        }
+      }
       if(g.action?.error)el.firstChild.append(node('p',actionErrors[g.action.error]||'暂未完成，保留数据并自动重试；可在高级管理检查。','warning-text'));
       el.append(taskButtons(g,g.action,!g.resources.length&&!g.uploads.length));
       const detail=node(multiple?'details':'div',undefined,multiple?'task-files':'task-inline');
@@ -364,6 +432,12 @@ async function tasks() {
       g.uploads.filter(j=>!linked.has(j.id)).forEach(j=>detail.append(uploadRow(j,!multiple&&!g.tvdb_id)));
       el.firstChild.append(detail);$('task-list').append(el);
     });
+    if(control)list.querySelector(`[data-task-control="${CSS.escape(control)}"]`)?.focus({preventScroll:true});
+    else if(detailKey)list.querySelector(`details[data-key="${CSS.escape(detailKey)}"] > summary`)?.focus({preventScroll:true});
+    refresh.textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  } catch(error) {
+    refresh.textContent='刷新失败，仍显示上次结果。';
+    throw error;
   } finally {tasksBusy=false;}
 }
 $('watch').onclick=()=>{
@@ -414,6 +488,16 @@ $('refresh-playbacks').onclick=()=>action($('refresh-playbacks'),playbacks);
 async function metrics() { if (metricsBusy || !csrf) return; metricsBusy = true; try { const r = await api('metrics'); $('metrics-time').textContent = '刚刚更新 · 每 10 秒刷新'; for (const name of ['disk', 'memory']) { const v = r[name]; $(name + '-label').textContent = v ? `${size(v.used)} / ${size(v.total)}` : '暂不可用'; if (v) {$(name + '-meter').value = 100 * v.used / v.total; $(name+'-meter').classList.toggle('high',name==='disk'&&v.used/v.total>.85);} } $('cpu-label').textContent = r.cpu === null ? '采样中' : `${r.cpu.toFixed(1)}%`; if (r.cpu !== null) $('cpu-meter').value = r.cpu; } catch { $('metrics-time').textContent = '状态暂不可用，稍后自动重试'; } finally { metricsBusy = false; } }
 setInterval(() => { if (!document.hidden && csrf) { metrics(); if (currentView === 'tasks') tasks().catch(() => {}); if(currentView==='playbacks')playbacks().catch(e=>notice(e.message,true)); } }, 10000);
 window.addEventListener('focus', () => { if (csrf && currentView === 'settings') status().catch(e => notice(e.message, true)); });
-(async () => { try { const r = await api('session'); csrf = r.csrf; signedIn(true); await status(); await metrics(); } catch { signedIn(false); } })();
+(async () => {
+  try {
+    const r=await api('session');
+    csrf=r.csrf;
+    signedIn(true);
+    await status();
+    await metrics();
+  } catch(error) {
+    if(error.status!==401)notice(error.message,true);
+  }
+})();
 
 $('select-season').onclick=()=>{const values=episodeItems.filter(e=>e.seasonNumber===Number($('episode-season').value)&&!e.hasFile&&!e.archived&&!e.downloading&&episodeVersionReady);const clear=values.length&&values.every(e=>selectedEpisodes.has(e.id));values.forEach(e=>clear?selectedEpisodes.delete(e.id):selectedEpisodes.add(e.id));renderEpisodes();};

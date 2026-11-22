@@ -1,19 +1,19 @@
 """Conservative, resumable cleanup of cloud-published torrent payloads via native APIs."""
-import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import time
 from urllib.parse import urlencode
 
-from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, open_source, relative, verify, fingerprint, log, sample, disc
-from archive import watch_lock
+from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, sample, disc, matches_payload, torrent_paths
+from archive import watch_lock, task_actions, torrent_instance
 
 
 class Cleaner:
-    def __init__(self, uploader, state):
+    def __init__(self, uploader, state, settings_path=None):
         self.uploader, self.db, self.state = uploader, uploader.db, Path(state)
+        self.settings_path = settings_path
         self.db.execute("""CREATE TABLE IF NOT EXISTS cleanups (
             hash TEXT PRIMARY KEY, plan TEXT NOT NULL, state TEXT NOT NULL, finished_at REAL)""")
         columns = {r[1] for r in self.db.execute('PRAGMA table_info(cleanups)')}
@@ -27,11 +27,12 @@ class Cleaner:
         sources.qb.request("POST", "/api/v2/torrents/" + action, urlencode(values).encode(),
                            {"Content-Type": "application/x-www-form-urlencoded"})
 
-    def plan(self, sources, torrent, all_torrents, days, now):
+    def plan(self, sources, torrent, days, now):
         category = torrent.get("category")
         if (category not in DOWNLOADS or torrent.get("progress") != 1
                 or torrent.get("amount_left") != 0 or torrent.get("completion_on", 0) <= 0
                 or torrent["completion_on"] > now - days * 86400
+                or type(torrent.get('added_on')) is not int or torrent['added_on'] <= 0
                 or not re.fullmatch(r"[a-fA-F0-9]{40}|[a-fA-F0-9]{64}", torrent.get("hash", ""))
                 or torrent.get("state", "").lower().startswith(("checking", "moving", "error", "missing"))):
             return None
@@ -41,7 +42,7 @@ class Cleaner:
             local_path(save, root)
         files = sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": torrent["hash"]})
         paths, jobs, episodes = [], [], []
-        published = [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state='published'")]
+        published = [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state='published' AND hidden=0")]
         for file in files:
             rel = relative(file["name"])
             path = save.joinpath(*rel.parts)
@@ -65,12 +66,6 @@ class Cleaner:
             if len(matches) != 1:
                 raise Failure('cleanup_not_archived')
             job = matches[0]
-            with open_source(path, root) as handle:
-                before = fingerprint(handle)
-                digest = hashlib.file_digest(handle, "sha1").hexdigest()
-                if fingerprint(handle) != before or job["sha1"] != digest or job["size"] != before[2]:
-                    return None
-            verify(self.uploader.remote.find(job["dest"]), job)
             if category == "sonarr-tv" and path.suffix.lower() in VIDEO:
                 if not re.fullmatch(r"tv:[0-9]+", job.get("identity") or ""):
                     return None
@@ -82,67 +77,73 @@ class Cleaner:
                 episodes.append({"file_id": file_id, "series_id": current["seriesId"], "path": job["source"]})
             elif not job["dest"].startswith("/aliyun/" + DOWNLOADS[category][1] + "/"):
                 return None
-            jobs.append(job)
-        if any(j.get('parent_id') and j['parent_id'] not in {v['id'] for v in jobs} for j in jobs):
+            jobs.append({**job, 'cleanup_source':str(path)})
+        job_ids = {j['id'] for j in jobs}
+        if any(j.get('parent_id') and j['parent_id'] not in job_ids for j in jobs):
             raise Failure('cleanup_subtitle_mapping_missing')
         if not jobs:
             return None
-        # qB deletes files by torrent; refuse any shared file with another task, even outside our categories.
-        owned = set(paths)
-        for other in all_torrents:
-            if other["hash"] == torrent["hash"]:
-                continue
-            for file in sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": other["hash"]}):
-                rel = relative(file["name"])
-                if str(Path(other["save_path"]).joinpath(*rel.parts)) in owned:
-                    return None
         return {"hash": torrent["hash"], "category": category, "save_path": str(save), "files": files,
+                "added_on":torrent["added_on"], "download_path":torrent.get('download_path'),
                 "completion_on": torrent["completion_on"], "paths": paths, "jobs": jobs, "episodes": episodes}
 
-    def execute(self, sources, plan):
+    def execute(self, sources, plan, days, now):
         torrents = sources.qb.json("GET", "/api/v2/torrents/info")
         current = next((t for t in torrents if t["hash"] == plan["hash"]), None)
-        for job in plan["jobs"]:
-            verify(self.uploader.remote.find(job["dest"]), job)
-        if current:
-            if current["category"] != plan["category"] or current["save_path"] != plan["save_path"]:
-                raise Failure("cleanup_torrent_changed")
+        if (not plan.get('added_on') or self.retained(plan, task_actions(self.state/'uploads.sqlite3'))
+                or current is None and not plan.get('qb_remove_requested')
+                or current is not None and not self.same_download(plan, current)):
+            # A different torrent instance needs a new retention plan, never a resumed delete.
+            with self.db:
+                self.db.execute('DELETE FROM cleanups WHERE hash=?', (plan['hash'],))
+            return
+        if not days or plan['completion_on'] > now-days*86400:
+            return
+        if current is not None:
             files = sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": plan["hash"]})
-            fields = lambda values: [(f["name"], f["size"], f.get("priority")) for f in values]
+            def fields(values):
+                return [(f["name"], f["size"], f.get("priority")) for f in values]
             if fields(files) != fields(plan["files"]):
                 raise Failure("cleanup_files_changed")
             root = sources.media / "downloads" / DOWNLOADS[plan["category"]][0]
+            interim = current.get('download_path')
+            if interim and Path(interim) != sources.media/'incomplete':
+                local_path(interim, sources.media/'incomplete', missing_ok=True)
+            unselected = [f for f in files if f.get('priority', 0) <= 0]
+            if any(path.exists() or path.is_symlink() for path in torrent_paths(current, unselected)):
+                raise Failure('cleanup_files_changed')
             for path in plan["paths"]:
                 local_path(path, root)
-            # Revalidate persisted plans on every retry, including changed source contents and shared files.
-            for job in plan["jobs"]:
-                source = Path(job["source"])
-                if not source.exists():
-                    if plan["category"] != "sonarr-tv":
-                        raise Failure("cleanup_source_missing")
-                    source = next((Path(p) for p in plan["paths"] if Path(p).suffix.lower() in VIDEO | SUBTITLES
-                                   and Path(p).stat().st_size == job["size"] and self.matches(p, root, job)), None)
-                    if source is None:
-                        raise Failure("cleanup_source_changed")
-                source_root = root if source.is_relative_to(root) else sources.media / "library/tv"
-                if not self.matches(source, source_root, job):
-                    raise Failure("cleanup_source_changed")
-            for other in torrents:
-                if other["hash"] != plan["hash"]:
-                    for file in sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": other["hash"]}):
-                        rel = relative(file["name"])
-                        if str(Path(other["save_path"]).joinpath(*rel.parts)) in plan["paths"]:
-                            raise Failure("cleanup_shared_file")
+            selected = {j['id'] for j in plan['jobs']}
+            owned = set(torrent_paths(current, files)) | {Path(j['source']) for j in plan['jobs']}
+            if owned & self.uploader.protected_paths(sources, torrents, {plan['hash']}, selected):
+                raise Failure('cleanup_shared_file')
             self.form(sources, "stop", {"hashes": plan["hash"]})
             stopped = sources.qb.json("GET", "/api/v2/torrents/info", query={"hashes": plan["hash"]})
-            if not stopped or stopped[0].get("state") not in {"stoppedUP", "pausedUP"}:
+            if not stopped or not self.same_download(plan, stopped[0]) or stopped[0].get("state") not in {"stoppedUP", "pausedUP"}:
                 raise Failure("cleanup_waiting_for_stop")
-        with watch_lock(self.state):
+
+            for job in plan['jobs']:
+                verify(self.uploader.remote.find(job['dest']), job)
+                raw, source = Path(job['cleanup_source']), Path(job['source'])
+                if not matches_payload(raw, root, job):
+                    raise Failure('cleanup_source_changed')
+                if source != raw and source.exists():
+                    local_path(source, sources.media/'library/tv')
+                    if not source.samefile(raw) and not matches_payload(source, sources.media/'library/tv', job):
+                        raise Failure('cleanup_source_changed')
+
             self.remove_episodes(sources, plan)
-        if current:
+            latest = sources.qb.json("GET", "/api/v2/torrents/info", query={"hashes": plan["hash"]})
+            if not latest or not self.same_download(plan, latest[0]) or latest[0].get('state') not in {'stoppedUP','pausedUP'}:
+                raise Failure('cleanup_torrent_changed')
+            plan['qb_remove_requested'] = True
+            with self.db:
+                self.db.execute('UPDATE cleanups SET plan=? WHERE hash=?', (json.dumps(plan), plan['hash']))
             self.form(sources, "delete", {"hashes": plan["hash"], "deleteFiles": "true"})
             if sources.qb.json("GET", "/api/v2/torrents/info", query={"hashes": plan["hash"]}):
                 raise Failure("cleanup_waiting_for_removal")
+
         extras = [j['source'] for j in plan['jobs'] if Path(j['source']).suffix.lower() in SUBTITLES]
         if any(Path(p).exists() for p in plan["paths"] + [i["path"] for i in plan["episodes"]] + extras):
             raise Failure("cleanup_waiting_for_files")
@@ -150,13 +151,28 @@ class Cleaner:
             self.db.execute("UPDATE cleanups SET state='done',finished_at=?,reason=NULL,retry_at=0 WHERE hash=?", (time.time(), plan["hash"]))
         log("cleanup", "local_payload_removed_cloud_retained")
 
+    @staticmethod
+    def same_download(plan, torrent):
+        return (torrent_instance(plan) == torrent_instance(torrent)
+                and plan['completion_on'] == torrent.get('completion_on')
+                and (plan.get('download_path') or '') == (torrent.get('download_path') or '')
+                and torrent.get('progress') == 1 and torrent.get('amount_left') == 0)
+
+    @staticmethod
+    def retained(torrent, actions):
+        return any(a['action'] in {'cancel', 'delete'}
+                   and any(torrent_instance(t) == torrent_instance(torrent) for t in a['payload'].get('torrents', []))
+                   for a in actions)
+
     def remove_episodes(self, sources, plan):
         for item in plan['episodes']:
             # IDs are validated against the stored path before deleting; retries tolerate already-removed files.
             listing = sources.sonarr.json("GET", "/api/v3/episodefile", query={"seriesId": item["series_id"]})
             file = next((f for f in listing if f["id"] == item["file_id"]), None)
             if file:
-                if file.get("path") != item["path"]:
+                job = next(j for j in plan['jobs'] if j['identity'] == 'tv:' + str(item['file_id']))
+                if (file.get("path") != item["path"] or file.get('size') != job['size']
+                        or file.get('seriesId') != item['series_id']):
                     raise Failure("cleanup_episode_changed")
                 local_path(file["path"], sources.media / "library/tv")
                 episodes = sources.sonarr.json("GET", "/api/v3/episode", query={"seriesId": item["series_id"]})
@@ -166,43 +182,49 @@ class Cleaner:
                 series = sources.sonarr.json('GET', '/api/v3/series/' + str(item['series_id']))
                 if not series.get('tvdbId'):
                     raise Failure('cleanup_episode_mapping_missing')
-                job = next(j for j in plan['jobs'] if j['identity'] == 'tv:' + str(item['file_id']))
                 keys = [(e['seasonNumber'],e['episodeNumber']) for e in episodes if e['id'] in ids]
                 self.uploader.update(job, tvdb_id=series['tvdbId'], episode_keys=json.dumps(keys), state='published')
                 sources.sonarr.json("PUT", "/api/v3/episode/monitor", {"episodeIds": ids, "monitored": False})
                 sources.sonarr.request("DELETE", "/api/v3/episodefile/" + str(item["file_id"]))
 
-    @staticmethod
-    def matches(path, root, job):
-        with open_source(path, root) as handle:
-            before = fingerprint(handle)
-            digest = hashlib.file_digest(handle, "sha1").hexdigest()
-            return before[2] == job["size"] and digest == job["sha1"] and fingerprint(handle) == before
+    def run(self, sources, days=7, now=None):
+        def retention():
+            value = days
+            if self.settings_path is not None and self.settings_path.exists():
+                value = json.loads(self.settings_path.read_text()).get('retention_days', days)
+            if type(value) is not int or not 0 <= value <= 3650:
+                raise Failure('invalid_retention_days')
+            return value
 
-    def run(self, sources, days, now=None):
-        if type(days) is not int or not 0 <= days <= 3650:
-            raise Failure("invalid_retention_days")
-        if days == 0:
+        configured_days = retention()
+        if configured_days == 0:
             return
-        # The source discovery authenticates qB each round; cleanup authenticates independently on discovery failure.
-        sources.downloads()
+        if not sources.qb.headers.get('Cookie'):
+            sources.login_qb()
         now = time.time() if now is None else now
         torrents = sources.qb.json("GET", "/api/v2/torrents/info")
         published_count = self.db.execute("SELECT count(*) FROM jobs WHERE state='published'").fetchone()[0]
+        actions = task_actions(self.state/'uploads.sqlite3')
         for torrent in torrents:
             previous = self.db.execute('SELECT * FROM cleanups WHERE hash=?', (torrent['hash'],)).fetchone()
+            if self.retained(torrent, actions):
+                with self.db:
+                    self.db.execute("DELETE FROM cleanups WHERE hash=? AND state!='done'", (torrent['hash'],))
+                continue
             if previous:
                 old = json.loads(previous['plan'])
-                if previous['state'] == 'pending':
+                if previous['state'] == 'pending' and self.same_download(old, torrent):
                     continue
-                if previous['state'] == 'done' and old['completion_on'] == torrent.get('completion_on'):
+                if previous['state'] == 'done' and self.same_download(old, torrent):
                     continue
-                if previous['state'] == 'deferred' and previous['retry_at'] > now and old.get('published_count') == published_count and old.get('retention_days') == days and old.get('completion_on') == torrent.get('completion_on'):
+                if (previous['state'] == 'deferred' and previous['retry_at'] > now
+                        and old.get('published_count') == published_count and old.get('retention_days') == configured_days
+                        and self.same_download(old, torrent)):
                     continue
                 with self.db:
                     self.db.execute('DELETE FROM cleanups WHERE hash=?', (torrent['hash'],))
             try:
-                plan = self.plan(sources, torrent, torrents, days, now)
+                plan = self.plan(sources, torrent, configured_days, now)
                 if plan:
                     with self.db:
                         self.db.execute("INSERT INTO cleanups(hash,plan,state,label) VALUES (?,?,'pending',?)", (torrent['hash'],json.dumps(plan),torrent.get('name','下载任务')))
@@ -210,14 +232,15 @@ class Cleaner:
                 reason = str(error) if isinstance(error,Failure) else 'cleanup_check_failed'
                 with self.db:
                     self.db.execute("INSERT OR REPLACE INTO cleanups(hash,plan,state,reason,retry_at,label) VALUES (?,?,'deferred',?,?,?)",
-                        (torrent['hash'],json.dumps({'completion_on':torrent.get('completion_on'), 'published_count':published_count,'retention_days':days}),reason,
+                        (torrent['hash'],json.dumps({k:torrent.get(k) for k in ('hash','category','save_path','download_path','added_on','completion_on')}
+                         | {'published_count':published_count,'retention_days':configured_days}),reason,
                          now + (86400 if reason in {'cleanup_unsupported_disc','cleanup_subtitle_mapping_missing'} else 300),torrent.get('name','下载任务')))
                 log('cleanup',reason)
         for row in self.db.execute("SELECT * FROM cleanups WHERE state='pending' AND retry_at<=?", (now,)).fetchall():
             try:
                 plan=json.loads(row['plan'])
-                if plan['completion_on'] <= now-days*86400:
-                    self.execute(sources,plan)
+                with watch_lock(self.state), watch_lock(self.state/'task-controls'):
+                    self.execute(sources, plan, retention(), now)
             except (Failure,OSError,KeyError,ValueError,TypeError) as error:
                 reason=str(error) if isinstance(error,Failure) else 'cleanup_check_failed'
                 delay=30 if reason in {'cleanup_waiting_for_stop','cleanup_waiting_for_removal','cleanup_waiting_for_files'} else min(3600,60*2**min(row['failures'],6))

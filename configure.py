@@ -12,7 +12,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent
 DIRECTORIES = (
     "state", "state/library", "state/library/aliyun",
-    "state/relay", "state/caddy", "media", "media/downloads",
+    "state/relay", "state/relay-token", "state/caddy", "media", "media/downloads",
     "state/emby", "state/openlist", "state/openlist-runtime", "state/prowlarr", "state/sonarr",
     "state/uploader", "state/uploader/data",
     "state/qbittorrent", "state/relay/lib", "state/relay/lib/playback", "state/caddy/data", "state/caddy/config",
@@ -68,7 +68,7 @@ def set_token(root, token):
     if config.count(marker) != 1:
         raise ValueError("Token 已配置或模板已修改；不会覆盖，请手动编辑配置。")
     path.write_text(config.replace(marker, "  token: " + json.dumps(token)), encoding="utf-8")
-    private_write(root / "state/uploader/openlist-token", token)
+    write_relay_token(root / 'state/relay-token', token)
 
 
 def private_write(path, content):
@@ -85,6 +85,36 @@ def private_write(path, content):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def prepare_relay_token_directory(directory):
+    if directory.is_symlink():
+        raise ValueError('云盘令牌目录不可为符号链接。')
+    directory.mkdir(mode=0o750, exist_ok=True)
+    if os.name == 'posix' and os.geteuid() == 0:
+        directory.chmod(0o750)
+        os.chown(directory, 1000, 1000)
+
+
+def write_relay_token(directory, token):
+    prepare_relay_token_directory(directory)
+    private_write(directory / 'openlist-token', token)
+
+
+def migrate_relay_token(root):
+    directory = root / 'state/relay-token'
+    old = root / 'state/uploader/openlist-token'
+    current = directory / 'openlist-token'
+    if directory.is_symlink() or old.is_symlink() or current.is_symlink():
+        raise ValueError('云盘令牌路径不可为符号链接。')
+    prepare_relay_token_directory(directory)
+    if current.is_file():
+        return
+    if old.is_file():
+        token = old.read_text(encoding='utf-8').strip()
+        if not token or any(c.isspace() for c in token):
+            raise ValueError('现有云盘令牌无效，请重新配置。')
+        write_relay_token(directory, token)
 
 
 def connect(root):
@@ -111,7 +141,7 @@ def connect(root):
         raise ValueError("relay 配置中的 Token 行不唯一，请检查后再运行 setup。")
     config = re.sub(r'^  token: .*$', lambda _: "  token: " + json.dumps(token), config, flags=re.MULTILINE)
     private_write(config_path, config)
-    private_write(root / "state/uploader/openlist-token", token)
+    write_relay_token(root / 'state/relay-token', token)
     private_write(existing_path, json.dumps({
         **{k:v for k,v in existing.items() if k in {'emby_url','emby_token'}},
         "openlist_url": "http://openlist:5244/openlist", "openlist_token": token,
@@ -160,11 +190,14 @@ def main():
     parser.add_argument("--token", action="store_true", help="隐藏输入 OpenList Token")
     parser.add_argument("--connect", action="store_true", help="连接已初始化的应用并配置上传")
     parser.add_argument("--check-public", action="store_true", help="开启公网前检查初始化及搜索认证")
+    parser.add_argument("--migrate-relay-token", action="store_true", help="将旧版播放令牌迁移到独立目录")
     args = parser.parse_args()
     if os.name != "posix" or (os.geteuid() != 0 and os.geteuid() != 1000):
         raise ValueError("请在 Debian 上以 root 或 UID 1000 运行；此程序不会修改系统用户。")
     if args.check_public:
         check_public(ROOT)
+    elif args.migrate_relay_token:
+        migrate_relay_token(ROOT)
     elif args.connect:
         connect(ROOT)
     elif args.token:

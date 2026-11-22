@@ -24,6 +24,7 @@ const {chromium} = require('playwright');
   let loggedIn = false;
   const searches=[];
   const taskRequests=[];
+  let previewVersion=1;
   const nativeThemeRequests = new Map();
   const server = createServer(async (request,response) => {
     const url = new URL(request.url,'http://localhost');
@@ -33,7 +34,20 @@ const {chromium} = require('playwright');
       if (name === 'session' && !loggedIn) {response.writeHead(401);response.end('{}');return;}
       if (name === 'login') {loggedIn=true;response.end(JSON.stringify(sample.session));return;}
       if (name === 'search') searches.push(Object.fromEntries(url.searchParams));
-      if (name === 'task-action') {let body='';for await(const chunk of request)body+=chunk;taskRequests.push(JSON.parse(body));response.end(JSON.stringify({message:'已提交删除'}));return;}
+      if (name === 'task-action') {
+        let raw='';for await(const chunk of request)raw+=chunk;
+        const body=JSON.parse(raw);
+        taskRequests.push(body);
+        if(body.preview){
+          const files=previewVersion===1?[jobs[1].dest]:[jobs[1].dest,'/aliyun/TV/同名剧集.S01E19.mkv'];
+          response.end(JSON.stringify({scope:'preview-'+previewVersion,local:['/media/18.mkv'],cloud:files}));
+        }else if(body.scope==='preview-1'){
+          previewVersion++;
+          response.writeHead(409);
+          response.end(JSON.stringify({error:'文件清单已变化，请重新确认。'}));
+        }else response.end(JSON.stringify({message:'已提交删除'}));
+        return;
+      }
       response.end(JSON.stringify(sample[name] || {}));return;
     }
     if (url.pathname === '/fake-emby') {
@@ -100,6 +114,7 @@ const {chromium} = require('playwright');
     assert(await page.locator('[name=delete-files][value=false]').isChecked());
     await page.locator('[name=delete-files][value=all]').check();
     assert(await page.locator('#task-all-details').isVisible());
+    await page.locator('#task-all-files li').first().waitFor();
     assert.equal(await page.locator('#task-all-files li').count(),1);
     assert((await page.locator('#task-all-files').innerText()).includes('S01E18'));
     assert((await page.locator('#task-dialog-cloud-note').innerText()).includes('云端删除无法在此撤销'));
@@ -107,8 +122,13 @@ const {chromium} = require('playwright');
       await page.setViewportSize({width,height:844});
       assert(await page.locator('#task-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth),'delete-all dialog overflow '+width);
     }
-    await page.locator('#confirm-task').click();await page.locator('#task-dialog').waitFor({state:'hidden'});
-    assert.deepEqual(taskRequests.at(-1),{id:'torrent:hash18',action:'delete',delete_files:true,delete_all:true});
+    await page.locator('#confirm-task').click();
+    await page.locator('#task-all-files li').nth(1).waitFor();
+    assert(await page.locator('#task-dialog-error').isVisible());
+    assert.equal(taskRequests.filter(r=>!r.preview).length,1);
+    await page.locator('#confirm-task').click();
+    await page.locator('#task-dialog').waitFor({state:'hidden'});
+    assert.deepEqual(taskRequests.at(-1),{id:'torrent:hash18',action:'delete',delete_files:true,delete_all:true,scope:'preview-2'});
     await page.locator('#refresh-tasks').click();
     await page.waitForFunction(()=>[...document.querySelectorAll('[data-id="series:42"] .task-source')].at(-1).open);
     for (const width of [1440,1024,768,390,320]) {

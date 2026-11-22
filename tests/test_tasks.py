@@ -103,7 +103,10 @@ class TaskTests(unittest.TestCase):
         self.uploader.db.close();self.temp.cleanup()
 
     def run_action(self,action,delete_files=False,key='series:42'):
-        return self.app.task_action({}, {'id':key,'action':action,'delete_files':delete_files})
+        body = {'id':key,'action':action,'delete_files':delete_files}
+        if delete_files:
+            body['scope'] = self.app.task_action({}, {**body, 'preview':True})['scope']
+        return self.app.task_action({}, body)
 
     def test_same_series_groups_resources_and_other_movie_remains_separate(self):
         groups=self.app.tasks()['items'];self.assertEqual(len(groups),2)
@@ -126,6 +129,22 @@ class TaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'尚未确认'):self.run_action('pause')
         self.assertEqual(json.loads(path.read_text()),{})
         self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'task_control_failed')
+
+    def test_failed_resume_retries_without_dropping_monitoring(self):
+        self.run_action('pause')
+        request = self.qb.request
+        self.qb.request = Mock(side_effect=ValueError('upstream unavailable'))
+        with self.assertRaisesRegex(ValueError, '尚未确认'):
+            self.run_action('resume')
+        self.qb.request = request
+        self.run_action('resume')
+        self.assertTrue(self.native.series[0]['monitored'])
+        self.assertEqual(self.qb.items[1]['state'], 'downloading')
+
+    def test_resume_after_native_pause_preserves_existing_monitoring(self):
+        self.qb.items[1]['state'] = 'stoppedDL'
+        self.run_action('resume')
+        self.assertTrue(self.native.series[0]['monitored'])
 
     def test_cancel_retains_payload_and_can_continue_after_acknowledgement(self):
         self.run_action('cancel');self.uploader.process_actions(self.sources)
@@ -166,6 +185,33 @@ class TaskTests(unittest.TestCase):
         self.run_action('delete',True);self.uploader.process_actions(self.sources)
         self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'],'cleanup_shared_file')
         self.assertTrue(Path(self.jobs[0]['source']).exists())
+
+    def test_local_delete_protects_another_jobs_source(self):
+        other = candidate('another', self.jobs[0]['source'], '/aliyun/TV/Another/1.mkv', 10)
+        self.uploader.add(other)
+        self.run_action('delete', True)
+        self.uploader.process_actions(self.sources)
+        self.assertTrue(Path(other['source']).exists())
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['error'], 'cleanup_shared_file')
+
+    def test_locally_deletes_verified_orphan_and_can_keep_unverified_remainder(self):
+        self.qb.items = [t for t in self.qb.items if t['hash'] == '3'*40]
+        self.run_action('delete', True)
+        self.uploader.process_actions(self.sources)
+        self.assertTrue(Path(self.jobs[0]['source']).exists())
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['state'], 'blocked')
+        self.app.task_action({}, {'id':'series:42','action':'keep-remaining'})
+        self.assertEqual(task_actions(self.state/'data/uploads.sqlite3')[0]['state'], 'done')
+        self.assertTrue(Path(self.jobs[1]['source']).exists())
+
+    def test_hidden_unpublished_job_releases_destination_for_different_episodefile(self):
+        self.run_action('delete', key='torrent:'+'2'*40)
+        self.uploader.process_actions(self.sources)
+        old = self.jobs[1]
+        new = candidate('tv:314', old['source'], old['dest'], old['size'], added_on=99, tvdb_id=42)
+        self.uploader.add(new)
+        self.assertEqual(tuple(self.uploader.db.execute('SELECT id,state FROM jobs WHERE dest=?', (old['dest'],)).fetchone()),
+                         (new['id'], 'pending'))
 
     def test_active_import_defers_file_deletion(self):
         self.native.busy=[{'name':'ManualImport','status':'started'}]

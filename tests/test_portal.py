@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from portal.server import App, Handler, Metrics, tags, archive_error
+from integration import APIError
 from portal.metadata import Titles, metadata
 
 
@@ -123,8 +124,12 @@ class PortalTests(unittest.TestCase):
             opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
             def call(path, body=None, headers=None):
                 req = Request(base + '/discover/api/' + path, None if body is None else json.dumps(body).encode(), {'Content-Type': 'application/json', 'Origin': base, **(headers or {})})
-                with opener.open(req) as r:
-                    return r, json.loads(r.read())
+                try:
+                    with opener.open(req) as r:
+                        return r, json.loads(r.read())
+                except HTTPError as error:
+                    error.close()
+                    raise
             try:
                 with self.assertRaises(HTTPError) as err:
                     call('metrics')
@@ -158,6 +163,13 @@ class PortalTests(unittest.TestCase):
                 with self.assertRaises(HTTPError):
                     call('settings', {'retention_days': -1}, {'X-CSRF-Token': login['csrf']})
                 self.assertEqual(app.settings()['retention_days'], 3)
+                emby.json.side_effect = APIError(502, 'service unavailable')
+                with self.assertRaises(HTTPError) as unavailable:
+                    call('settings', {'retention_days': 0}, {'X-CSRF-Token': login['csrf']})
+                self.assertEqual(unavailable.exception.code, 503)
+                self.assertEqual(app.settings()['retention_days'], 3)
+                emby.json.side_effect = lambda *args: {'Policy': {'IsAdministrator': True}}
+                self.assertEqual(call('session')[1]['csrf'], login['csrf'])
                 emby.json.side_effect = lambda *args: {'Policy': {'IsAdministrator': False}}
                 with self.assertRaises(HTTPError) as err:
                     call('session')
@@ -190,6 +202,20 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(result['items'][0]['labels'],['官方','中字'])
         self.assertFalse(result['items'][1]['metadata_available'])
         self.assertEqual(result['warnings'], [])
+        with patch('portal.server.metadata', side_effect=ValueError('private provider response')):
+            unavailable = app.search({}, 'Film', 'movie')
+        self.assertEqual(len(unavailable['items']), 2)
+        self.assertTrue(unavailable['warnings'])
+        self.assertNotIn('private provider response', json.dumps(unavailable))
+
+    def test_unmatched_text_preview_does_not_suppress_tvdb_lookup(self):
+        app = App()
+        emby = Mock()
+        app.client = lambda _: emby
+        series = [{'tvdbId':42,'title':'Example'}]
+        emby.json.side_effect = [[], [{'Name':'示例剧集','ProviderIds':{'Tvdb':'42'}}]]
+        self.assertEqual(app.localize({'token':'admin'}, series, 'Example S01')[42]['title'], 'Example')
+        self.assertEqual(app.localize({'token':'admin'}, series)[42]['title'], '示例剧集')
 
     def test_cloud_wizard_sets_driver_defaults_and_keeps_secrets_server_side(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -216,7 +242,7 @@ class PortalTests(unittest.TestCase):
             self.assertTrue(addition['rapid_upload'])
             self.assertNotIn('private-', json.dumps(result))
             self.assertEqual(app.config()['qb_password'], 'private-qb-password')
-            self.assertEqual((Path(temp) / 'openlist-token').read_text(), 'private-service-token')
+            self.assertEqual((Path(temp) / 'relay-token/openlist-token').read_text(), 'private-service-token')
             connect.assert_called_once()
 
     def test_new_series_is_unmonitored_until_a_version_is_saved(self):

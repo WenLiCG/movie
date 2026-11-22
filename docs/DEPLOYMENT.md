@@ -1,3 +1,5 @@
+> 历史验收记录。域名、公网地址和账号使用示例值。实际现场配置由管理员在私有运维记录中保管。
+
 ## 2026-11-04：找片首页热门资源显示中文
 
 已上线中文优先展示：复用已配置 PT 站点列表的中文副标题，以站点 ID 和资源 ID 对应名称，去掉别名、集数及发布说明。原英文搜索词及完整资源名保留，没有匹配的中文资料时回退原名，不猜译。每个入选站点只额外读取一页，复用 30 分钟缓存，不增加提供方账户或依赖。
@@ -41,7 +43,7 @@
 
 ## 2026-11-04：电影栏加载修复、PT 推荐与中文字幕默认值
 
-已部署至 https://movie2.g60.net/discover/。电影栏错误的根因是严格 relay 将 `/web/videos/videos.js` 中的 `/videos/` 误判为媒体接口：原始 Emby 返回 200，relay 返回 401。规范的 Web 静态命名空间现在优先分发；实际视频仍须逐资源授权，未经授权的视频返回 401，伪装为脚本的媒体响应仍被拒绝。未更改媒体数据或服务凭据。
+已部署至 https://cinema-1.example.com/discover/。电影栏错误的根因是严格 relay 将 `/web/videos/videos.js` 中的 `/videos/` 误判为媒体接口：原始 Emby 返回 200，relay 返回 401。规范的 Web 静态命名空间现在优先分发；实际视频仍须逐资源授权，未经授权的视频返回 401，伪装为脚本的媒体响应仍被拒绝。未更改媒体数据或服务凭据。
 
 - relay 原源码与镜像备份：`/opt/cinema/backups/web-assets-20261104T121744Z`。Linux amd64 二进制来自相同固定上游与源码补丁，替换运行镜像内的可执行文件。额外从干净固定上游重放三份补丁，四个 Go 包的 TestStrict 均通过；Dockerfile 构建也会执行这些回归。
 - 功能更新备份：`/opt/cinema/backups/ui-20261104T123401Z`；追剧分隔线微调及界面说明备份：`/opt/cinema/backups/ui-20261104T123916Z`。索引器原生能力字段复核更新备份：`/opt/cinema/backups/ui-20261104T124239Z`，按原生顶层 supportsRss 过滤，已在真实两站响应及三项回归验证。仅重建 portal，其他八个服务保持原容器；最终九服务运行，配置指纹不变。
@@ -58,7 +60,7 @@
 
 ## 2026-11-04：浅色界面上线与主题同步验收
 
-新版已部署到 `https://movie2.g60.net/discover/`，默认使用参考 Emby 的浅色主题，保留已保存的深色选择。更新 12 个界面、测试及说明文件，未更改 Compose、私有配置或媒体数据。只重建 portal；relay 在首次更新后重启一次以刷新定制 CSS 缓存。其余服务容器保持原状，最终 9 个服务均运行。
+新版已部署到 `https://cinema-1.example.com/discover/`，默认使用参考 Emby 的浅色主题，保留已保存的深色选择。更新 12 个界面、测试及说明文件，未更改 Compose、私有配置或媒体数据。只重建 portal；relay 在首次更新后重启一次以刷新定制 CSS 缓存。其余服务容器保持原状，最终 9 个服务均运行。
 
 上线时发现 Emby 后续组件加载会让同步脚本重新插入已加载的主题样式，重复请求导致颜色短暂回退。`portal/theme.js` 改用保留节点状态的 `moveBefore`，旧浏览器保留重新插入兼容路径。新增的回归先复现“组件加载后主题请求由 1 次变为 2 次”，修正后保持 1 次。
 
@@ -134,7 +136,7 @@
 
 ## 定制页面与保留策略（2026-11-02 最新）
 
-本节优先于下方历史记录。定制页面已上线：[找片与追剧](https://movie2.g60.net/discover/)，使用 Emby 管理员账号。9 个服务均已运行，复用当前 2 个启用的搜索站点和已有 `/aliyun` 阿里云盘挂载；通过页面原生接口完成下载器、Sonarr、上传器接线，不重置原应用账号或 PT 凭据。
+本节优先于下方历史记录。定制页面已上线：[找片与追剧](https://cinema-1.example.com/discover/)，使用 Emby 管理员账号。9 个服务均已运行，复用当前 2 个启用的搜索站点和已有 `/aliyun` 阿里云盘挂载；通过页面原生接口完成下载器、Sonarr、上传器接线，不重置原应用账号或 PT 凭据。
 
 - 更新前停止影院容器，备份源码、`.env` 和完整状态，保留媒体。备份 `/opt/cinema/backups/before-portal-20261102T123504716438Z.tar.gz`，约 7.2 MB，权限 0600。
 - Debian 上 46 项 Python 检查全部通过。浏览器的桌面和手机模拟服务检查覆盖搜索、筛选、设置、追剧弹窗、错误提示及会话失效。真实公网 HTTPS 检查通过管理员登录、安全 Cookie、CSRF 设置保存、登出和匿名拒绝。
@@ -153,36 +155,36 @@
 
 - 已备份本机 Codex 配置并清理一个指向不存在插件路径的失效配置段；新增 `cloudflare-direct`，连接官方 `https://mcp.cloudflare.com/mcp`，用户已完成 OAuth 授权。原托管插件通道的认证问题未作为已修复项；目前通过新的官方直连完成管理。
 - 官方连接的认证工具发现、身份查询、`g60.net` 区域读取及 DNS 读写均已实际通过，没有导出凭据。
-- 精确名称 `movie2.g60.net` 的旧 Vercel CNAME 已备份到本机 `.tools/movie2-dns-before-20261102.json`，随后改为 A `23.147.120.113`、仅 DNS、自动 TTL；修改后 API 回读和公共解析通过。未更改其他记录。
+- 精确名称 `cinema-1.example.com` 的旧 Vercel CNAME 已备份到本机 `.tools/movie2-dns-before-20261102.json`，随后改为 A `203.0.113.10`、仅 DNS、自动 TTL；修改后 API 回读和公共解析通过。未更改其他记录。
 - Caddy 已取得正式 Let's Encrypt 证书。Windows 客户端通过真实公网 DNS、系统 CA 信任和主机名校验访问五个页面及全部应用登录接口，通过搜索/Sonarr 表单登录、qB 登录、OpenList 登录与认证 API、Emby 登录和注销检查；隐藏管理路径返回 404，未登录视频请求返回 401。未关闭 TLS 验证。
-- 网页入口：[电影墙](https://movie2.g60.net/web/index.html)、[搜索](https://movie2.g60.net/search/)、[Sonarr](https://movie2.g60.net/sonarr/)、[下载](https://movie2.g60.net/qb/)、[云盘管理](https://movie2.g60.net/openlist/)。各应用独立登录，用户名 `jsjcjsjc`，密码为用户指定值，本记录不保存密码。
+- 网页入口：[电影墙](https://cinema-1.example.com/web/index.html)、[搜索](https://cinema-1.example.com/search/)、[Sonarr](https://cinema-1.example.com/sonarr/)、[下载](https://cinema-1.example.com/qb/)、[云盘管理](https://cinema-1.example.com/openlist/)。各应用独立登录，用户名 `cinema-admin`，密码为用户指定值，本记录不保存密码。
 - 阿里云盘授权、PT 凭据和真实媒体任务仍待用户填写及验收，uploader 尚未启动；当前网页与登录验收不能证明真实下载、上传或播放成功。
 
 ## 单域名子目录变更（同日后续）
 
-本节优先于下方首次部署记录。测试域名改为 `movie2.g60.net`，根路径是电影墙，`/search/`、`/sonarr/`、`/qb/`、`/openlist/` 分别对应搜索、追剧、下载和云盘管理。各应用仍独立登录。
+本节优先于下方首次部署记录。测试域名改为 `cinema-1.example.com`，根路径是电影墙，`/search/`、`/sonarr/`、`/qb/`、`/openlist/` 分别对应搜索、追剧、下载和云盘管理。各应用仍独立登录。
 
 - 已备份现有配置与完整 state，备份校验通过：VPS `/root/cinema-backups/20261102T084035Z-before-single-domain/cinema-config-state.tar.gz`。原有账号、种子及媒体未删除。
 - 已部署单域名配置，并更新 Prowlarr→Sonarr 接线、relay 的 OpenList 地址和未来 uploader 地址。原生 Prowlarr/Sonarr/qB 下载器测试、OpenList 子目录登录、实际 uploader 两轮空库发现及公网账号保护检查通过。
-- 原生环境变量提供路径：Prowlarr `/search`，Sonarr `/sonarr`；OpenList 镜像用 `server --no-prefix` 启动，必须使用 `SITE_URL=https://movie2.g60.net/openlist`。这些路径同样影响容器内部 API。
+- 原生环境变量提供路径：Prowlarr `/search`，Sonarr `/sonarr`；OpenList 镜像用 `server --no-prefix` 启动，必须使用 `SITE_URL=https://cinema-1.example.com/openlist`。这些路径同样影响容器内部 API。
 - 已修复安装包遗漏无扩展名 `gateway/Caddyfile` 的问题，打包检查明确要求包含它。
 - Prowlarr/Sonarr 在当前代理信任配置下会发出 HTTP 登录跳转。Caddy 将其 Location 转为 HTTPS，并为表单会话 Cookie 增加 Secure 属性；qB 保留原始 Host、Origin/Referer 与认证检查。
 - 35 项 Python 测试已在 Debian 全部通过，搜索入口检查及 Caddy 配置验证通过。本机 TLS 网关的 5 个页面、各应用登录、OpenList API、Emby 注销、未登录播放拒绝和隐藏管理路由检查全部通过；测试客户端信任该次测试证书并校验主机名，未关闭证书验证。测试证书仅用于本机验证，不用于公网入口。
 - Cloudflare 插件在用户两次重新连接后仍返回 UNAUTHORIZED，未执行任何 DNS 写入。公开 DNS 查询显示该名称仍解析到 Vercel CNAME；尚未确认它是独立记录还是由通配记录命中。
 - 浏览器自动化因无法可靠识别当前 URL 被工具停止；未绕过浏览器安全检查。
-- 公网 Caddy 网关已启动，80/443 正常监听，HTTP 重定向到 HTTPS 已验证。正式证书申请因校验请求仍落到 Vercel 并返回 404 而失败，Caddy 等待重试；公网 DNS 与受信任证书验收尚未完成。DNS 需将本名称设为 A 记录 `23.147.120.113`，初期仅 DNS；如有同名 CNAME，只替换该精确名称，不更改其他记录或通配记录。操作前应保存原记录。
+- 公网 Caddy 网关已启动，80/443 正常监听，HTTP 重定向到 HTTPS 已验证。正式证书申请因校验请求仍落到 Vercel 并返回 404 而失败，Caddy 等待重试；公网 DNS 与受信任证书验收尚未完成。DNS 需将本名称设为 A 记录 `203.0.113.10`，初期仅 DNS；如有同名 CNAME，只替换该精确名称，不更改其他记录或通配记录。操作前应保存原记录。
 - PT 站点与阿里云盘授权仍由用户在原生页面完成；没有验证真实下载、上传和视频分片直连。
 
 后续隧道入口也包含路径：`http://127.0.0.1:9696/search/`、`http://127.0.0.1:8989/sonarr/`、`http://127.0.0.1:5244/openlist/`。`Open.cmd` 已同步更新。首次部署记录中的两个临时域名和无前缀入口已失效。
 
 ## 部署状态
 
-- 服务器：`23.147.120.113:22`，Debian 12 amd64，2 核、约 3.8 GiB 内存、60 GB 系统盘。
+- 服务器：`203.0.113.10:22`，Debian 12 amd64，2 核、约 3.8 GiB 内存、60 GB 系统盘。
 - 安装目录：`/opt/cinema`。初查仅 SSH 监听，无 Docker、无旧影院目录；按 Docker 官方 Debian apt 源安装，未替换旧应用、修改 SSH 或添加防火墙规则。Docker 自身创建运行所需的网络规则。
 - 运行中：Emby 4.10.2.0、OpenList 4.2.9、Prowlarr 2.7.0.5723、Sonarr 4.0.20.3014、qBittorrent 5.3.0、严格直连 relay。
 - uploader：镜像构建成功，未启动；等待真实阿里云盘授权和 `install.sh setup`。
 - Caddy：未启动，80/443 未监听。按本次选择只通过 SSH 隧道试用，`.env` 中是临时保留域名 `movie.example.invalid`、`search.example.invalid`。
-- 五个应用管理员用户名均为 `jsjcjsjc`，密码使用用户指定的默认值；本记录不保存密码。OpenList 游客已禁用，Emby 管理员密码状态已校验，音视频转码权限已关闭。
+- 五个应用管理员用户名均为 `cinema-admin`，密码使用用户指定的默认值；本记录不保存密码。OpenList 游客已禁用，Emby 管理员密码状态已校验，音视频转码权限已关闭。
 - Prowlarr/Sonarr 启用表单登录，两个下载器及 Prowlarr→Sonarr 连接已创建并通过原生 Test。qB 已设置电影/电视剧分类和下载目录，Sonarr 剧库 `/media/library/tv`，保留完成下载和做种文件。
 - Emby 已建立 Movies/TV 媒体库，只指向 `/library/aliyun/Movies` 与 `/library/aliyun/TV`；当前为空。
 
@@ -211,7 +213,7 @@
 Windows 双击项目根目录 `Open.cmd`，输入 VPS 的 SSH 密码，保持窗口运行。也可以在 PowerShell 执行：
 
 ```powershell
-ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:8095:127.0.0.1:8095 -L 127.0.0.1:5244:127.0.0.1:5244 -L 127.0.0.1:9696:127.0.0.1:9696 -L 127.0.0.1:8989:127.0.0.1:8989 -L 127.0.0.1:8080:127.0.0.1:8080 -L 127.0.0.1:8096:127.0.0.1:8096 root@23.147.120.113
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:8095:127.0.0.1:8095 -L 127.0.0.1:5244:127.0.0.1:5244 -L 127.0.0.1:9696:127.0.0.1:9696 -L 127.0.0.1:8989:127.0.0.1:8989 -L 127.0.0.1:8080:127.0.0.1:8080 -L 127.0.0.1:8096:127.0.0.1:8096 root@203.0.113.10
 ```
 
 | 入口 | 用途 |
@@ -236,7 +238,7 @@ cd /opt/cinema
 bash install.sh setup
 ```
 
-隐藏输入 OpenList 管理 Token 和 qB 当前密码，qB 用户名填写 `jsjcjsjc`。脚本会更新已建立的同名连接并启动 uploader/relay，不删除媒体。
+隐藏输入 OpenList 管理 Token 和 qB 当前密码，qB 用户名填写 `cinema-admin`。脚本会更新已建立的同名连接并启动 uploader/relay，不删除媒体。
 
 随后按 [SETUP.md 第 10 节](SETUP.md#10-真实任务验收)验证下载、上传中断、完成发布、入库、快进和实际视频分片来源。暂不执行 `public`；以后提供域名后先修改 `.env` 再验收。
 

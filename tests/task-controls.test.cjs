@@ -2,7 +2,7 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'../portal/app.js'),'utf8');
 const context=vm.createContext({
-  node:(tag,text)=>({tag,text,children:[],append(...items){this.children.push(...items);}}),
+  node:(tag,text)=>({tag,text,dataset:{},children:[],append(...items){this.children.push(...items);}}),
 });
 vm.runInContext(source.match(/const seedStates=.+;/)[0]+'\n'+source.slice(source.indexOf('function taskButtons('),source.indexOf('function openTaskDialog(')),context);
 const controls=(target,status)=>context.taskButtons(target,status).children;
@@ -17,6 +17,7 @@ assert.equal(labels({...done,uploads:[{state:'cancelled'}]},{action:'cancel',sta
 assert.equal(labels({...done,progress:.5,state:'downloading'}),'暂停下载,取消下载,删除项目');
 assert.equal(labels({...done,progress:0,state:'metaDL',uploads:[]}),'暂停下载,取消下载,删除项目');
 assert.equal(labels({...done,progress:.5,state:'stoppedDL'}),'继续下载,取消下载,删除项目');
+assert.equal(labels({...done,progress:.5,state:'downloading'},{action:'resume',state:'done',error:'task_control_failed'}),'重试继续,取消下载,删除项目');
 assert.equal(labels({resources:[done,{...done,progress:.5,state:'stoppedDL'}],uploads:[],tvdb_id:42}),'继续下载,取消下载,删除追剧项目');
 assert.equal(labels({resources:[done,done],uploads:done.uploads,tvdb_id:42}),'删除追剧项目');
 assert.equal(labels({resources:[],uploads:done.uploads,tvdb_id:42}),'删除追剧项目');

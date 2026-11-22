@@ -14,6 +14,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class APIError(ValueError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
 class Client:
     timeout = 90
     def __init__(self, base, key=None):
@@ -44,7 +50,7 @@ class Client:
                 return result
         except urllib.error.HTTPError as error:
             error.close()
-            raise ValueError(f"{path.split('?')[0]} 返回 HTTP {error.code}；请检查应用设置和登录。") from None
+            raise APIError(error.code, f"{path.split('?')[0]} 返回 HTTP {error.code}；请检查应用设置和登录。") from None
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ValueError("本地应用尚不可用；请检查 docker compose ps，稍后重试 setup。") from None
 

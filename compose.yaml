@@ -34,7 +34,7 @@ services:
       - "127.0.0.1:8095:8095"
     volumes:
       - ./state/relay/config.yml:/app/config.yml:ro
-      - ./state/uploader:/app/cinema-config:ro
+      - ./state/relay-token:/app/cinema-config:ro
       - ./state/library:/app/openlist-local-tree
       - ./state/relay/lib:/app/lib
       - ./relay/custom-js:/app/custom-js:ro
@@ -145,6 +145,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - ./state/uploader:/state
+      - ./state/relay-token:/state/relay-token
       - ./state/prowlarr:/services/prowlarr:ro
       - ./state/sonarr:/services/sonarr:ro
       - ./state/relay/lib/playback:/playback:ro

@@ -5,5 +5,7 @@ media/
 .tools/
 /.impeccable/review/
 dist/
+/backups/
+/.cinema-source-files.json
 __pycache__/
 *.pyc

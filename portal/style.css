@@ -102,8 +102,8 @@ p{margin:8px 0 22px}
 .delete-all-option{color:var(--error)}
 #task-all-details{padding:12px 16px;border:1px solid var(--error);border-radius:10px;background:var(--error-soft);font-size:13px}
 #task-all-details p{margin:0 0 8px}
-#task-all-files{max-height:180px;overflow:auto;margin:0;padding-left:20px;overflow-wrap:anywhere}
-#task-all-files li+li{margin-top:8px}
+#task-all-details ul{max-height:140px;overflow:auto;margin:0;padding-left:20px;overflow-wrap:anywhere}
+#task-all-details li+li{margin-top:8px}
 @media(max-width:650px){#recommendation-groups{grid-template-columns:1fr;gap:16px}.recommendations{margin-top:24px}.recommendation-column{padding:16px}}
 .welcome-copy{text-align:center}
 .welcome-copy p{margin:0 0 8px;font-size:19px;font-weight:600}
