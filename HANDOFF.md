@@ -194,3 +194,77 @@ sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
 - **no-go。** 冻结候选仍是 Draft PR #7 head `0aabaaede8ba37b70607416a6fde53a4c2992ce1` / tree `f1617efc5a0645fdd1a9791024c565950e880ad9`，base `c792c3fe3312f77c7022aa7f5fcd30f419dbab44`。独立 QA 第二轮 fail/no-go。第一轮 head `9d6c23fd733b447ff708fcf974cf3687cbb19b62` / tree `566ba6edc24ee1631fd35f84e9fc18418dc0cd86` 亦 no-go。两轮结论都保留。2026-11-19 16:08 PST 只读核对时，远程 head 仍是这组 SHA；SHA 未变不是当前 QA 通过。
 - **未测。** A 现场 blocked。真实签名 Range 206、WebSocket 101、官方 App、Infuse、滑条、公网层 unrun。残留验证脚本误判是离线桩证据，不能写成 A 现场泄漏。作者 07:16 PT 修复交接是停止前的唯一作者交付，其中“继续修复 / 应用 / 在 A 复验”已被停止指令取代。作者停止后工作区状态未知。
 - **未合并、未部署。** PR #7 仍是 Draft。本次只加文档，不合并，不部署，不恢复开发。禁止把本段或归档提交当成功能验收。
+
+## 2026-11-23 独立导入与复核（Cursor 云端）
+
+本节由 Cursor 云端代理在作者记录之后追加。上面的「2026-11-23 全面复审与修复」仍是 Claude CLI 作者记录，不是本节的复测结论。本节不改产品代码。
+
+### 源、导入与当前 main
+
+| 角色 | SHA |
+| --- | --- |
+| 源 main / 当前 `origin/main` | `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e` |
+| 本地候选（5 个源提交的合并结果，未在本仓库重放成 5 个提交） | `d93f6cd6232526b4cb79b74174ca68f8642e67aa` |
+| 补丁 SHA256 | `192c9e48a0317dccd285c6e8c1b15bff2f01249a73613e7b9b023a08db986377` |
+| 导入后的 git tree | `1d28e35916c3620d192f5d9e35e19e2c83ad1680` |
+| 导入提交（作者 Cursor Agent，只应用该 diff） | `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1` |
+| 独立测试提交 | `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` |
+
+`git fetch origin main` 后 `origin/main` 仍是 `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e`。没有新的 main 提交，没有冲突，也没有丢弃任一侧的改动。补丁是普通 git diff，不是 mbox。在该基线上 `git apply --index` 后、提交前，`git write-tree` 等于 `1d28e35916c3620d192f5d9e35e19e2c83ad1680`。导入提交的 tree 与此相同。5 个本地源提交没有被重造成新的作者身份。发布环境可能在提交说明末尾追加 `Co-authored-by`；以提交说明正文中的 SHA 为准。包含本节的提交是独立测试提交的子提交，分支头用 `git rev-parse HEAD` 核对。
+
+导入的产品与作者测试文件：`HANDOFF.md`、`README.md`、`compose.yaml`、`docs/DISCOVER.md`、`gateway/Caddyfile`、`portal/app.js`、`portal/index.html`、`portal/playback.py`、`portal/server.py`、`relay/playback.go`、`relay/playback_test.go`、`tests/portal-resilience.test.cjs`、`tests/test_cleanup.py`、`tests/test_gateway.py`、`tests/test_playback.py`、`tests/test_portal.py`、`tests/test_reliability.py`、`tests/test_versions.py`、`uploader/cleanup.py`、`uploader/uploader.py`。
+
+独立追加：`tests/test_independent_boundaries.py`、`tests/independent-ui-flows.cjs`，以及本节。
+
+### 环境
+
+2026-11-22T23:43:35Z 记录：Linux 6.12.113+ x86_64，Python 3.12.3，Node v22.23.4，Google Chrome 157.0.8103.50，Playwright 1.49.1，Docker 29.1.3，Compose 2.40.3，宿主机 Go 1.22.2（未用于 TestStrict）。relay 测试在镜像构建里的 `golang:1.27-alpine` 中运行。没有真实 Emby、OpenList、PT、阿里云或生产流量。
+
+### 命令与退出码（独立执行）
+
+| 命令 | 退出码 | 结果 |
+| --- | --- | --- |
+| `sha256sum` 附件补丁 | 0 | 与上表 SHA256 一致 |
+| `git apply --check` 后 `git apply --index`，再 `git write-tree` | 0 | tree 完全匹配 |
+| `git fetch origin main` | 0 | 与源基线相同 |
+| 源基线上只换入候选新增测试后，逐项运行清理/播放记录/退出/密码/超时/退避/网关/重复下载与 `node tests/portal-resilience.test.cjs` | 全部 1 | 修复前失败：sidecar 会删正片、大 sample 被删、401 会话挤成 100 条、退出 503、密码文案是通用错误、`Handler.timeout` 为 None、退避 10 次而不是 4、Caddy 没有 HSTS、重复下载报「结果已过期」、旧前端不处理断网 |
+| `python3 -m unittest discover -s tests -p 'test_*.py'` | 0 | 184 项，1 项跳过。其中 13 项是本节新增，其余对应该候选在 171 项基础上的作者测试 |
+| `python3 -m unittest discover -s tests -p 'test_independent_boundaries.py'` | 0 | 13 项 OK |
+| `node --test tests/*.test.cjs` | 0 | 4 项通过 |
+| `bash -n install.sh` 与 `bash -n scripts/*.sh`，`node --check portal/app.js` | 0 | 通过 |
+| `NODE_PATH=/tmp/pw/node_modules node tests/check_ui.cjs` | 0 | 本机 Chrome 跑完五个视图 |
+| `NODE_PATH=/tmp/pw/node_modules node tests/independent-ui-flows.cjs` | 0 | 启动 503 显示登录、退出清空旧结果、保留天数编辑不被焦点刷新覆盖、重试按钮在 `tasks()` 后保持焦点、追更范围没有第 0 季 |
+| `python3 scripts/build_all_in_one.py --output /tmp/cinema-independent.sh` 后 `sha256sum -c` | 0 | OK。未在解包目录再跑测试 |
+| `sudo -E docker compose --profile '*' config --quiet` | 0 | 真实 Compose 解析。relay 为 `cinema-relay:9b049b8-strict5`，`cap_drop: [ALL]`，`no-new-privileges:true`，只绑定 `127.0.0.1:8095` |
+| `sudo -E docker compose --profile connected build relay` | 0 | 镜像构建成功。Dockerfile 内 `go test -run TestStrict` 四个包均为 `ok`，随后 release 构建成功。日志没有 `-v`，本节不把作者的「18 项」写成独立计数 |
+| 固定摘要 `caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e` 对仓库 Caddyfile `validate` | 0 | `Valid configuration`。有格式警告，不是配置错误 |
+| 同一 Caddy 镜像加本机 echo，请求 `https://localhost/` | 0 | `cinema=SECRET` 到上游为空；`cinema=SECRET; emby=1` 变为 `emby=1`；`a=1; cinema=SECRET; b=2` 变为 `a=1;b=2`；`notcinema` 与 `x=notcinema=1` 不变。响应含 `strict-transport-security: max-age=31536000`（无 includeSubDomains/preload）和 `x-frame-options: SAMEORIGIN` |
+| `docker run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true` 挂示例配置 | 进程保持运行，手动停止 | 监听 8095。访问返回 500，日志是 `lookup emby ... no such host`。没有连上真实 Emby |
+
+`.github/workflows/regression.yml` 只在 `push` 和 `pull_request` 上跑测试、安装包和解包、Compose 配置与 relay 镜像构建。没有部署、发布或预览工作流。打开 PR 会启动这条回归，不会部署。
+
+### 独立结论与未改的产品边界
+
+作者声称的清理保留、未授权播放记录、退出、超时、错误密码、退避、前端焦点和网关头，在本机用上述失败对照和通过测试复现。产品代码没有被改写。
+
+仍保留、需要所有者知道的行为：
+
+- 含未归档媒体的种子不再自动清理，磁盘可能持续增长；任务页仍可手动删除。
+- HSTS 一年，且不含子域。浏览器记住后不能靠回滚服务端马上撤销。
+- OpenList 返回 500 后停在 `moving` 的任务仍不自动重试。本节没有改这条策略，也没有连真实 OpenList。
+- 按任务名恢复且云端没有 SHA1 时，仍可能只按大小发布。本节没有改，也没有用真实云盘验证。
+- 管理入口和 Emby 仍在同一主机。发往 Emby 的 `cinema` cookie 已在真实 Caddy 上剥掉，但同源 XSS 仍能碰到管理路径。`X-Frame-Options` 加在 Emby 那条 handle 上，不是整个 `/discover/`。
+- 名称像 sample、qB 报告大小小于或等于 1 GiB 的视频仍会随已归档正片删除。大于 1 GiB 才要求先归档。缺 `size` 时在删除前的字段比较抛错，状态留在 `pending` / `cleanup_check_failed`，本轮不删文件；这是失败关闭，不是明确的保留原因。
+- `.mks` 和 `.ttml` 不在未归档媒体名单里，也不属于会归档的 srt/ass/ssa。正片已发布时，自动清理仍会删除它们。`test_sidecar_extensions_outside_the_allow_list_are_still_deleted` 记录了这个现状。本节没有扩大名单。
+- 门户会隐藏非 2xx 的会话上报。历史媒体行只要 `kind=media` 且状态为 401，仍会占满最近 100 条。新的未授权请求由 relay 不再写入；旧媒体失败行与真实播放失败在日志里没有单独的授权标记。
+- 退避只在内存里，重启即清零，单次等待最长 5 分钟。等待期间动作保持 `pending`，不会被标成完成。另一个 id 的动作不会被第一条的退避挡住。
+
+### 未测
+
+真实 Emby、qB、OpenList、PT、阿里云和公网客户端。安装包只做了校验和，没有在解包目录重跑 184 项。没有 `docker compose up` 整套影院。relay 的 Go 测试没有在宿主机 Go 1.22 上重跑。网关容器自身的 `cap_drop` 仍按作者延后项未改。
+
+### 回滚与继续
+
+未部署，没有数据库迁移。回滚这个分支不会改变已经下发的 HSTS，因为本节没有发布。代码回滚是revert导入提交 `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1`、独立测试提交 `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` 和包含本节的提交，或直接关闭 PR。不要 force-push，不要改已经推送的提交。
+
+继续：先看 GitHub `regression` 的终态；所有者决定 `.mks`/`.ttml`、`moving` 重试、无 SHA1 发布，以及是否把管理入口拆到独立子域。本节不合并、不部署。
