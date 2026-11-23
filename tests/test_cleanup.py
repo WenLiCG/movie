@@ -154,6 +154,24 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(self.path.exists())
         self.assertEqual(self.deleted, [])
 
+    def test_legacy_pending_plan_rechecks_unarchived_media_before_deleting(self):
+        now = 1000 + 8 * 86400
+        plan = self.cleaner.plan(self.sources, self.torrent, 7, now)
+        extra = self.path.parent / 'film.sup'
+        extra.write_bytes(b'not in the cloud')
+        self.files = [*self.files, {'name': extra.name, 'size': extra.stat().st_size, 'priority': 1, 'progress': 1}]
+        legacy = {**plan, 'files': self.files, 'paths': [*plan['paths'], str(extra)]}
+        with self.uploader.db:
+            self.uploader.db.execute("INSERT INTO cleanups(hash,plan,state) VALUES (?,?,'pending')",
+                                     (self.torrent['hash'], json.dumps(legacy)))
+
+        self.cleaner.run(self.sources, now=now)
+
+        self.sources.qb.request.assert_not_called()
+        self.assertTrue(self.path.exists())
+        self.assertTrue(extra.exists())
+        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_unarchived_media')
+
     def test_pending_plan_cannot_expire_a_new_download_or_override_keep(self):
         now = 1000 + 8*86400
         original = self.sources.qb.request.side_effect

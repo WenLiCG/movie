@@ -1265,15 +1265,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("请求格式无效。")
             if path == "/api/login" and self.command == "POST":
                 peer = self.client_address[0]
-                try:
-                    trusted = ipaddress.ip_address(peer).is_loopback
-                    trusted |= peer in socket.gethostbyname_ex('gateway')[2]
-                    if trusted:
-                        forwarded = self.headers.get('X-Forwarded-For', '').split(',')[-1].strip()
-                        if forwarded:
+                forwarded = self.headers.get('X-Forwarded-For', '').rsplit(',', 1)[-1].strip()
+                if forwarded:
+                    try:
+                        trusted = ipaddress.ip_address(peer).is_loopback
+                        trusted |= peer in socket.gethostbyname_ex('gateway')[2]
+                        if trusted:
                             peer = str(ipaddress.ip_address(forwarded))
-                except (ValueError, OSError):
-                    pass
+                    except (ValueError, OSError):
+                        pass
                 sid, session = app.login(body, peer)
                 return self.reply({"csrf": session["csrf"]}, cookie="cinema=" + sid)
             cookies = SimpleCookie(self.headers.get("Cookie", ""))

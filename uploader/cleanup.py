@@ -15,9 +15,21 @@ from archive import watch_lock, task_actions, torrent_instance
 UNARCHIVED_MEDIA = {'.rmvb', '.rm', '.wmv', '.asf', '.mpg', '.mpeg', '.mpe', '.vob', '.flv', '.f4v', '.3gp',
                     '.divx', '.ogm', '.ogv', '.mts', '.m2t', '.iso', '.mka', '.flac', '.dts', '.ac3', '.eac3',
                     '.thd', '.truehd', '.aac', '.mp3', '.m4a', '.opus', '.wav', '.sup', '.idx', '.sub', '.vtt',
-                    '.smi', '.sami', '.usf', '.pgs'}
+                    '.smi', '.sami', '.usf', '.pgs', '.mks', '.ttml'}
 # Real samples are small; a "sample"-named file above this is treated as a main feature.
 SAMPLE_LIMIT = 1024 ** 3
+
+
+def verify_cleanup_media(file):
+    suffix = Path(file['name']).suffix.lower()
+    if suffix in UNARCHIVED_MEDIA:
+        raise Failure('cleanup_unarchived_media')
+    if suffix in VIDEO and sample(file['name']):
+        size = file['size']
+        if type(size) is not int or size < 0:
+            raise Failure('cleanup_check_failed')
+        if size > SAMPLE_LIMIT:
+            raise Failure('cleanup_not_archived')
 
 
 class Cleaner:
@@ -65,11 +77,8 @@ class Cleaner:
             if file.get("progress") != 1:
                 return None
             paths.append(str(path))
-            if path.suffix.lower() in UNARCHIVED_MEDIA:
-                raise Failure('cleanup_unarchived_media')
+            verify_cleanup_media(file)
             if sample(file['name']):
-                if path.suffix.lower() in VIDEO and file.get('size', 0) > SAMPLE_LIMIT:
-                    raise Failure('cleanup_not_archived')
                 continue
             if disc(file['name']):
                 raise Failure('cleanup_unsupported_disc')
@@ -126,6 +135,10 @@ class Cleaner:
             unselected = [f for f in files if f.get('priority', 0) <= 0]
             if any(path.exists() or path.is_symlink() for path in torrent_paths(current, unselected)):
                 raise Failure('cleanup_files_changed')
+            # A pending plan may predate the media checks applied to newly planned deletes.
+            for file in files:
+                if file.get('priority', 0) > 0:
+                    verify_cleanup_media(file)
             for path in plan["paths"]:
                 local_path(path, root)
             selected = {j['id'] for j in plan['jobs']}

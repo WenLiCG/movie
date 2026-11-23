@@ -86,7 +86,7 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         return extra
 
     def test_alternate_sidecars_block_cleanup_of_a_published_main_video(self):
-        for name in ('Film.SUP', 'Subs/Film.idx', 'Subs/Film.SUB', 'Film.vtt',
+        for name in ('Film.SUP', 'Subs/Film.idx', 'Subs/Film.SUB', 'Film.vtt', 'Film.mks', 'Film.ttml',
                      'Audio/Track.FLAC', 'Extra.m2t', 'Sample.People.mka', 'Film.EAC3'):
             extra = self._with_sidecar(name)
             self.assertEqual(self.deleted, [], name)
@@ -133,8 +133,7 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         self.assertEqual(self.deleted, ['a' * 40])
 
     def test_missing_qb_size_fails_closed_instead_of_deleting(self):
-        # qB file entries are expected to carry size. Omitting it raises while comparing the plan,
-        # so the torrent stays on disk with a generic deferred reason rather than being removed.
+        # A sample-named video with unknown size cannot be classified as disposable.
         self._extra('Movie.sample.mkv', b'local file whose qB size was omitted')
         self.files = [
             {'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
@@ -145,17 +144,11 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         self.assertEqual(self.deleted, [])
         self.assertTrue(self.path.exists())
         self.assertEqual(self.uploader.db.execute('SELECT state, reason FROM cleanups').fetchone()[:],
-                         ('pending', 'cleanup_check_failed'))
+                         ('deferred', 'cleanup_check_failed'))
 
     def test_small_sample_named_video_is_still_deleted_with_the_published_main(self):
         self._with_sidecar('Feature.sample.mkv', size=10 * 1024 * 1024)
         self.assertEqual(self.deleted, ['a' * 40])
-
-    def test_sidecar_extensions_outside_the_allow_list_are_still_deleted(self):
-        # Characterization, not acceptance: .mks/.ttml are subtitle sidecars the allow-list misses.
-        for name in ('film.mks', 'film.ttml'):
-            self._with_sidecar(name)
-            self.assertEqual(self.deleted, ['a' * 40], name)
 
 
 class IndependentEvidenceBoundaries(unittest.TestCase):
@@ -223,6 +216,11 @@ class IndependentSessionBoundaries(unittest.TestCase):
             status, _, login = call('login', {'username': 'admin', 'password': 'test'})
         self.assertEqual(status, 200, login)
         return app, call, login
+
+    def test_direct_login_does_not_resolve_gateway(self):
+        with patch('portal.server.socket.gethostbyname_ex', return_value=('gateway', [], [])) as resolve_gateway:
+            self.login(Mock())
+        resolve_gateway.assert_not_called()
 
     def test_logout_clears_a_live_cookie_when_emby_logout_raises_api_or_timeout(self):
         for error in (APIError(503, 'emby down'), TimeoutError('timed out')):
