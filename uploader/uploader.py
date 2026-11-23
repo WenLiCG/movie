@@ -462,6 +462,10 @@ class Uploader:
         self.library = Path('/library')
         self.activity = {'phase': 'starting', 'job_id': None, 'at': time.time()}
         self.discovery_issue = None
+        # In-memory backoff for pending cancel/delete actions: (id, at) -> (same-code streak, next try).
+        # Each attempt can stop torrents, re-hash every local file and page Emby, so a long wait
+        # (e.g. for an Emby scan) must not repeat that work every 5 seconds.
+        self.action_backoff, self.clock = {}, time.monotonic
         self.db = sqlite3.connect(Path(state) / "uploads.sqlite3")
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -474,7 +478,8 @@ class Uploader:
         if "identity" not in {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN identity TEXT")
         columns = {r[1] for r in self.db.execute('PRAGMA table_info(jobs)')}
-        for name, definition in [('task_id', 'TEXT'), ('progress', 'REAL NOT NULL DEFAULT 0')]:
+        for name, definition in [('task_id', 'TEXT'), ('progress', 'REAL NOT NULL DEFAULT 0'),
+                                 ('task_id_from_put', 'INTEGER NOT NULL DEFAULT 0')]:
             if name not in columns:
                 self.db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + definition)
         for name, definition in [('instance_id', 'TEXT'), ('restart_count', 'INTEGER NOT NULL DEFAULT 0'),
@@ -546,7 +551,7 @@ class Uploader:
             self.update(job, state='failed', error='upload_retry_exhausted', terminal_proven=1, retry_at=0)
             return
         self.update(job, state='pending', restart_count=0 if manual else job['restart_count'] + 1,
-                    retry_requested=0, task_id=None, native_state=None, terminal_proven=0,
+                    retry_requested=0, task_id=None, task_id_from_put=0, native_state=None, terminal_proven=0,
                     error=None, failures=0, retry_at=0 if manual else time.time() + min(1800, 60 * 2**job['restart_count']))
 
     def recover_upload(self, job, manual=False):
@@ -569,7 +574,7 @@ class Uploader:
             if len(tasks) > 1:
                 raise Failure('ambiguous_upload_task')
             if tasks:
-                self.update(job, state='queued', task_id=tasks[0]['id'])
+                self.update(job, state='queued', task_id=tasks[0]['id'], task_id_from_put=0)
                 self.poll_upload(job, manual=manual)
                 return
         stage = self.remote.find(job['stage'])
@@ -621,7 +626,7 @@ class Uploader:
             if self.remote.find(stage) is not None:
                 raise Failure("staging_conflict")
             self.update(job, state="uploading", attempt=attempt, stage=stage, sha1=digest.hexdigest(), receipt=None,
-                        error=None, retry_at=0, progress=0, task_id=None, native_state=None,
+                        error=None, retry_at=0, progress=0, task_id=None, task_id_from_put=0, native_state=None,
                         instance_id=self.instance(), request_at=time.time(), terminal_proven=0)
             handle.seek(0)
             self.touch('caching', job['id'])
@@ -629,7 +634,7 @@ class Uploader:
             task_id = self.remote.put(stage, handle, job["size"], job["sha1"])
             if fingerprint(handle) != before:
                 raise Failure("source_changed")
-            self.update(job, state='queued', task_id=task_id, failures=0, error=None, retry_at=0)
+            self.update(job, state='queued', task_id=task_id, task_id_from_put=1, failures=0, error=None, retry_at=0)
             self.poll_upload(job)
 
     def poll_upload(self, job, manual=False):
@@ -654,10 +659,19 @@ class Uploader:
             return
         if state != 2:
             raise Failure('invalid_upload_task')
-        verify(self.remote.find(job['stage']), job)
-        receipt = json.dumps({'stage':job['stage'], 'size':job['size'], 'sha1':job['sha1'],
-                              'put_code':200, 'task_id':job['task_id'], 'native_task_state':2, 'verified_at':time.time()})
-        self.update(job, state='uploaded', receipt=receipt, failures=0, error=None, retry_at=0, progress=100)
+        # A recovered ID or an ID from an older database doesn't prove which PUT wrote the bytes.
+        recovered = not job.get('task_id_from_put')
+        try:
+            verify(self.remote.find(job['stage']), job, require_sha1=recovered)
+        except Failure as error:
+            if recovered and str(error) == 'remote_hash_unavailable':
+                raise Failure('upload_unconfirmed') from None
+            raise
+        receipt = {'stage':job['stage'], 'size':job['size'], 'sha1':job['sha1'],
+                   'put_code':200, 'task_id':job['task_id'], 'native_task_state':2, 'verified_at':time.time()}
+        if recovered:
+            receipt['evidence'] = 'remote_sha1'
+        self.update(job, state='uploaded', receipt=json.dumps(receipt), failures=0, error=None, retry_at=0, progress=100)
 
     def publish(self, job, finish_only=False):
         self.touch('publishing', job['id'])
@@ -671,17 +685,19 @@ class Uploader:
             raise Failure("missing_upload_receipt")
         if job.get('task_id') and (receipt.get('task_id') != job['task_id'] or (receipt.get('native_task_state') != 2 and receipt.get('evidence') != 'remote_sha1')):
             raise Failure('missing_upload_receipt')
+        sha1_receipt = receipt.get('evidence') == 'remote_sha1'
+        legacy_receipt = receipt.get('native_task_state') == 2 and not job.get('task_id_from_put') and not sha1_receipt
         dest, stage = self.remote.find(job["dest"]), self.remote.find(job["stage"])
         if dest is not None:
             if job["state"] != "moving" or stage is not None:
                 raise Failure("destination_conflict")
-            verify(dest, job)
+            verify(dest, job, require_sha1=legacy_receipt)
             self.update(job, state="published", error=None, failures=0, retry_at=0)
             log(job["id"], "published")
             return
         if stage is None:
             raise Failure("staging_missing")
-        verify(stage, job, require_sha1=receipt.get('evidence') == 'remote_sha1')
+        verify(stage, job, require_sha1=sha1_receipt or legacy_receipt)
         if job["state"] == "moving":
             if job.get('move_task_id'):
                 task = self.remote.task(job['move_task_id'], 'move')
@@ -695,7 +711,9 @@ class Uploader:
         with watch_lock(self.state/'task-controls'):
             if self.blocked(job):
                 raise Failure('task_cancelling')
-            self.update(job, state="moving")
+            if legacy_receipt:
+                receipt['evidence'] = 'remote_sha1'
+            self.update(job, state="moving", receipt=json.dumps(receipt) if legacy_receipt else job['receipt'])
         try:
             result = self.remote.move(job['stage'], job['dest'])
         except Failure as error:
@@ -829,9 +847,17 @@ class Uploader:
             if any((self.library / p['dest'].lstrip('/')).exists() for p in payload['delete_plan']):
                 raise Failure('delete_all_waiting_scan')
 
+    ACTION_FREE_RETRIES, ACTION_MAX_DELAY = 3, 300
+
     def process_actions(self, sources):
-        for action in task_actions(self.state/'uploads.sqlite3'):
+        actions = task_actions(self.state/'uploads.sqlite3')
+        live = {(a['id'], a['at']) for a in actions if a['state'] == 'pending'}
+        self.action_backoff = {k: v for k, v in self.action_backoff.items() if k in live}
+        for action in actions:
             if action['state'] != 'pending' or action['action'] not in {'cancel', 'delete'}:
+                continue
+            key = (action['id'], action['at'])
+            if self.action_backoff.get(key, (0, 0))[1] > self.clock():
                 continue
             with watch_lock(self.state), watch_lock(self.state/'task-controls'):
                 row = self.db.execute('SELECT state,at FROM task_actions WHERE id=?', (action['id'],)).fetchone()
@@ -847,6 +873,12 @@ class Uploader:
                         self.db.execute('UPDATE task_actions SET state=?,error=? WHERE id=?', (state, code, action['id']))
                     if code != action['error']:
                         log(action['id'], code)
+                    # The first few repeats stay immediate; a persistent identical wait backs off up to 5 minutes.
+                    streak = self.action_backoff.get(key, (0, 0))[0] + 1 if code == action['error'] else 1
+                    delay = 0 if streak <= self.ACTION_FREE_RETRIES else min(self.ACTION_MAX_DELAY, 5 * 2 ** (streak - self.ACTION_FREE_RETRIES))
+                    self.action_backoff[key] = (streak, self.clock() + delay)
+                else:
+                    self.action_backoff.pop(key, None)
 
     def process_action(self, sources, action):
         payload = action['payload']

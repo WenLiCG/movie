@@ -163,8 +163,16 @@ class App:
                 self.attempts.pop(next(iter(self.attempts)))
             attempts.append(now);self.login_total.append(now)
         client = self.client("emby")
+        client.timeout = 15
         client.opener.addheaders = [("X-Emby-Authorization", 'Emby Client="Cinema", Device="Web", DeviceId="cinema-discover", Version="1"')]
-        result = client.json("POST", "/Users/AuthenticateByName", {"Username": username, "Pw": password})
+        try:
+            result = client.json("POST", "/Users/AuthenticateByName", {"Username": username, "Pw": password})
+        except APIError as error:
+            if error.status == 401:
+                raise ValueError("登录失败：Emby 用户名或密码不正确。") from None
+            raise
+        if not isinstance(result, dict):
+            raise ValueError("登录失败：Emby 未返回有效会话，请稍后重试。")
         if not result.get("AccessToken") or result.get("User", {}).get("Policy", {}).get("IsAdministrator") is not True:
             if result.get("AccessToken"):
                 client.opener.addheaders.append(("X-Emby-Token", result["AccessToken"]))
@@ -211,6 +219,24 @@ class App:
             if self.sessions.get(sid) is not session or session['expires'] <= time.time():
                 raise PermissionError("请重新登录。")
             return session
+
+    def logout(self, sid, csrf):
+        """Revoke the local session first; Emby may be unreachable and must not keep it alive."""
+        with self.lock:
+            session = self.sessions.get(sid)
+            if not session:
+                return True  # Already signed out; clearing the cookie is idempotent.
+            if not secrets.compare_digest(csrf, session["csrf"]):
+                return False
+            self.sessions.pop(sid, None)
+        client = self.client("emby")
+        client.timeout = 10
+        client.opener.addheaders = [("X-Emby-Token", session["token"])]
+        try:
+            client.request("POST", "/Sessions/Logout")
+        except (ValueError, OSError):
+            pass  # The portal session is already gone; Emby expires its own token later.
+        return True
 
     def watch_session(self, session):
         info=self.client('emby').json('GET','/System/Info/Public')
@@ -650,6 +676,8 @@ class App:
 
     def download_release(self, session, body, kind='tv'):
         release = self.stored_release(session, body.get('release_id'), kind)
+        if release.get('_downloaded'):
+            raise ValueError('已提交此资源下载，请在下载任务查看进度。')
         self.check_space(release['size'])
         prowlarr = self.client('prowlarr')
         category = 'cinema-tv' if kind == 'tv' else 'cinema-movies'
@@ -667,7 +695,10 @@ class App:
             raise ValueError('下载器分类或连接已变更，请重新自动配置；未提交下载。')
         # Prowlarr grabs the exact cached GUID, with an explicit client to prevent category fallback.
         prowlarr.json('POST', '/api/v1/search', {'guid': release['guid'], 'indexerId': release['indexerId'], 'downloadClientId': client['id']})
-        session['results'].pop(body['release_id'], None)
+        if kind == 'tv':
+            release['_downloaded'] = True  # Keep the TV result so 按此版本追更 still works on the same row.
+        else:
+            session['results'].pop(body['release_id'], None)
         return {'message': '已提交此资源下载，完成后归档到 TV；合集会下载整包，不创建或修改追剧。' if kind == 'tv' else '已提交下载，请在下载任务查看进度。'}
 
     def remove_series(self, body):
@@ -1164,7 +1195,8 @@ class App:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanups'").fetchone():
                     cleanup.update(dict(db.execute('SELECT state, count(*) FROM cleanups GROUP BY state')))
                     cleanup['last'] = db.execute('SELECT max(finished_at) FROM cleanups').fetchone()[0]
-                    reasons = {'cleanup_not_archived':'等待视频及字幕全部发布', 'cleanup_unsupported_disc':'原盘保留本地，暂不自动清理',
+                    reasons = {'cleanup_not_archived':'有视频或字幕缺少归档凭证，已保留本地文件', 'cleanup_unsupported_disc':'原盘保留本地，暂不自动清理',
+                               'cleanup_unarchived_media':'资源含无法自动归档的文件，已保留本地；需要时在任务页手动删除',
                                'cleanup_subtitle_mapping_missing':'字幕关联未能确认，保留本地', 'cleanup_waiting_for_stop':'等待下载器停止做种',
                                'cleanup_waiting_for_removal':'等待下载器删除任务', 'cleanup_waiting_for_files':'等待导入文件删除完成',
                                'remote_size_mismatch':'云端文件校验未通过，保留本地', 'remote_hash_mismatch':'云端校验不一致，保留本地'}
@@ -1178,6 +1210,8 @@ class App:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Cinema"
+    # Client socket timeout: a stalled or partial request must not pin a worker thread forever.
+    timeout = 30
 
     def log_message(self, *args):
         pass  # Paths and API exceptions can contain private search terms or credentials.
@@ -1231,19 +1265,24 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("请求格式无效。")
             if path == "/api/login" and self.command == "POST":
                 peer = self.client_address[0]
-                try:
-                    trusted = ipaddress.ip_address(peer).is_loopback
-                    trusted |= peer in socket.gethostbyname_ex('gateway')[2]
-                    if trusted:
-                        forwarded = self.headers.get('X-Forwarded-For', '').split(',')[-1].strip()
-                        if forwarded:
+                forwarded = self.headers.get('X-Forwarded-For', '').rsplit(',', 1)[-1].strip()
+                if forwarded:
+                    try:
+                        trusted = ipaddress.ip_address(peer).is_loopback
+                        trusted |= peer in socket.gethostbyname_ex('gateway')[2]
+                        if trusted:
                             peer = str(ipaddress.ip_address(forwarded))
-                except (ValueError, OSError):
-                    pass
+                    except (ValueError, OSError):
+                        pass
                 sid, session = app.login(body, peer)
                 return self.reply({"csrf": session["csrf"]}, cookie="cinema=" + sid)
             cookies = SimpleCookie(self.headers.get("Cookie", ""))
             sid = cookies["cinema"].value if "cinema" in cookies else ""
+            if path == "/api/logout" and self.command == "POST":
+                # Logout must work while Emby is down, so it skips the remote admin check.
+                if not app.logout(sid, self.headers.get("X-CSRF-Token", "")):
+                    return self.reply({"error": "会话校验失败，请刷新页面。"}, 403)
+                return self.reply({}, cookie="cinema=; Max-Age=0")
             session = app.authenticate(sid)
             if self.command == "POST" and not secrets.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
                 return self.reply({"error": "会话校验失败，请刷新页面。"}, 403)
@@ -1282,12 +1321,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(app.playbacks(session))
             else:
                 with app.mutation:
-                    if path == "/api/logout":
-                        client = app.client("emby")
-                        client.opener.addheaders = [("X-Emby-Token", session["token"])]
-                        client.request("POST", "/Sessions/Logout")
-                        app.sessions.pop(sid, None)
-                        return self.reply({}, cookie="cinema=; Max-Age=0")
                     if path == "/api/settings":
                         days = integer(body.get("retention_days"), 0, 3650)
                         with watch_lock(app.data):

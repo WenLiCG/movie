@@ -69,3 +69,10 @@ class PlaybackTests(unittest.TestCase):
             self.assertEqual(records[0]['position_seconds'],5)
             self.assertEqual(records[0]['state'],'inactive')
         self.assertEqual(len(self.read([self.event(actor=f'{i:024x}') for i in range(130)])),100)
+
+    def test_rejected_session_reports_do_not_create_or_push_out_records(self):
+        real=self.event('progress',at=950,session='real',position=100000000)
+        forged=[self.event('start',at=960+i%30,actor=f'{i:024x}',status=401) for i in range(150)]
+        records=self.read([real,*forged])
+        self.assertEqual(len(records),1)
+        self.assertTrue(records[0]['has_progress'])

@@ -66,7 +66,7 @@ sudo docker compose logs --tail=100 uploader sonarr prowlarr
 sudo bash install.sh stop
 ```
 
-`stop` 保留所有数据，不执行删除或 `down -v`。重新运行 `install` 启动基础服务，`setup` 启动已配置的播放和上传，`public` 恢复公网入口。更新前停止容器并备份 `.env`、整个 `state/`（包括上传数据库）、媒体及当前源码；本脚本没有自动升级或覆盖旧部署功能。
+`stop` 保留所有数据，不执行删除或 `down -v`。重新运行 `install` 启动基础服务，`setup` 启动已配置的播放和上传，`public` 恢复公网入口。`install.sh` 本身不升级或覆盖旧部署；已有部署从独立的新源码目录运行 `sudo bash scripts/update_portal.sh /opt/cinema` 升级，脚本先备份源码、配置状态和 SQLite 快照，失败时恢复旧源码与镜像。仍建议事先另行备份 `.env`、整个 `state/`（包括上传数据库）和媒体，详见 [现有部署升级](docs/DISCOVER.md#更新已有部署)。
 
 ## 源码与验证
 
@@ -86,6 +86,7 @@ python3 scripts/build_all_in_one.py
 node tests/search-entry.test.cjs
 node tests/watch-handoff.test.cjs
 node tests/task-controls.test.cjs
+node tests/portal-resilience.test.cjs
 ```
 
-验证涵盖目录保护、私有文件权限、原生接口接线逻辑、HTTP 流式上传与失败恢复、单文件安全解包、Bash 语法、Compose 配置解析、中文刮削配置和搜索导航。120 项回归在 Debian 12 执行平台适用项通过；Windows 通过刮削、登录、安装包和任务界面相关检查。镜像构建、网关配置及浏览器交互通过。真实生成资源验证了上传取消、重启恢复、字幕、归档和本地保留期清理。另一台全新 VPS、长时间播放及磁盘压力测试尚未执行。失败恢复和播放边界见 [docs/SETUP.md](docs/SETUP.md)，版本及许可见 [SOURCES.md](SOURCES.md)。
+验证涵盖目录保护、私有文件权限、原生接口接线逻辑、HTTP 流式上传与失败恢复、单文件安全解包、Bash 语法、Compose 配置解析、中文刮削配置和搜索导航。回归用例数量与最近一次结果以 [HANDOFF.md](HANDOFF.md) 的验证记录为准（历史上 120 项回归曾在 Debian 12 执行平台适用项通过）；Windows 通过刮削、登录、安装包和任务界面相关检查。镜像构建、网关配置及浏览器交互通过。真实生成资源验证了上传取消、重启恢复、字幕、归档和本地保留期清理。另一台全新 VPS、长时间播放及磁盘压力测试尚未执行。失败恢复和播放边界见 [docs/SETUP.md](docs/SETUP.md)，版本及许可见 [SOURCES.md](SOURCES.md)。

@@ -135,6 +135,15 @@ func PlaybackRecorder() gin.HandlerFunc {
 		}
 		record := func() {
 			e.Status = c.Writer.Status()
+			// The recorder runs before ApiKeyChecker. Only keep evidence that passed authorization:
+			// media needs the per-item grant, and session reports need Emby to accept them.
+			// Otherwise any random token could flood the log and rotate real evidence away.
+			if media && c.GetString("authorizedItemID") == "" {
+				return
+			}
+			if !media && (e.Status < 200 || e.Status >= 300) {
+				return
+			}
 			if media {
 				e.sample = strings.Contains(path, "/proxy_ts")
 				e.Kind = "media"

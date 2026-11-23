@@ -197,6 +197,7 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual(self.row()['progress'], 35)
         self.assertIsNone(self.row()['receipt'])
         self.assertEqual(self.service.moves, 0)
+        self.service.objects[self.row()['stage']].pop('hash_info')
         self.restart()
         self.run_upload()
         self.assertEqual(self.service.puts, 1, 'restart must poll the same task, not retransmit the file')
@@ -204,6 +205,57 @@ class UploaderTests(unittest.TestCase):
         self.run_upload()
         self.assertEqual(self.row()['state'], 'published')
         self.assertEqual(self.service.puts, 1)
+
+    def test_upload_task_recovered_by_name_requires_sha1_even_after_restart(self):
+        self.service.task_state = 1
+        original_put = self.remote.put
+
+        def lose_response(*args):
+            original_put(*args)
+            raise Failure('network_or_protocol')
+
+        with patch.object(self.remote, 'put', side_effect=lose_response):
+            self.run_upload()
+        job = self.row()
+        self.assertIsNone(job['task_id'])
+        stage = PurePosixPath(job['stage'])
+        listing = self.service.objects[str(stage)]
+        hashes = listing.pop('hash_info')
+        name = f"upload {stage.name} to [/aliyun]({str(stage.parent).removeprefix('/aliyun')})"
+        with patch.object(self.remote, 'tasks', return_value=[{'id': 'native-upload', 'name': name}]):
+            self.restart()
+            self.run_upload([])
+        self.assertEqual(self.row()['task_id'], 'native-upload')
+
+        self.service.task_state = 2
+        self.restart()
+        self.run_upload([])
+        self.assertEqual((self.row()['state'], self.row()['error']), ('queued', 'upload_unconfirmed'))
+        self.assertIsNone(self.row()['receipt'])
+        self.assertEqual((self.service.puts, self.service.moves), (1, 0))
+
+        listing['hash_info'] = hashes
+        self.restart()
+        self.run_upload([])
+        self.assertEqual(self.row()['state'], 'published')
+        self.assertEqual((self.service.puts, self.service.moves), (1, 1))
+
+    def test_queued_upload_from_older_database_requires_sha1(self):
+        self.service.task_state = 1
+        self.run_upload()
+        job = self.row()
+        self.service.objects[job['stage']].pop('hash_info')
+        with self.uploader.db:
+            self.uploader.db.execute('ALTER TABLE jobs DROP COLUMN task_id_from_put')
+        self.service.task_state = 2
+
+        self.restart()
+        self.run_upload([])
+
+        self.assertEqual(self.row()['task_id'], job['task_id'])
+        self.assertEqual((self.row()['state'], self.row()['error']), ('queued', 'upload_unconfirmed'))
+        self.assertIsNone(self.row()['receipt'])
+        self.assertEqual(self.service.moves, 0)
 
     def test_failed_native_task_never_creates_a_publish_receipt(self):
         self.service.task_state = 7
@@ -303,6 +355,27 @@ class UploaderTests(unittest.TestCase):
         self.run_upload([])
         self.assertEqual(self.row()["state"], "published")
         self.assertEqual((self.service.puts, self.service.moves), (1, 1))
+
+    def test_legacy_upload_receipt_without_task_origin_requires_sha1_before_move(self):
+        self.uploader.add(self.item)
+        self.remote.mkdir(str(PurePosixPath(self.item['dest']).parent))
+        self.uploader.upload(self.row())
+        job = self.row()
+        stage = self.service.objects[job['stage']]
+        hashes = stage.pop('hash_info')
+        with self.uploader.db:
+            self.uploader.db.execute('ALTER TABLE jobs DROP COLUMN task_id_from_put')
+
+        self.restart()
+        self.run_upload([])
+
+        self.assertEqual((self.row()['state'], self.row()['error']), ('uploaded', 'remote_hash_unavailable'))
+        self.assertEqual(self.service.moves, 0)
+        stage['hash_info'] = hashes
+        self.restart()
+        self.run_upload([])
+        self.assertEqual(self.row()['state'], 'published')
+        self.assertEqual(json.loads(self.row()['receipt'])['evidence'], 'remote_sha1')
 
     def test_new_target_before_move_is_preserved(self):
         original_put = self.remote.put

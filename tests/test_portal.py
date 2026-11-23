@@ -265,6 +265,74 @@ class PortalTests(unittest.TestCase):
             self.assertEqual(added['addOptions']['monitor'],'none')
             self.assertFalse(any(c.args[:2]==('POST','/api/v3/command') for c in native.json.call_args_list))
 
+    def _serve(self, app):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.app = app
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), worker.join()))
+        base = 'http://127.0.0.1:' + str(server.server_port)
+        opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        def call(path, body=None, headers=None):
+            req = Request(base + '/discover/api/' + path, None if body is None else json.dumps(body).encode(),
+                          {'Content-Type': 'application/json', 'Origin': base, **(headers or {})})
+            try:
+                with opener.open(req) as r:
+                    return r, json.loads(r.read())
+            except HTTPError as error:
+                payload = json.loads(error.read() or b'{}')
+                error.close()
+                return error, payload
+        return server, call
+
+    def test_logout_revokes_local_session_even_when_emby_is_unreachable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby = Mock()
+            emby.json.side_effect = lambda method, path, *args: ({'AccessToken': 'private-emby-token', 'User': {'Id': 'admin', 'Policy': {'IsAdministrator': True}}} if 'Authenticate' in path else {'Policy': {'IsAdministrator': True}})
+            app.client = lambda name: emby
+            _, call = self._serve(app)
+            with patch('portal.server.emby_defaults'):
+                _, login = call('login', {'username': 'admin', 'password': 'test'})
+            self.assertEqual(len(app.sessions), 1)
+            # Logout is still a state change and needs the session's CSRF token.
+            response, _ = call('logout', {})
+            self.assertEqual(response.status, 403)
+            self.assertEqual(len(app.sessions), 1)
+            # Emby outage: both the admin re-check and the remote logout fail.
+            emby.json.side_effect = APIError(502, 'down')
+            emby.request.side_effect = ValueError('down')
+            response, _ = call('logout', {}, {'X-CSRF-Token': login['csrf']})
+            self.assertEqual(response.status, 200)
+            self.assertIn('Max-Age=0', response.headers['Set-Cookie'])
+            self.assertEqual(app.sessions, {})
+            # Repeating logout with a stale page stays harmless.
+            response, _ = call('logout', {}, {'X-CSRF-Token': login['csrf']})
+            self.assertEqual(response.status, 200)
+
+    def test_wrong_emby_password_gets_a_specific_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby = Mock()
+            emby.json.side_effect = APIError(401, '/Users/AuthenticateByName 返回 HTTP 401')
+            app.client = lambda name: emby
+            _, call = self._serve(app)
+            response, payload = call('login', {'username': 'admin', 'password': 'wrong'})
+            self.assertEqual(response.status, 400)
+            self.assertIn('用户名或密码不正确', payload['error'])
+            emby.json.side_effect = APIError(500, '/Users/AuthenticateByName 返回 HTTP 500')
+            response, payload = call('login', {'username': 'admin', 'password': 'wrong'})
+            self.assertNotIn('用户名或密码不正确', payload['error'])
+
+    def test_stalled_client_does_not_pin_a_worker_thread(self):
+        import socket
+        self.assertTrue(Handler.timeout and 0 < Handler.timeout <= 60)
+        with patch.object(Handler, 'timeout', 0.5):
+            server, _ = self._serve(App())
+            with socket.create_connection(('127.0.0.1', server.server_port), timeout=5) as sock:
+                sock.sendall(b'POST /discover/api/login HTTP/1.1\r\nHost: x\r\n')  # never finishes the headers
+                self.assertEqual(sock.recv(1024), b'')  # server closed the idle connection
+
 
 if __name__ == '__main__':
     unittest.main()

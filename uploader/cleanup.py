@@ -6,8 +6,22 @@ import re
 import time
 from urllib.parse import urlencode
 
-from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, sample, disc, matches_payload, torrent_paths
+from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, disc, matches_payload, torrent_paths
 from archive import watch_lock, task_actions, torrent_instance
+
+
+# qB removes the whole payload. Only known metadata, artwork and fonts can go without archive evidence.
+CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
+
+
+def needs_archive(path):
+    suffix = path.suffix.lower()
+    media = suffix in VIDEO or suffix in SUBTITLES
+    if not media and suffix not in CLEANUP_EXTRAS:
+        raise Failure('cleanup_unarchived_media')
+    if disc(path):
+        raise Failure('cleanup_unsupported_disc')
+    return media
 
 
 class Cleaner:
@@ -54,12 +68,10 @@ class Cleaner:
             path = local_path(path, root)
             if file.get("progress") != 1:
                 return None
+            if type(file.get('size')) is not int or file['size'] < 0:
+                raise Failure('cleanup_check_failed')
             paths.append(str(path))
-            if sample(file['name']):
-                continue
-            if disc(file['name']):
-                raise Failure('cleanup_unsupported_disc')
-            if path.suffix.lower() not in VIDEO | SUBTITLES:
+            if not needs_archive(rel):
                 continue
             matches = [j for j in published if Path(j['source']).exists() and (os.path.samefile(j['source'], path)
                        or (path.suffix.lower() in SUBTITLES and j.get('download_source') == str(path) and j.get('torrent_hash') == torrent['hash']))]
@@ -112,6 +124,15 @@ class Cleaner:
             unselected = [f for f in files if f.get('priority', 0) <= 0]
             if any(path.exists() or path.is_symlink() for path in torrent_paths(current, unselected)):
                 raise Failure('cleanup_files_changed')
+            # An older plan may have treated a sample-named video as disposable.
+            archived_sources = {Path(job['cleanup_source']) for job in plan['jobs']}
+            save = Path(current['save_path'])
+            for file in files:
+                if file.get('priority', 0) <= 0:
+                    continue
+                rel = relative(file['name'])
+                if needs_archive(rel) and save / rel not in archived_sources:
+                    raise Failure('cleanup_not_archived')
             for path in plan["paths"]:
                 local_path(path, root)
             selected = {j['id'] for j in plan['jobs']}
@@ -234,7 +255,7 @@ class Cleaner:
                     self.db.execute("INSERT OR REPLACE INTO cleanups(hash,plan,state,reason,retry_at,label) VALUES (?,?,'deferred',?,?,?)",
                         (torrent['hash'],json.dumps({k:torrent.get(k) for k in ('hash','category','save_path','download_path','added_on','completion_on')}
                          | {'published_count':published_count,'retention_days':configured_days}),reason,
-                         now + (86400 if reason in {'cleanup_unsupported_disc','cleanup_subtitle_mapping_missing'} else 300),torrent.get('name','下载任务')))
+                         now + (86400 if reason in {'cleanup_unsupported_disc','cleanup_subtitle_mapping_missing','cleanup_unarchived_media'} else 300),torrent.get('name','下载任务')))
                 log('cleanup',reason)
         for row in self.db.execute("SELECT * FROM cleanups WHERE state='pending' AND retry_at<=?", (now,)).fetchall():
             try:

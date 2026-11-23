@@ -27,6 +27,10 @@ def playback_records(folder, now=None):
                         or not isinstance(event.get('session',''),str)
                         or event.get('kind') not in {'media','start','progress','stop'}):
                     continue
+                # Session reports Emby rejected came from an invalid token (older relays logged them);
+                # they are forgeable by anyone and must not create rows or push real ones out.
+                if event['kind'] != 'media' and not 200 <= event['status'] < 300:
+                    continue
                 events.append(event)
             except (ValueError, TypeError, UnicodeError):
                 continue
@@ -67,14 +71,12 @@ def playback_records(folder, now=None):
                 host=e.get('host','')
                 if isinstance(host,str) and re.fullmatch(r'[a-z0-9.-]{1,253}',host):
                     record.update(host=host,http_status=e['status'])
-        elif 200 <= e.get('status',0) < 300:
+        else:
             position = e.get('position',0)
             if type(position) is int and 0 <= position < 10**16:
                 record['position_seconds'] = round(position/10**7,1)
                 if e['kind'] in {'progress','stop'} and position>0: record['has_progress']=True
             record['state'] = 'stopped' if e['kind']=='stop' else 'paused' if e.get('paused') else 'playing' if record['has_progress'] else 'requested'
-        else:
-            record['error_status'] = e.get('status',0)
     result = []
     for record in sorted(records, key=lambda value: value['last_at'], reverse=True)[:100]:
         value = {k:v for k,v in record.items() if k!='session'}

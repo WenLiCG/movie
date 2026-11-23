@@ -197,7 +197,13 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(prowlarr.json.call_args.args,('POST','/api/v1/search',{'guid':'private-guid','indexerId':1,'downloadClientId':5}))
         self.assertEqual((self.app.state/'versions.json').read_text(),'{"42":{"existing":"unchanged"}}')
         self.assertEqual(self.native.calls,[])
-        self.assertNotIn('r',self.session['results'])
+        # The row stays usable for 按此版本追更, but a second grab of the same release is refused.
+        self.assertEqual(self.app.stored_release(self.session,'r','tv')['guid'],'private-guid')
+        posts=len([c for c in prowlarr.json.call_args_list if c.args[0]=='POST'])
+        with self.assertRaises(ValueError) as repeated:
+            self.app.download_release(self.session,{'release_id':'r'})
+        self.assertIn('已提交',str(repeated.exception))
+        self.assertEqual(len([c for c in prowlarr.json.call_args_list if c.args[0]=='POST']),posts)
 
     def test_one_off_fails_closed_for_expired_results_wrong_client_or_disk(self):
         prowlarr=Mock();prowlarr.json.return_value=[]

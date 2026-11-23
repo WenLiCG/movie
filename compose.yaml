@@ -27,9 +27,12 @@ services:
     profiles: [connected, public]
     build:
       context: ./relay
-    image: cinema-relay:9b049b8-strict4
+    image: cinema-relay:9b049b8-strict5
     restart: unless-stopped
     user: "1000:1000"
+    # Internet-facing parser: no Linux capabilities or setuid escalation (writes stay in its volumes).
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     ports:
       - "127.0.0.1:8095:8095"
     volumes:
