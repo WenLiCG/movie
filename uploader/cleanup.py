@@ -6,30 +6,22 @@ import re
 import time
 from urllib.parse import urlencode
 
-from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, sample, disc, matches_payload, torrent_paths
+from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, disc, matches_payload, torrent_paths
 from archive import watch_lock, task_actions, torrent_instance
 
 
-# Media the uploader never archives (other video containers, separate audio tracks, bitmap or
-# other subtitle formats). Deleting a torrent with deleteFiles would lose these for good.
-UNARCHIVED_MEDIA = {'.rmvb', '.rm', '.wmv', '.asf', '.mpg', '.mpeg', '.mpe', '.vob', '.flv', '.f4v', '.3gp',
-                    '.divx', '.ogm', '.ogv', '.mts', '.m2t', '.iso', '.mka', '.flac', '.dts', '.ac3', '.eac3',
-                    '.thd', '.truehd', '.aac', '.mp3', '.m4a', '.opus', '.wav', '.sup', '.idx', '.sub', '.vtt',
-                    '.smi', '.sami', '.usf', '.pgs', '.mks', '.ttml'}
-# Real samples are small; a "sample"-named file above this is treated as a main feature.
-SAMPLE_LIMIT = 1024 ** 3
+# qB removes the whole payload. Only known metadata, artwork and fonts can go without archive evidence.
+CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
 
 
-def verify_cleanup_media(file):
-    suffix = Path(file['name']).suffix.lower()
-    if suffix in UNARCHIVED_MEDIA:
+def needs_archive(path):
+    suffix = path.suffix.lower()
+    media = suffix in VIDEO or suffix in SUBTITLES
+    if not media and suffix not in CLEANUP_EXTRAS:
         raise Failure('cleanup_unarchived_media')
-    if suffix in VIDEO and sample(file['name']):
-        size = file['size']
-        if type(size) is not int or size < 0:
-            raise Failure('cleanup_check_failed')
-        if size > SAMPLE_LIMIT:
-            raise Failure('cleanup_not_archived')
+    if disc(path):
+        raise Failure('cleanup_unsupported_disc')
+    return media
 
 
 class Cleaner:
@@ -76,13 +68,10 @@ class Cleaner:
             path = local_path(path, root)
             if file.get("progress") != 1:
                 return None
+            if type(file.get('size')) is not int or file['size'] < 0:
+                raise Failure('cleanup_check_failed')
             paths.append(str(path))
-            verify_cleanup_media(file)
-            if sample(file['name']):
-                continue
-            if disc(file['name']):
-                raise Failure('cleanup_unsupported_disc')
-            if path.suffix.lower() not in VIDEO | SUBTITLES:
+            if not needs_archive(rel):
                 continue
             matches = [j for j in published if Path(j['source']).exists() and (os.path.samefile(j['source'], path)
                        or (path.suffix.lower() in SUBTITLES and j.get('download_source') == str(path) and j.get('torrent_hash') == torrent['hash']))]
@@ -135,10 +124,15 @@ class Cleaner:
             unselected = [f for f in files if f.get('priority', 0) <= 0]
             if any(path.exists() or path.is_symlink() for path in torrent_paths(current, unselected)):
                 raise Failure('cleanup_files_changed')
-            # A pending plan may predate the media checks applied to newly planned deletes.
+            # An older plan may have treated a sample-named video as disposable.
+            archived_sources = {Path(job['cleanup_source']) for job in plan['jobs']}
+            save = Path(current['save_path'])
             for file in files:
-                if file.get('priority', 0) > 0:
-                    verify_cleanup_media(file)
+                if file.get('priority', 0) <= 0:
+                    continue
+                rel = relative(file['name'])
+                if needs_archive(rel) and save / rel not in archived_sources:
+                    raise Failure('cleanup_not_archived')
             for path in plan["paths"]:
                 local_path(path, root)
             selected = {j['id'] for j in plan['jobs']}

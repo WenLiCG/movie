@@ -110,9 +110,10 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(self.uploader.db.execute('SELECT state, reason FROM cleanups').fetchone()[:], ('deferred', 'cleanup_unarchived_media'))
             extra.unlink()
         # Disposable extras (artwork, NFO, fonts) still allow cleanup after the video is verified.
-        (self.path.parent / 'film.nfo').write_text('info')
-        self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
-                      {'name': 'film.nfo', 'size': 4, 'priority': 1, 'progress': 1}]
+        self.files = [{'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1}]
+        for name in ('film.nfo', 'poster.jpg', 'subtitle.otf'):
+            (self.path.parent / name).write_bytes(b'info')
+            self.files.append({'name': name, 'size': 4, 'priority': 1, 'progress': 1})
         self.uploader.db.execute('DELETE FROM cleanups'); self.uploader.db.commit()
         self.run_cleanup()
         self.assertEqual(self.deleted, ['a' * 40])
@@ -157,20 +158,22 @@ class CleanupTests(unittest.TestCase):
     def test_legacy_pending_plan_rechecks_unarchived_media_before_deleting(self):
         now = 1000 + 8 * 86400
         plan = self.cleaner.plan(self.sources, self.torrent, 7, now)
-        extra = self.path.parent / 'film.sup'
-        extra.write_bytes(b'not in the cloud')
-        self.files = [*self.files, {'name': extra.name, 'size': extra.stat().st_size, 'priority': 1, 'progress': 1}]
-        legacy = {**plan, 'files': self.files, 'paths': [*plan['paths'], str(extra)]}
-        with self.uploader.db:
-            self.uploader.db.execute("INSERT INTO cleanups(hash,plan,state) VALUES (?,?,'pending')",
-                                     (self.torrent['hash'], json.dumps(legacy)))
+        for name, reason in (('film.sup', 'cleanup_unarchived_media'), ('Sample.Feature.mkv', 'cleanup_not_archived')):
+            with self.subTest(name=name):
+                extra = self.path.parent / name
+                extra.write_bytes(b'not in the cloud')
+                self.files = [*plan['files'], {'name': name, 'size': extra.stat().st_size, 'priority': 1, 'progress': 1}]
+                legacy = {**plan, 'files': self.files, 'paths': [*plan['paths'], str(extra)]}
+                with self.uploader.db:
+                    self.uploader.db.execute("INSERT OR REPLACE INTO cleanups(hash,plan,state) VALUES (?,?,'pending')",
+                                             (self.torrent['hash'], json.dumps(legacy)))
 
-        self.cleaner.run(self.sources, now=now)
+                self.cleaner.run(self.sources, now=now)
 
-        self.sources.qb.request.assert_not_called()
-        self.assertTrue(self.path.exists())
-        self.assertTrue(extra.exists())
-        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_unarchived_media')
+                self.sources.qb.request.assert_not_called()
+                self.assertTrue(self.path.exists())
+                self.assertTrue(extra.exists())
+                self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], reason)
 
     def test_pending_plan_cannot_expire_a_new_download_or_override_keep(self):
         now = 1000 + 8*86400

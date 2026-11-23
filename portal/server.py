@@ -1195,8 +1195,8 @@ class App:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanups'").fetchone():
                     cleanup.update(dict(db.execute('SELECT state, count(*) FROM cleanups GROUP BY state')))
                     cleanup['last'] = db.execute('SELECT max(finished_at) FROM cleanups').fetchone()[0]
-                    reasons = {'cleanup_not_archived':'等待视频及字幕全部发布', 'cleanup_unsupported_disc':'原盘保留本地，暂不自动清理',
-                               'cleanup_unarchived_media':'资源含未归档的音轨、图形字幕或其他格式视频，保留本地；需要时在任务页手动删除',
+                    reasons = {'cleanup_not_archived':'有视频或字幕缺少归档凭证，已保留本地文件', 'cleanup_unsupported_disc':'原盘保留本地，暂不自动清理',
+                               'cleanup_unarchived_media':'资源含无法自动归档的文件，已保留本地；需要时在任务页手动删除',
                                'cleanup_subtitle_mapping_missing':'字幕关联未能确认，保留本地', 'cleanup_waiting_for_stop':'等待下载器停止做种',
                                'cleanup_waiting_for_removal':'等待下载器删除任务', 'cleanup_waiting_for_files':'等待导入文件删除完成',
                                'remote_size_mismatch':'云端文件校验未通过，保留本地', 'remote_hash_mismatch':'云端校验不一致，保留本地'}

@@ -102,6 +102,12 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         self.assertTrue(self.path.exists())
         self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_not_archived')
 
+    def test_unrecognized_attachment_must_not_be_deleted_with_published_video(self):
+        extra = self._with_sidecar('Subs/Film.zip')
+        self.assertEqual(self.deleted, [])
+        self.assertTrue(extra.exists())
+        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_unarchived_media')
+
     def test_iso_is_retained_under_the_unarchived_media_reason(self):
         self._with_sidecar('disk.iso')
         self.assertEqual(self.deleted, [])
@@ -116,24 +122,7 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         self.assertEqual(self.deleted, [])
         self.assertIsNone(self.uploader.db.execute('SELECT state FROM cleanups').fetchone())
 
-    def test_sample_named_video_uses_an_exclusive_one_gib_qb_size_threshold(self):
-        kept = self._extra('Sample.Feature.mkv', b'on-disk-bytes-are-not-the-threshold')
-        self.files = [
-            {'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
-            {'name': kept.name, 'size': 1024 ** 3 + 1, 'priority': 1, 'progress': 1},
-        ]
-        self._reset()
-        self.run_cleanup()
-        self.assertEqual(self.deleted, [])
-        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_not_archived')
-
-        self.files[1]['size'] = 1024 ** 3
-        self._reset()
-        self.run_cleanup()
-        self.assertEqual(self.deleted, ['a' * 40])
-
     def test_missing_qb_size_fails_closed_instead_of_deleting(self):
-        # A sample-named video with unknown size cannot be classified as disposable.
         self._extra('Movie.sample.mkv', b'local file whose qB size was omitted')
         self.files = [
             {'name': 'film.mkv', 'size': self.path.stat().st_size, 'priority': 1, 'progress': 1},
@@ -146,9 +135,11 @@ class IndependentCleanupBoundaries(unittest.TestCase):
         self.assertEqual(self.uploader.db.execute('SELECT state, reason FROM cleanups').fetchone()[:],
                          ('deferred', 'cleanup_check_failed'))
 
-    def test_small_sample_named_video_is_still_deleted_with_the_published_main(self):
-        self._with_sidecar('Feature.sample.mkv', size=10 * 1024 * 1024)
-        self.assertEqual(self.deleted, ['a' * 40])
+    def test_unarchived_sample_named_video_is_retained_even_when_small(self):
+        extra = self._with_sidecar('Feature.sample.mkv', size=10 * 1024 * 1024)
+        self.assertEqual(self.deleted, [])
+        self.assertTrue(extra.exists())
+        self.assertEqual(self.uploader.db.execute('SELECT reason FROM cleanups').fetchone()[0], 'cleanup_not_archived')
 
 
 class IndependentEvidenceBoundaries(unittest.TestCase):
