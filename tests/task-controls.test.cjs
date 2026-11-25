@@ -36,4 +36,10 @@ assert.equal(state([done],done.uploads,{action:'delete',state:'blocked'}),'操�
 assert.equal(state([done],[{state:'published'},{state:'cancelled'}]),'部分已发布');
 assert.equal(state([done],done.uploads),'已发布');
 assert.equal(context.taskState({resources:[done],uploads:done.uploads,waiting_video:true},[]),'部分已发布');
+// A finished download names what it waits for: Sonarr import for tracked series, the uploader otherwise.
+const finished={progress:1,state:'stalledUP'};
+assert.equal(context.taskState({resources:[finished],uploads:[],waiting_video:true,tvdb_id:42},[]),'等待导入');
+assert.equal(context.taskState({resources:[finished],uploads:[],waiting_video:true},[]),'等待上传');
+// No selected, completed video (e.g. disc images or extras only): nothing will be archived automatically.
+assert.equal(context.taskState({resources:[finished],uploads:[],waiting_video:false},[]),'未发现可归档视频');
 console.log('Task controls passed: downloading, paused, mixed, archiving, cancelled and published resources.');

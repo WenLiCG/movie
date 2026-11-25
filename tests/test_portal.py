@@ -432,6 +432,75 @@ class PortalTests(unittest.TestCase):
             self.assertEqual(seen, [10])
             self.assertEqual(tasks['items'][0]['name'], '活动剧集')
 
+    def _admin(self, app):
+        emby = Mock()
+        emby.json.side_effect = lambda method, path, *args: (
+            {'AccessToken': 'tok', 'User': {'Id': 'admin', 'Policy': {'IsAdministrator': True}}}
+            if 'Authenticate' in path else {'Policy': {'IsAdministrator': True}})
+        app.client = lambda _: emby
+        _, call = self._serve(app)
+        with patch('portal.server.emby_defaults'):
+            _, login = call('login', {'username': 'admin', 'password': 'pw'})
+        return emby, call, {'X-CSRF-Token': login['csrf']}
+
+    def test_unexpected_errors_return_json_500_and_log_only_class_and_endpoint(self):
+        import io
+        from contextlib import redirect_stderr
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            _, call, headers = self._admin(app)
+            logged = io.StringIO()
+            # e.g. an upstream returning an empty body where an object was expected.
+            with patch.object(app, 'status', side_effect=AttributeError("'NoneType' has no attribute 'private-detail'")), \
+                    redirect_stderr(logged):
+                response, payload = call('status?q=private-term')
+            self.assertEqual(response.code, 500)
+            self.assertIn('服务处理请求时出错', payload['error'])
+            self.assertNotIn('private', json.dumps(payload, ensure_ascii=False))
+            self.assertEqual(logged.getvalue().strip(), 'portal GET /discover/api/status AttributeError')
+            with patch.object(app, 'retry_upload', side_effect=RuntimeError('boom')), redirect_stderr(io.StringIO()):
+                response, payload = call('retry-upload', {'id': 'x'}, headers)
+            self.assertEqual(response.code, 500)
+            # Known error types keep their existing 4xx handling.
+            with patch.object(app, 'retry_upload', side_effect=ValueError('请刷新任务列表后重试。')):
+                response, payload = call('retry-upload', {'id': 'x'}, headers)
+            self.assertEqual((response.code, payload['error']), (400, '请刷新任务列表后重试。'))
+
+    def test_openlist_body_that_is_not_an_object_is_a_cloud_error(self):
+        client = Mock()
+        for body in (None, [], 'ok'):
+            client.json.return_value = body
+            with self.assertRaisesRegex(ValueError, '云盘操作失败'):
+                App.ol(client, 'GET', '/api/admin/storage/list')
+
+    def test_login_reports_an_emby_outage_instead_of_blaming_the_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby = Mock()
+            app.client = lambda _: emby
+            emby.json.side_effect = APIError(502, '/Users/AuthenticateByName 返回 HTTP 502；请检查应用设置和登录。')
+            with self.assertRaisesRegex(ValueError, r'^登录失败：Emby 暂时没有正常响应（HTTP 502）'):
+                app.login({'username': 'admin', 'password': 'pw'})
+            emby.json.side_effect = ValueError('本地应用 Emby 暂时无法连接或响应超时；请稍后重试。')
+            with self.assertRaisesRegex(ValueError, r'^登录失败：暂时无法连接 Emby'):
+                app.login({'username': 'admin', 'password': 'pw'})
+            self.assertEqual(app.sessions, {})
+
+    def test_series_list_distinguishes_an_unchosen_rule_from_a_broken_one(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby, call, _ = self._admin(app)
+            sonarr = Mock()
+            listed = [{'id': 1, 'tvdbId': 101, 'title': 'New', 'tags': []}, {'id': 2, 'tvdbId': 102, 'title': 'Changed', 'tags': []}]
+            sonarr.json.side_effect = lambda method, path, *args: {'/api/v3/series': listed}.get(path, [])
+            app.client = lambda name: emby if name == 'emby' else sonarr
+            # 102 has a saved rule whose Sonarr profile and tag are gone; 101 never had one.
+            (Path(temp) / 'versions.json').write_text(json.dumps({'102': {
+                'fields': {'group': 'GRP'}, 'pattern': '/^(?=.*GRP).*$/i', 'profile_id': 9, 'tag_id': 3}}))
+            _, payload = call('series')
+            versions = {item['tvdbId']: item['version'] for item in payload['items']}
+            self.assertEqual(versions, {101: {'valid': False, 'reason': 'missing'}, 102: {'valid': False, 'reason': 'invalid'}})
+
     def test_loopback_forwarded_for_skips_gateway_dns_and_aborted_reply_does_not_double_fault(self):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))

@@ -236,7 +236,18 @@ const {chromium} = require('playwright');
     await page.locator('#follow-dialog').waitFor({state: 'visible'});
     const seasons = await page.locator('#season option').evaluateAll(options => options.map(option => option.value));
     assert.deepEqual(seasons, ['1', '2']);
-    await page.locator('#follow-dialog').evaluate(dialog => dialog.close());
+    // Saving refreshes 我的追剧 at once; a series without a chosen rule offers 选择版本 directly.
+    state.series.items.push({id: 2, tvdbId: 43, title: '待选剧', year: 2026, monitored: false, archived: 0, version: {valid: false, reason: 'missing'}, seasons: [{seasonNumber: 1}]});
+    const saved = page.waitForRequest(req => req.url().endsWith('/api/follow'));
+    await page.locator('#submit-version').click();
+    assert.deepEqual((await saved).postDataJSON(), {id: '42', mode: 'all', season: 1});
+    const unchosen = page.locator('.series-row').filter({hasText: '待选剧'});
+    await unchosen.waitFor();
+    assert.equal(await unchosen.locator('.status-label').innerText(), '待选版本');
+    const choose = unchosen.getByRole('button', {name: '选择版本', exact: true});
+    assert(await choose.isVisible(), 'the fix for a missing rule is not hidden in the 更多 menu');
+    assert.match(await choose.getAttribute('class'), /\bprimary\b/);
+    assert.equal(await unchosen.getByRole('button', {name: '选集下载'}).count(), 0);
 
     await page.locator('nav [data-view=settings]').click();
     assert(await page.locator('#refresh-settings').isVisible());
