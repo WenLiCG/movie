@@ -17,6 +17,12 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py'
           node --test tests/*.test.cjs
           for script in install.sh scripts/*.sh; do bash -n "$script"; done
+      - name: Exercise desktop and mobile flows in Chrome
+        run: |
+          npm install --prefix "$RUNNER_TEMP/cinema-browser" --ignore-scripts --no-audit --no-fund playwright@1.65.1
+          export NODE_PATH="$RUNNER_TEMP/cinema-browser/node_modules"
+          node tests/check_ui.cjs
+          node tests/independent-ui-flows.cjs
       - name: Verify and test the installer payload
         run: |
           python3 scripts/build_all_in_one.py --output "$RUNNER_TEMP/cinema.sh"

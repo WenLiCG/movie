@@ -24,7 +24,7 @@ const slice=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end))
       node:(tag,text)=>{const el={...element(),tag,text};made.push(el);return el;},
       row:()=>element(),episodeTitle:v=>v,uploadStates:{},
     });
-    vm.runInContext(slice('function uploadRow(','let tasksAgain='),context);
+    vm.runInContext(slice('function awaitingArchiveCheck(','let tasksAgain='),context);
     const failed=context.uploadRow({id:'job1',dest:'/aliyun/Movies/A/A.mkv',state:'failed',error:'openlist_code_401'});
     const keys=failed.children.map(b=>b.dataset.taskControl);
     assert.deepEqual(keys,['job1:retry','job1:reconnect']);

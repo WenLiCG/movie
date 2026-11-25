@@ -132,6 +132,63 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(bundle.FIXTURES <= names)
             self.assertNotIn('docs/DEPLOYMENT.md', names)
 
+    @unittest.skipUnless(os.name == 'posix', 'Linux Bash updater')
+    def test_running_gateway_upgrade_retries_reload_and_restores_old_release(self):
+        payload = bundle.make_payload(ROOT)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            source = bundle.extract_payload(payload, base/'source', hashlib.sha256(payload).hexdigest())
+            script = source/'scripts/update_portal.sh'
+            # Run the actual upgrade flow as an ordinary CI user, against private temporary files.
+            script.write_text(script.read_text().replace('$EUID -eq 0', '1 -eq 1', 1))
+            (source/'compose.yaml').write_text('services: {gateway: {image: "caddy:new"}}\n')
+            docker = base/'docker'
+            docker.write_text("""#!/bin/sh
+set -eu
+case "$*" in
+  *'config --format json') echo '{"name":"cinema","services":{}}' ;;
+  *'ps --status running --services') echo gateway ;;
+  *'caddy validate '*) grep -q 'caddy:new' compose.yaml; echo validate-new >> "$TRACE" ;;
+  *' up '*' gateway')
+    if grep -q 'caddy:new' compose.yaml; then image=new; else image=old; fi
+    echo "$image" > "$TRACE.live"
+    echo "up-$image" >> "$TRACE" ;;
+  *'caddy reload '*)
+    image=$(cat "$TRACE.live")
+    echo "reload-$image" >> "$TRACE"
+    if [ ! -e "$TRACE.ready-$image" ]; then touch "$TRACE.ready-$image"; exit 1; fi
+    [ "$image" = old ] || [ "$FAIL_NEW" = no ] ;;
+  'ps -aq '*|*'ps -aq '*|*'config --quiet'|*'stop '*|*'up -d --build '*) ;;
+  *) echo "Unexpected Docker invocation: $*" >&2; exit 1 ;;
+esac
+""")
+            docker.chmod(0o755)
+            (base/'sleep').write_text('#!/bin/sh\nexit 0\n')
+            (base/'sleep').chmod(0o755)
+            for failure in ('no', 'yes'):
+                with self.subTest(failure=failure):
+                    target = base/('target-'+failure)
+                    for folder in ('media','state/relay','state/openlist-runtime'):
+                        (target/folder).mkdir(parents=True)
+                    (target/'.env').touch()
+                    (target/'state/relay/config.yml').touch()
+                    (target/'state/openlist-runtime/instance-id').write_text('test')
+                    (target/'compose.yaml').write_text('services: {gateway: {image: "caddy:old"}}\n')
+                    trace = target/'events'
+                    Path(str(trace)+'.live').write_text('old\n')
+                    result = subprocess.run(['bash', script, target], capture_output=True, text=True, timeout=30,
+                                            env={**os.environ,'PATH':str(base)+os.pathsep+os.environ['PATH'],
+                                                 'TRACE':str(trace),'FAIL_NEW':failure})
+                    self.assertEqual(result.returncode == 0, failure == 'no', result.stderr)
+                    events = trace.read_text().splitlines()
+                    self.assertEqual(events[:4], ['validate-new','up-new','reload-new','reload-new'])
+                    if failure == 'yes':
+                        self.assertEqual(events[-3:], ['up-old','reload-old','reload-old'])
+                        self.assertIn('caddy:old', (target/'compose.yaml').read_text())
+                    else:
+                        self.assertEqual(len(events), 4)
+                        self.assertIn('caddy:new', (target/'compose.yaml').read_text())
+
     def test_safe_unpack_and_resume_preserve_configuration(self):
         data = archive()
         digest = hashlib.sha256(data).hexdigest()

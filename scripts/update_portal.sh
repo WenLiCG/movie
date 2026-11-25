@@ -31,6 +31,16 @@ echo "源码及配置状态已备份：$BACKUP"
 
 was_running() { grep -Fxq -- "$1" <<< "$running"; }
 
+reload_gateway() {
+    # A recreated container can start before its Caddy admin socket accepts reloads.
+    local attempt
+    for attempt in {1..10}; do
+        docker compose --profile '*' exec -T gateway caddy reload --config /etc/caddy/Caddyfile && return 0
+        sleep 1
+    done
+    return 1
+}
+
 restore_on_error() {
     local status=$? failed=0
     trap - ERR
@@ -47,7 +57,7 @@ restore_on_error() {
         docker compose --profile '*' up -d --no-build --no-deps "${RUNNING[@]}" || failed=1
     fi
     if was_running gateway; then
-        docker compose --profile '*' exec -T gateway caddy reload --config /etc/caddy/Caddyfile || failed=1
+        reload_gateway || failed=1
     fi
     if ((failed)); then echo "部分恢复失败，请使用备份检查：$BACKUP" >&2; fi
     exit "$status"
@@ -78,8 +88,9 @@ PY_UPLOADS
 fi
 docker compose --profile connected up -d --build --force-recreate --no-deps portal uploader relay
 if was_running gateway; then
-    docker compose --profile '*' exec -T gateway caddy validate --config /etc/caddy/Caddyfile
-    docker compose --profile '*' exec -T gateway caddy reload --config /etc/caddy/Caddyfile
+    docker compose --profile '*' run --rm -T --no-deps gateway caddy validate --config /etc/caddy/Caddyfile
+    docker compose --profile '*' up -d --no-deps gateway
+    reload_gateway
 fi
 trap - ERR
 echo '更新完成：访问 /discover/，使用 Emby 管理员账号登录。原生管理页仍保留。'

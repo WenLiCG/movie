@@ -329,9 +329,60 @@ class UploaderTests(unittest.TestCase):
     def test_bad_remote_hash_prevents_receipt_and_publish(self):
         self.service.put_mode = "bad_hash"
         self.run_upload()
-        self.assertEqual(self.row()["error"], "remote_hash_mismatch")
-        self.assertIsNone(self.row()["receipt"])
+        job = self.row()
+        self.assertEqual(job["error"], "remote_hash_mismatch")
+        self.assertIsNone(job["receipt"])
         self.assertEqual(self.service.moves, 0)
+
+        # A completed native transfer waiting on verification must not occupy the upload slot.
+        self.service.put_mode = "success"
+        other = candidate("movie:456:0", self.source, "/aliyun/Movies/Other/Movie.mkv", self.item["size"])
+        self.run_upload([self.item, other])
+        self.assertIn(other["dest"], self.service.objects)
+        self.assertNotIn(self.item["dest"], self.service.objects)
+        self.assertTrue(self.source.exists())
+        self.assertEqual((self.service.puts, self.service.moves), (2, 1))
+
+        self.service.objects[job["stage"]]["hash_info"]["sha1"] = job["sha1"]
+        self.restart()
+        self.run_upload([])
+        self.assertEqual((self.service.puts, self.service.moves), (2, 2))
+        self.assertIn(self.item["dest"], self.service.objects)
+
+    def test_recovered_task_cannot_inherit_completion_from_missing_task(self):
+        self.service.put_mode = "bad_hash"
+        self.run_upload()
+        job = self.row()
+        stage = PurePosixPath(job["stage"])
+        name = f"upload {stage.name} to [/aliyun]({str(stage.parent).removeprefix('/aliyun')})"
+        self.restart()
+        other = candidate("movie:456:0", self.source, "/aliyun/Movies/Other/Movie.mkv", self.item["size"])
+        with patch.object(self.remote, "tasks", return_value=[{"id": "replacement", "name": name}]), \
+             patch.object(self.remote, "upload_task", side_effect=[Failure("http_404"), Failure("network_or_protocol")]):
+            self.run_upload([self.item, other])
+        current = self.uploader.db.execute("SELECT task_id,native_state FROM jobs WHERE id=?", (job["id"],)).fetchone()
+        self.assertEqual(tuple(current), ("replacement", None))
+        self.assertEqual(self.service.puts, 1)
+
+    def test_missing_task_loses_completion_before_listing_replacements(self):
+        self.service.put_mode = "bad_hash"
+        self.run_upload()
+        job = self.row()
+        stage = PurePosixPath(job["stage"])
+        name = f"upload {stage.name} to [/aliyun]({str(stage.parent).removeprefix('/aliyun')})"
+        duplicates = [{"id": str(i), "name": name} for i in range(2)]
+        other = candidate("movie:456:0", self.source, "/aliyun/Movies/Other/Movie.mkv", self.item["size"])
+        for listing, expected in ((duplicates, "ambiguous_upload_task"), (Failure("network_or_protocol"), "network_or_protocol")):
+            with self.subTest(expected=expected):
+                self.uploader.update(job, retry_at=0, native_state=2, terminal_proven=1)
+                with patch.object(self.remote, "upload_task", side_effect=Failure("http_404")), \
+                     patch.object(self.remote, "tasks", side_effect=[listing]):
+                    self.run_upload([self.item, other])
+                    current = dict(self.uploader.db.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone())
+                    self.assertEqual((current["native_state"], current["terminal_proven"], current["error"]), (None, 0, expected))
+                    with self.assertRaisesRegex(Failure, "upload_unconfirmed"):
+                        self.uploader.cancel_job(current)
+                self.assertEqual(self.service.puts, 1)
 
     def test_restart_after_lost_move_response_recovers_without_resubmission(self):
         self.service.move_mode = "disconnect"

@@ -61,6 +61,7 @@ async function api(path, body) {
 }
 async function action(button, work) { if (button) button.disabled = true; try { await work(); } catch (error) { notice(error.message, true); } finally { if (button) button.disabled = false; } }
 function signedIn(value, username = '') {
+  const leavingAccount = !value && Boolean(csrf);
   hideNotice();
   if (value) {
     $('logout').title = username ? `退出登录（当前账号：${username}）` : '退出登录';
@@ -81,9 +82,11 @@ function signedIn(value, username = '') {
     show('search');
     ['follow-dialog', 'episodes-dialog', 'task-dialog'].forEach(id => $(id).close());
   }
-  $('login').hidden = value;
+  $('login').hidden = value || leavingAccount;
   for (const id of ['workspace', 'metrics', 'logout', 'watch']) $(id).hidden = !value;
   document.querySelector('nav').hidden = !value;
+  // A fresh document separates the next login from outstanding polls and dialog state.
+  if (leavingAccount) location.reload();
 }
 let recommendationGeneration=0;
 async function loadRecommendations(){
@@ -109,7 +112,7 @@ async function loadRecommendations(){
     $('welcome').hidden=values.length>0||$('search').classList.contains('has-results');
   }catch(error){if(generation===recommendationGeneration)$('recommendation-status').textContent='站点近期列表暂时不可用；仍可直接搜索。';}
 }
-const metaTones = {'免费':'success','追更中':'success','已发布':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','归档中':'info','同步集数中':'info','已暂停':'warning','下载已暂停':'warning','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
+const metaTones = {'免费':'success','追更中':'success','已发布':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','归档中':'info','同步集数中':'info','已暂停':'warning','下载已暂停':'warning','操作待核对':'warning','等待归档复核':'warning','下载异常':'danger','归档失败':'danger','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
 function row(title, meta, cls = 'result-row') {
   const el = node('article', undefined, cls), body = node('div', undefined, 'row-body');
   body.append(node('h3', title, 'row-title', cls === 'series-row' ? 'tv' : cls === 'task-row' ? 'download' : cls === 'playback-row' ? 'play' : cls === 'upload-row' ? undefined : kind === 'tv' ? 'tv' : 'film'));
@@ -120,7 +123,7 @@ function row(title, meta, cls = 'result-row') {
 async function show(view) { currentView = view; document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== view); document.querySelectorAll('[data-view]').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); }); try { if (view === 'settings') await status(); if (view === 'series') await series(); if (view === 'tasks') await tasks(); if(view==='playbacks')await playbacks(); } catch (e) { notice(e.message, true); } }
 document.querySelectorAll('[data-view]').forEach(el => el.onclick = () => show(el.dataset.view));
 $('login-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('login-form').querySelector('button'), async () => { const result = await api('login', {username: $('username').value, password: $('password').value}); csrf = result.csrf; $('password').value = ''; signedIn(true, result.username); await status(); await metrics(); }); };
-$('logout').onclick = () => action($('logout'), async () => { await api('logout', {}); csrf = ''; signedIn(false); });
+$('logout').onclick = () => action($('logout'), async () => { await api('logout', {}); signedIn(false); });
 let searchGeneration=0, searchWarnings=[];
 function resetFilters() {
   $('resolution').value = '';
@@ -425,12 +428,16 @@ const uploadStates={pending:'等待上传',uploading:'提交上传中',queued:'�
 const qbStates={downloading:'下载中',stalledDL:'等待连接',metaDL:'获取资源信息',queuedDL:'排队下载',stoppedDL:'下载已暂停',pausedDL:'下载已暂停',checkingDL:'下载校验中',error:'下载出错',missingFiles:'源文件缺失'};
 const seedStates={uploading:'做种中',stalledUP:'等待做种连接',queuedUP:'排队做种',forcedUP:'做种中',stoppedUP:'做种已暂停',pausedUP:'做种已暂停',checkingUP:'做种文件校验中',error:'下载器出错',missingFiles:'本地文件缺失'};
 const episodeTitle=name=>name.match(/S\d{1,2}[ ._-]*E\d{1,4}(?:-E?\d{1,4}|E\d{1,4})*/i)?.[0].toUpperCase()||name;
+function awaitingArchiveCheck(u) {
+  return u.state === 'queued' && u.terminal_proven && u.error;
+}
 function uploadRow(u, compact=false, short=false) {
   const name=u.dest.split('/').pop();
-  const el=row(short?episodeTitle(name):name,[u.dest.startsWith('/aliyun/TV/')?'剧集／综艺':'电影',uploadStates[u.state]||'处理中',u.state==='queued'?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message],'upload-row');
+  const check=awaitingArchiveCheck(u);
+  const el=row(short?episodeTitle(name):name,[u.dest.startsWith('/aliyun/TV/')?'剧集／综艺':'电影',check?'等待归档复核':uploadStates[u.state]||'处理中',u.state==='queued'&&!check?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message],'upload-row');
   el.firstChild.firstChild.title=name;
   el.firstChild.firstChild.hidden=compact;
-  if(u.state==='failed'||u.error==='upload_unconfirmed'||u.error==='move_pending'){
+  if(check||u.state==='failed'||u.error==='upload_unconfirmed'||u.error==='move_pending'){
     const b=node('button',u.state==='failed'?'重新上传':'重新检查');b.dataset.taskControl=u.id+':retry';
     b.onclick=()=>action(b,async()=>{notice((await api('retry-upload',{id:u.id})).message);await tasks();});el.append(b);
   }
@@ -438,7 +445,7 @@ function uploadRow(u, compact=false, short=false) {
   return el;
 }
 let tasksAgain=false, taskTarget=null, tasksBusy=false, taskScope='', taskPreview=0, taskSubmitting=false;
-const actionErrors={task_control_failed:'下载器尚未确认，请刷新后重试',task_waiting_for_upload:'等待云盘任务结束后继续处理',upload_unconfirmed:'旧上传状态尚未确认，请检查云盘任务',task_waiting_for_import:'等待站点搜索或剧集入库结束',cleanup_waiting_for_stop:'等待下载器停止',cleanup_waiting_for_removal:'等待下载器移除任务',cleanup_waiting_for_files:'等待本地文件删除完成',cleanup_shared_file:'文件与其他任务共用，已保留；请在高级管理核对',task_changed:'资源已变化，请核对新清单后重新确认',delete_scope_required:'旧删除请求缺少确认清单，请重新预览并确认',cleanup_local_unverified:'无法确认剩余文件的归属，已保留',cleanup_episode_changed:'Sonarr 文件与确认记录不符，已暂停删除',delete_all_not_configured:'Emby 维护连接或索引目录未就绪，尚未完成删除',delete_all_unverified:'缺少云端归属校验记录，保留文件等待核对',delete_all_unsafe_index:'索引内容或备份存在变化，保留索引等待核对',delete_all_waiting_cloud:'等待云盘确认原件已移除',delete_all_waiting_scan:'云端和索引已清理，等待 Emby 扫描完成',delete_all_local_changed:'本地文件内容已变化，已保留，等待核对',remote_hash_mismatch:'云端文件已被替换，已停止以免误删新版本',remote_size_mismatch:'云端文件与归档记录不符，已停止以免误删',remote_hash_unavailable:'云盘校验信息不完整，保留文件等待核对'};
+const actionErrors={task_control_failed:'下载器或追更服务尚未确认，请刷新后重试',task_waiting_for_upload:'等待云盘任务结束后继续处理',upload_unconfirmed:'旧上传状态尚未确认，请检查云盘任务',task_waiting_for_import:'等待站点搜索或剧集入库结束',cleanup_waiting_for_stop:'等待下载器停止',cleanup_waiting_for_removal:'等待下载器移除任务',cleanup_waiting_for_files:'等待本地文件删除完成',cleanup_shared_file:'文件与其他任务共用，已保留；请在高级管理核对',task_changed:'资源已变化，请核对新清单后重新确认',delete_scope_required:'旧删除请求缺少确认清单，请重新预览并确认',cleanup_local_unverified:'无法确认剩余文件的归属，已保留',cleanup_episode_changed:'Sonarr 文件与确认记录不符，已暂停删除',delete_all_not_configured:'Emby 维护连接或索引目录未就绪，尚未完成删除',delete_all_unverified:'缺少云端归属校验记录，保留文件等待核对',delete_all_unsafe_index:'索引内容或备份存在变化，保留索引等待核对',delete_all_waiting_cloud:'等待云盘确认原件已移除',delete_all_waiting_scan:'云端和索引已清理，等待 Emby 扫描完成',delete_all_local_changed:'本地文件内容已变化，已保留，等待核对',remote_hash_mismatch:'云端文件已被替换，已停止以免误删新版本',remote_size_mismatch:'云端文件与归档记录不符，已停止以免误删',remote_hash_unavailable:'云盘校验信息不完整，保留文件等待核对'};
 function keepRemaining(id){
   const keep=node('button','保留剩余文件并结束','quiet');
   keep.dataset.taskControl=id+':keep';
@@ -448,22 +455,40 @@ function keepRemaining(id){
   });
   return keep;
 }
+const downloadStopped = r => ['stoppedDL','pausedDL','stoppedUP','pausedUP'].includes(r.state);
+function taskState(group, unfinished) {
+  const {action, resources, uploads} = group;
+  if (action?.state === 'blocked') return '操作待核对';
+  if (action?.state === 'pending') return action.action === 'delete' ? '删除处理中' : '取消处理中';
+  if (uploads.length && uploads.every(u => u.state === 'published') && !unfinished.length && !group.waiting_video) return '已发布';
+  if (action?.action === 'cancel' || (!group.waiting_video && !unfinished.length && uploads.length && uploads.every(u => u.state === 'cancelled'))) return '已取消';
+  if (resources.some(r => ['error','missingFiles'].includes(r.state))) return '下载异常';
+  if (uploads.some(u => u.state === 'failed')) return '归档失败';
+  if (uploads.some(awaitingArchiveCheck)) return '等待归档复核';
+  if (unfinished.length) {
+    if (unfinished.every(downloadStopped)) return '下载已暂停';
+    const first = unfinished[0].state;
+    return unfinished.every(r => r.state === first) ? (qbStates[first] || '下载中') : '下载中';
+  }
+  if (uploads.some(u => !['published','cancelled'].includes(u.state))) return '归档中';
+  return uploads.some(u => u.state === 'published') ? '部分已发布' : '等待导入';
+}
 function taskButtons(target, status, disabled=false) {
   const box=node('div',undefined,'task-actions');
   const resources=target.resources||[target],unfinished=resources.filter(r=>r.progress<1),downloading=unfinished.length>0;
-  const archiving=(target.uploads||[]).some(u=>u.state!=='published');
+  const archiving=target.waiting_video||(target.uploads||[]).some(u=>u.state!=='published');
   const cancelled=status?.action==='cancel'||(target.uploads||[]).some(u=>u.state==='cancelled');
-  const stopped=value=>['stoppedDL','pausedDL','stoppedUP','pausedUP'].includes(value);
-  const paused=downloading&&unfinished.every(r=>stopped(r.state));
+  const paused=downloading&&unfinished.every(downloadStopped);
   const retryResume=status?.action==='resume'&&!!status?.error;
   const pause=downloading&&!paused&&!retryResume;
-  const resume=node('button',retryResume?'重试继续':downloading?(paused?'继续下载':'暂停下载'):'继续归档',undefined,pause?'pause':'play');
+  const resumeLabel=retryResume?'重试继续':downloading?(paused?'继续下载':'暂停下载'):'继续归档';
+  const resume=node('button',target.tvdb_id?(pause?'暂停整个项目':retryResume?'重试继续项目':'继续整个项目'):resumeLabel,undefined,pause?'pause':'play');
   resume.disabled=disabled||['pending','blocked'].includes(status?.state);
   resume.dataset.taskControl=target.id+':resume';
   resume.onclick=()=>action(resume,async()=>{const r=await api('task-action',{id:target.id,action:pause?'pause':'resume'});notice(downloading?r.message:'已继续归档。');await tasks();});
-  const cancel=node('button',downloading?'取消下载':'取消归档');cancel.disabled=disabled||['pending','blocked'].includes(status?.state)||status?.action==='cancel';cancel.onclick=()=>openTaskDialog({...target,archiveOnly:!downloading},'cancel');
+  const cancel=node('button',(target.tvdb_id?'取消项目':'取消')+(downloading?'下载':'归档'));cancel.disabled=disabled||['pending','blocked'].includes(status?.state)||status?.action==='cancel';cancel.onclick=()=>openTaskDialog({...target,archiveOnly:!downloading},'cancel');
   cancel.dataset.taskControl=target.id+':cancel';
-  const remove=node('button',target.tvdb_id?'删除追剧项目':'删除项目','quiet danger','trash');remove.disabled=status?.state==='pending';remove.onclick=()=>openTaskDialog(target,'delete');
+  const remove=node('button',target.tvdb_id?'删除追剧项目':'删除资源','quiet danger','trash');remove.disabled=disabled||status?.state==='pending';remove.onclick=()=>openTaskDialog(target,'delete');
   remove.dataset.taskControl=target.id+':delete';
   if(status?.can_keep)box.append(keepRemaining(status.id||target.id));
   if(!downloading&&resources.length)box.append(node('span',resources.length===1?(seedStates[resources[0].state]||'下载已完成'):'下载已完成','task-seed-state muted'));
@@ -473,9 +498,9 @@ function taskButtons(target, status, disabled=false) {
 }
 function openTaskDialog(target, operation){
   taskTarget={...target,operation};
-  $('task-dialog-title').textContent=operation==='delete'?(target.tvdb_id?'删除整个追剧项目':'删除项目'):(target.archiveOnly?'取消归档':'取消下载');
+  $('task-dialog-title').textContent=operation==='delete'?(target.tvdb_id?'删除整个追剧项目':'删除资源'):(target.archiveOnly?'取消归档':'取消下载');
   $('task-dialog-name').textContent=target.name;
-  $('task-dialog-description').textContent=operation==='delete'?(target.tvdb_id?'停止该剧追更，移除全部相关下载与归档条目。':'移除此资源的下载与归档条目。'):target.archiveOnly?'停止尚未发布的归档，保留本地文件和已发布的云端影片。'+(target.tvdb_id?'该剧也会暂停追更。':''):'终止当前下载和后续上传，保留本地文件；之后可选择继续下载。';
+  $('task-dialog-description').textContent=operation==='delete'?(target.tvdb_id?'停止该剧追更，移除全部相关下载与归档条目。':'移除此资源的下载与归档条目。'):(target.archiveOnly?'停止尚未发布的归档，保留本地文件和已发布的云端影片。':'终止当前下载和后续上传，保留本地文件，之后可选择继续下载。')+(target.tvdb_id?'该剧也会暂停追更。':'');
   $('task-delete-options').hidden=operation!=='delete';document.querySelector('[name=delete-files][value=false]').checked=true;
   $('confirm-task').textContent=operation==='delete'?'确认删除':target.archiveOnly?'确认取消归档':'确认取消下载';updateTaskDeleteMode();$('task-dialog-error').hidden=true;$('task-dialog').showModal();
 }
@@ -551,20 +576,19 @@ async function tasks() {
       const progress=total?g.resources.reduce((n,t)=>n+(t.size||0)*t.progress,0)/total:g.resources.length?g.resources.reduce((n,t)=>n+t.progress,0)/g.resources.length:1;
       const progressKnown=g.resources.length||g.uploads.length;
       const multiple=g.file_count>1;
-      const allStopped=downloading.length&&downloading.every(t=>['stoppedDL','pausedDL','stoppedUP','pausedUP'].includes(t.state));
-      const allPublished=g.uploads.length&&g.uploads.every(u=>u.state==='published');
-      const state=g.action?.state==='pending'?(g.action.action==='delete'?'删除处理中':'取消处理中'):g.action?.action==='cancel'&&!allPublished?'已取消':g.action?.action==='pause'&&allStopped&&downloading.length?'下载已暂停':downloading.length?'下载中':g.uploads.some(u=>!['published','cancelled'].includes(u.state))?'归档中':completed?'已发布':'等待导入';
+      const state=taskState(g,downloading);
       const el=row(g.name,[g.tvdb_id?'追剧项目':'独立下载',state,g.file_count+' 个文件',total>0?size(total):'',downloading.length&&speed>0?`${size(speed)}/s`:'',completed?'已发布 '+completed+' 个视频':'',progressKnown?`下载 ${(progress*100).toFixed(1)}%`:''],'task-row');
       el.dataset.id=g.id;
       if(progressKnown){const bar=node('progress',undefined,'task-download-progress');bar.max=1;bar.value=progress;bar.setAttribute('aria-label','当前资源下载进度');el.firstChild.append(bar);}
-      if(Object.values(g.resource_actions||{}).some(a=>a.state==='pending'))el.firstChild.append(node('p','部分资源正在处理，展开查看进度。','muted'));
+      const resourceBusy=Object.values(g.resource_actions||{}).some(a=>['pending','blocked'].includes(a.state));
+      if(resourceBusy)el.firstChild.append(node('p','部分资源正在处理或等待核对，完成后可操作整个追剧项目。','muted'));
       for(const status of Object.values(g.resource_actions||{})){
-        if(status.can_keep&&(g.resources.length<=1||!g.resources.some(t=>'torrent:'+t.hash===status.id))){
+        if(status.can_keep&&!g.resources.some(t=>'torrent:'+t.hash===status.id)){
           el.firstChild.append(node('p',actionErrors[status.error]||'资源删除暂未完成。','warning-text'),keepRemaining(status.id));
         }
       }
       if(g.action?.error)el.firstChild.append(node('p',actionErrors[g.action.error]||'暂未完成，保留数据并自动重试；可在高级管理检查。','warning-text'));
-      el.append(taskButtons(g,g.action,!g.resources.length&&!g.uploads.length));
+      el.append(taskButtons(g,g.action,resourceBusy));
       const detail=node(multiple?'details':'div',undefined,multiple?'task-files':'task-inline');
       if(multiple){detail.dataset.key=g.id;detail.open=expanded.has(g.id);detail.append(node('summary',`查看文件（${g.file_count}）`));}
       const linked=new Set();
@@ -579,11 +603,12 @@ async function tasks() {
           else {const fileRow=row(g.tvdb_id?episodeTitle(f.name):f.name,[t.progress<1?(qbStates[t.state]||'下载中'):'等待导入或上传',`${(f.progress*100).toFixed(1)}%`,size(f.size)],'upload-row');fileRow.firstChild.firstChild.title=f.name;fileRow.firstChild.firstChild.hidden=!multiple&&!g.tvdb_id;resource.append(fileRow);}
         });
         t.uploads.filter(j=>!linked.has(j.id)).forEach(j=>{resource.append(uploadRow(j,!multiple&&!g.tvdb_id,!!g.tvdb_id));linked.add(j.id);});
-        if(g.resources.length>1){
+        if(g.tvdb_id){
           const source=node('details',undefined,'task-source');source.dataset.key=g.id+':'+t.hash;source.open=expanded.has(source.dataset.key);
           source.append(node('summary','资源详情与操作'),node('p',t.name,'row-description'));
           t.files.filter(f=>f.priority).forEach(f=>source.append(node('p',f.name,'row-description')));
-          source.append(taskButtons({id:'torrent:'+t.hash,name:t.name,state:t.state,progress:t.progress,uploads:t.uploads},resourceAction||(g.action?.state==='pending'?g.action:null)));
+          const target={id:'torrent:'+t.hash,name:t.name,state:t.state,progress:t.progress,uploads:t.uploads,waiting_video:t.waiting_video};
+          source.append(taskButtons(target,resourceAction,['pending','blocked'].includes(g.action?.state)));
           resource.append(source);
         }
         detail.append(resource);
