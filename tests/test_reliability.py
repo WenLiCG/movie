@@ -207,6 +207,7 @@ class BoundaryTests(unittest.TestCase):
             sources.qb.json.return_value = []
             with patch('uploader.shutil.disk_usage', return_value=Mock(total=60 * 1024**3, free=40 * 1024**3)):
                 self.assertEqual(disk_guard(sources, base), 0)
+            self.assertFalse((base / 'disk-paused.json').exists())
 
     def test_login_limit_is_per_source_and_session_has_no_password(self):
         with tempfile.TemporaryDirectory() as temp:

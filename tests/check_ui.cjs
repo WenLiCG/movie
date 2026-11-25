@@ -109,7 +109,7 @@ const {chromium} = require('playwright');
     assert.equal(await show.getByRole('heading',{name:pack,exact:true}).count(),0);
     assert.equal(await show.locator('.task-source').count(),2);
     await show.locator('.task-source summary').last().click();
-    await show.locator('.task-source').last().getByRole('button',{name:'删除项目',exact:true}).click();
+    await show.locator('.task-source').last().getByRole('button',{name:'删除资源',exact:true}).click();
     assert.equal(await page.evaluate(()=>taskTarget.id),'torrent:hash18');
     assert(await page.locator('[name=delete-files][value=false]').isChecked());
     await page.locator('[name=delete-files][value=all]').check();

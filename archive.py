@@ -101,6 +101,18 @@ def torrent_instance(torrent):
     return tuple(torrent.get(k) for k in ('hash', 'category', 'save_path', 'added_on'))
 
 
+class TaskScopeChanged(ValueError):
+    pass
+
+
+def episodes_with_monitoring(sonarr, series_id, ids, monitored):
+    episodes = sonarr.json('GET', '/api/v3/episode?seriesId='+str(series_id))
+    states = {e['id']:e.get('monitored') for e in episodes}
+    if any(type(i) is not int or type(states.get(i)) is not bool for i in ids):
+        raise TaskScopeChanged('资源关联的集数已变化，请刷新任务列表后重试。')
+    return sorted(i for i in ids if states[i] is monitored)
+
+
 def delete_target(job):
     return {key: job.get(key) for key in ('id', 'dest', 'size', 'source', 'download_source',
                                           'torrent_hash', 'added_on', 'identity', 'parent_id')}

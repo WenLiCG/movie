@@ -26,6 +26,7 @@
 
 - `linuxserver/prowlarr:version-2.7.0.5723`：`sha256:04be30163fbaf48d6aeee7b5893c9f6614ffbad6d853971df0d6dcdf01c7f104`。[标签接口](https://hub.docker.com/v2/repositories/linuxserver/prowlarr/tags/version-2.7.0.5723)
 - `linuxserver/sonarr:version-4.0.20.3014`：`sha256:386c962ee6e260e3a5656b25df2ed056bcc9b6410e197d075f9547fd14c23bca`。[标签接口](https://hub.docker.com/v2/repositories/linuxserver/sonarr/tags/version-4.0.20.3014)
+- Caddy 2.11.9 Alpine 固定多架构索引 `sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0`，已核对 linux/amd64 与 linux/arm64。该版本包含 2.11.8 的反向代理响应头修复。网关使用 Caddy 原生认证子请求和上游头改写。[2.11.8 发布说明](https://github.com/caddyserver/caddy/releases/tag/v2.11.8) · [2.11.9 发布说明](https://github.com/caddyserver/caddy/releases/tag/v2.11.9) · [forward_auth 文档](https://caddyserver.com/docs/caddyfile/directives/forward_auth)
 
 其他应用也由 Compose 固定 digest，避免 latest 后续变化自动替换版本。公开发布及镜像存在不等于目标 VPS 已运行验证。
 

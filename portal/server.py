@@ -25,7 +25,7 @@ from integration import APIError, Client, connect_services, read_api_key, emby_d
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target
+from archive import archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
@@ -37,10 +37,6 @@ USER_ERROR_PREFIXES = (
     "季数", "所选集数", "播放记录", "影院", "同名", "重复的", "当前应用", "应用设置",
     "本地应用", "需要", "无法",
 )
-
-
-class TaskScopeChanged(ValueError):
-    pass
 
 
 class SessionCheckUnavailable(Exception):
@@ -109,6 +105,12 @@ def managed_download_client(clients, name, category):
             and fields.get('category') == category and fields.get('host') == 'qbittorrent' and fields.get('port') == 8080):
         return client
     return None
+
+
+def same_resource_action(action, group, resource):
+    payload = action['payload']
+    return ((payload['group'] == group or action['action'] == 'delete') and
+            any(torrent_instance(t) == torrent_instance(resource) for t in payload['torrents']))
 
 
 def tags(title):
@@ -875,6 +877,7 @@ class App:
     @staticmethod
     def queue_records(sonarr):
         page, records, total = 1, [], None
+        seen = set()
         while True:
             response = sonarr.json('GET', f'/api/v3/queue?page={page}&pageSize=200&includeSeries=true&includeEpisode=true&includeUnknownSeriesItems=true')
             batch = response.get('records') if isinstance(response, dict) else None
@@ -884,6 +887,11 @@ class App:
             if type(reported) is not int or reported < 0 or (total is not None and reported != total):
                 raise ValueError('Sonarr 下载队列未完整确认，请刷新后重试。')
             total = reported
+            if page > 1 or len(batch) < total:
+                ids = [row.get('id') for row in batch]
+                if any(type(i) is not int for i in ids) or len(set(ids)) != len(ids) or seen.intersection(ids):
+                    raise ValueError('Sonarr 下载队列已变化，请刷新后重试。')
+                seen.update(ids)
             records.extend(batch)
             if len(records) == total:
                 return records
@@ -939,7 +947,7 @@ class App:
                 position += 1
             item['queue_position'] = position if item['state'] == 'pending' else None
         return [{k:v for k,v in item.items() if k in fields}
-                | {'error_message': archive_error(item['error'])} for item in values]
+                | {'error_message': archive_error(item['error']), 'terminal_proven': bool(item.get('terminal_proven'))} for item in values]
 
     def retry_upload(self, body):
         job_id = text(body.get('id'), 64)
@@ -987,7 +995,8 @@ class App:
             tvdbs={j['tvdb_id'] for j in jobs if j.get('tvdb_id')}
             tvdbs.update(native_hash.get(t['hash'].lower(), ()))
             tvdb=next(iter(tvdbs)) if len(tvdbs)==1 and t['category']=='sonarr-tv' else None
-            return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','download_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb}
+            waiting = any(f['priority'] and f['progress'] == 1 and not f.get('job_id') and video(f['name']) for f in files)
+            return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','download_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb,'waiting_video':waiting}
         with ThreadPoolExecutor(max_workers=4) as pool:
             resources=list(pool.map(build,torrents))
         needed_tvdbs = ({r['tvdb_id'] for r in resources if r.get('tvdb_id')}
@@ -1001,8 +1010,10 @@ class App:
                 groups[key]={'id':key,'tvdb_id':tvdb,'series_id':native.get('id'),'name':names.get(tvdb,{}).get('title') or native.get('title') or title,'resources':[],'uploads':[],'action':None,'resource_actions':{}}
             return groups[key]
         linked=set()
+        live_torrents = {}
         for resource in resources:
             key='series:'+str(resource['tvdb_id']) if resource['tvdb_id'] else 'torrent:'+resource['hash']
+            live_torrents['torrent:'+resource['hash']] = (key, resource)
             value=group(key,resource['tvdb_id'],resource['name'])
             value['resources'].append(resource);value['uploads'].extend(resource['uploads']);linked.update(j['id'] for j in resource['uploads'])
         for job in uploads:
@@ -1015,20 +1026,22 @@ class App:
             if action['action']=='delete' and action['state']=='done':
                 continue
             payload=action['payload'];key=payload['group']
+            live = live_torrents.get(action['id'])
+            if live and action['state'] not in {'pending','blocked'}:
+                current_group, current = live
+                if not same_resource_action(action, current_group, current):
+                    continue
             if key not in groups and action['action'] in {'cancel','delete'}:
                 group(key,payload.get('tvdb_id'),payload['name'])
             if key in groups:
-                if action['id'].startswith('torrent:'):
-                    current=next((r for r in groups[key]['resources'] if 'torrent:'+r['hash']==action['id']),None)
-                    old=next((t for t in payload['torrents'] if 'torrent:'+t['hash']==action['id']),None)
-                    if current and old and current['added_on']!=old['added_on'] and action['state'] not in {'pending','blocked'}:
-                        continue
                 status={k:action[k] for k in ('id','action','state','error')}
-                status['can_keep'] = bool(payload.get('delete_files') and action['state'] in {'pending', 'blocked'} and action['error'])
+                status['can_keep'] = bool(action['action'] in {'cancel','delete'} and action['error'] and
+                                          (action['state']=='blocked' or action['state']=='pending' and payload.get('delete_files')))
                 if action['id']==key:groups[key]['action']=status
                 else:groups[key]['resource_actions'][action['id']]=status
         for value in groups.values():
-            value['file_count']=len(value['uploads'])+sum(sum(1 for f in r['files'] if not f.get('job_id')) for r in value['resources'])
+            value['file_count']=len(value['uploads'])+sum(1 for r in value['resources'] for f in r['files'] if f['priority'] and not f.get('job_id'))
+            value['waiting_video'] = any(r['waiting_video'] for r in value['resources'])
         issue = None
         try:
             heartbeat = json.loads((self.data/'heartbeat.json').read_text(encoding='utf-8'))
@@ -1067,11 +1080,13 @@ class App:
             actions = {a['id']: a for a in task_actions(self.data/'uploads.sqlite3')}
             previous = actions.get(key)
             if action == 'keep-remaining':
-                if not previous or previous['state'] not in {'pending', 'blocked'} or not previous['payload'].get('delete_files'):
-                    raise ValueError('请刷新任务列表，删除请求已处理。')
+                if (not previous or previous['action'] not in {'cancel','delete'} or
+                        not (previous['state']=='blocked' or previous['state']=='pending' and previous['payload'].get('delete_files'))):
+                    raise ValueError('请刷新任务列表，请求状态已变化。')
+                state = 'done' if previous['payload'].get('delete_files') else 'released'
                 with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
-                    db.execute("UPDATE task_actions SET state='done',error=NULL WHERE id=?", (key,))
-                return {'message': '已结束删除请求，保留仍存在的文件。'}
+                    db.execute("UPDATE task_actions SET state=?,error=NULL WHERE id=?", (state,key))
+                return {'message': '已结束请求，保留现有文件与当前任务状态。'}
             groups=self.tasks(all_jobs=action=='delete')['items']
             group=next((g for g in groups if g['id']==key),None)
             resource=None
@@ -1080,6 +1095,9 @@ class App:
                 if not pair:raise ValueError('请刷新任务列表，项目已变化。')
                 group,resource=pair
             resources=[resource] if resource else group['resources']
+            if previous and previous['state'] == 'done' and key.startswith('torrent:') and resources:
+                if not same_resource_action(previous, group['id'], resources[0]):
+                    previous = None
             jobs=list({j['id']:j for j in (resource['uploads'] if resource else group['uploads'])}.values())
             torrents = [{k:r[k] for k in ('hash','name','category','save_path','download_path','added_on')}
                         | {'files':[{k:f[k] for k in ('name','size')} for f in r['files']]} for r in resources]
@@ -1124,15 +1142,17 @@ class App:
                 queued=[q for q in self.queue_records(sonarr) if (q.get('downloadId') or '').lower()==resource['hash'].lower()]
                 if any((q.get('seriesId') or (q.get('series') or {}).get('id')) != group['series_id'] for q in queued):
                     raise TaskScopeChanged('资源关联的剧集已变化，请刷新任务列表后重试。')
-                ids=[q.get('episodeId') or (q.get('episode') or {}).get('id') for q in queued]
-                payload['episode_ids']=[v for v in ids if type(v) is int]
-                if payload['episode_ids']:
-                    sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':payload['episode_ids'],'monitored':False})
-            if resource and action=='resume' and previous and previous['payload'].get('episode_ids'):
-                series=sonarr.json('GET','/api/v3/series/'+str(group['series_id']))
+                ids={q.get('episodeId') or (q.get('episode') or {}).get('id') for q in queued}
+                if ids:
+                    payload['monitored_episode_ids'] = episodes_with_monitoring(sonarr, group['series_id'], ids, True)
+            restore = []
+            if resource and action == 'resume' and previous and previous['payload'].get('monitored_episode_ids'):
+                series = sonarr.json('GET','/api/v3/series/'+str(group['series_id']))
+                if previous['payload']['series_id'] != series['id'] or series['tvdbId'] != group['tvdb_id']:
+                    raise TaskScopeChanged('资源关联的剧集已变化，请刷新任务列表后重试。')
                 self.require_version(sonarr,series)
-                payload['episode_ids'] = previous['payload']['episode_ids']
-                sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':payload['episode_ids'],'monitored':True})
+                restore = episodes_with_monitoring(sonarr, series['id'], previous['payload']['monitored_episode_ids'], False)
+                payload['monitored_episode_ids'] = restore
             if group['series_id'] and not resource:
                 series=sonarr.json('GET','/api/v3/series/'+str(group['series_id']))
                 if action=='resume':
@@ -1153,7 +1173,7 @@ class App:
             self.data.mkdir(parents=True,exist_ok=True)
             with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                 create_actions(db)
-                db.execute('INSERT OR REPLACE INTO task_actions VALUES (?,?,?,?,?,?)',(key,action,json.dumps(payload),'done' if action in {'pause','resume'} else 'pending',None,time.time()))
+                db.execute('INSERT OR REPLACE INTO task_actions VALUES (?,?,?,?,?,?)',(key,action,json.dumps(payload),'done' if action in {'pause','resume'} else 'pending','task_control_failed' if action=='resume' else None,time.time()))
             disk_path=self.data/'disk-paused.json'
             disk=json.loads(disk_path.read_text(encoding='utf-8')) if disk_path.exists() else {}
             for r in resources:
@@ -1163,13 +1183,15 @@ class App:
                 if action in {'pause','resume'}:
                     for r in resources:
                         qb.request('POST','/api/v2/torrents/'+('start' if action=='resume' else 'stop'),form={'hashes':r['hash']})
+                    if restore:
+                        sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':restore,'monitored':True})
             except (ValueError,OSError):
                 with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                     db.execute("UPDATE task_actions SET error='task_control_failed' WHERE id=?",(key,))
-                raise ValueError('下载器尚未确认操作，请刷新查看实际状态后重试。') from None
+                raise ValueError('下载器或追更服务尚未确认操作，请刷新查看实际状态后重试。') from None
             if action=='resume':
                 with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
-                    db.execute("UPDATE task_actions SET state='released' WHERE id=?",(key,))
+                    db.execute("UPDATE task_actions SET state='released',error=NULL WHERE id=?",(key,))
                     if resource:
                         if parent and parent['action']=='cancel':
                             db.execute("UPDATE task_actions SET state='released' WHERE id=?",(group['id'],))

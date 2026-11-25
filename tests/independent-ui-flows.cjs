@@ -12,6 +12,7 @@ const {chromium} = require('playwright');
   let sessionMode = 'html-503';
   let retentionDays = 7;
   let searchFails = false;
+  let holdNextTaskPoll;
   const state = {
     session: {csrf: 'synthetic-csrf'},
     status: () => ({settings: {retention_days: retentionDays}, credentials: {openlist: false, qb: false}, checks, cleanup: {done: 0, pending: 0, deferred: 0, reasons: []}}),
@@ -29,6 +30,11 @@ const {chromium} = require('playwright');
     if (url.pathname.startsWith('/discover/api/')) {
       const name = url.pathname.split('/').pop();
       response.setHeader('Content-Type', 'application/json');
+      if (name === 'tasks' && holdNextTaskPoll) {
+        holdNextTaskPoll(response);
+        holdNextTaskPoll = null;
+        return;
+      }
       if (name === 'session' && sessionMode === 'html-503') {
         response.writeHead(503, {'Content-Type': 'text/html'});
         response.end('<html>gateway down</html>');
@@ -117,6 +123,9 @@ const {chromium} = require('playwright');
     await page.locator('nav [data-view=settings]').click();
     await page.locator('#refresh-token').fill('synthetic-unused-token');
     await page.locator('#days').fill('123');
+    const delayedPoll = new Promise(resolve => { holdNextTaskPoll = resolve; });
+    await page.evaluate(() => { window.priorAccountPoll = tasks().catch(() => {}); });
+    const oldReply = await delayedPoll;
     await page.locator('#logout').click();
     await page.locator('#login').waitFor({state: 'visible'});
     assert.equal(await page.locator('#results').innerText(), '');
@@ -129,6 +138,11 @@ const {chromium} = require('playwright');
     await page.locator('#password').fill('synthetic-only');
     await page.getByRole('button', {name: '登录', exact: true}).click();
     await page.locator('#workspace').waitFor({state: 'visible'});
+    // A delayed 401 from the previous account must not sign out the current one.
+    oldReply.writeHead(401);
+    oldReply.end('{}');
+    await page.evaluate(() => window.priorAccountPoll);
+    assert(await page.locator('#workspace').isVisible());
     await page.locator('nav [data-view=settings]').click();
     await page.locator('#days').waitFor();
     assert.equal(await page.locator('#days').inputValue(), '7');
@@ -158,6 +172,42 @@ const {chromium} = require('playwright');
     await retry.focus();
     await page.evaluate(() => tasks());
     await page.waitForFunction(() => document.activeElement?.dataset.taskControl === 'job1:retry');
+    Object.assign(state.tasks.items[0].uploads[0], {state: 'queued', progress: 100, terminal_proven: true, error: 'remote_hash_mismatch'});
+    await page.locator('#refresh-tasks').click();
+    const check = page.getByRole('button', {name: '重新检查', exact: true});
+    await check.waitFor();
+    assert.equal(await page.getByText('等待归档复核', {exact: true}).count(), 2);
+    assert.equal(await page.locator('.upload-row').getByText('100.0%', {exact: true}).count(), 0);
+    const recheck = page.waitForRequest(req => req.url().endsWith('/api/retry-upload'));
+    await check.click();
+    assert.deepEqual((await recheck).postDataJSON(), {id: 'job1'});
+
+    // A series with one torrent still has two independent operation scopes.
+    const single = {...state.tasks.items[0], id: 'series:42', tvdb_id: 42};
+    state.tasks.items = [single];
+    await page.setViewportSize({width: 390, height: 844});
+    await page.locator('#refresh-tasks').click();
+    const project = page.locator('[data-id="series:42"]');
+    await project.getByRole('button', {name: '删除追剧项目'}).waitFor();
+    await project.getByText('资源详情与操作', {exact: true}).click();
+    await project.getByRole('button', {name: '删除资源', exact: true}).click();
+    assert.equal(await page.evaluate(() => taskRequest().id), 'torrent:abc');
+    assert.equal(await page.locator('#task-dialog-title').innerText(), '删除资源');
+    await page.locator('#close-task-dialog').click();
+    single.resource_actions = {'torrent:abc': {id: 'torrent:abc', action: 'delete', state: 'blocked', error: 'task_changed', can_keep: true}};
+    await page.locator('#refresh-tasks').click();
+    await project.getByText('保留剩余文件并结束', {exact: true}).waitFor();
+    assert(await project.getByRole('button', {name: '删除追剧项目'}).isDisabled());
+    assert.equal(await project.getByText('保留剩余文件并结束', {exact: true}).count(), 1);
+    // qB may no longer return the torrent that owns a blocked child operation.
+    single.resources = [];
+    single.resource_actions['torrent:abc'].action = 'cancel';
+    await page.locator('#refresh-tasks').click();
+    await project.locator('.task-source').waitFor({state: 'detached'});
+    const finish = page.waitForRequest(req => req.url().endsWith('/api/task-action'));
+    await project.getByRole('button', {name: '保留剩余文件并结束'}).click();
+    assert.deepEqual((await finish).postDataJSON(), {id: 'torrent:abc', action: 'keep-remaining'});
+    await page.setViewportSize({width: 1280, height: 900});
 
     await page.locator('nav [data-view=playbacks]').click();
     await page.getByText('暂无播放记录。', {exact: false}).waitFor();
@@ -192,7 +242,7 @@ const {chromium} = require('playwright');
     assert(await page.locator('#refresh-settings').isVisible());
 
     assert.deepEqual(errors, []);
-    console.log('Independent UI flows passed: startup 503, submission state, search reset, sign-out drafts, settings and retry focus, metrics recovery, stale playback, season 0 hidden.');
+    console.log('Independent UI flows passed: login and late account responses, search and submissions, settings, metrics, single-resource controls and recovery, retry focus, playback and season selection.');
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

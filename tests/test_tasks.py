@@ -53,7 +53,8 @@ class Sonarr:
     def __init__(self,root):
         self.series=[{'id':9,'tvdbId':42,'path':str(root/'library/tv/Show'),'title':'Show','monitored':True,'tags':[]},
                      {'id':10,'tvdbId':99,'title':'Show','monitored':False,'tags':[]}]
-        self.queue=[{'downloadId':str(n)*40,'seriesId':9,'episodeId':100+n} for n in (1,2)]
+        self.queue=[{'id':n,'downloadId':str(n)*40,'seriesId':9,'episodeId':100+n} for n in (1,2)]
+        self.monitored_episodes = {101:True,102:True}
         self.tags=[];self.calls=[];self.busy=[];self.files=[]
         for n in (1,2):
             p=root/'library/tv/Show'/(str(n)+'.mkv');p.parent.mkdir(parents=True,exist_ok=True)
@@ -73,8 +74,11 @@ class Sonarr:
             if method=='POST':self.tags.append({**body,'id':1})
             return self.tags[-1] if method=='POST' else self.tags
         if route=='/api/v3/episodefile':return copy.deepcopy(self.files)
-        if route=='/api/v3/episode':return [{'id':100+n,'episodeFileId':n,'seasonNumber':1,'episodeNumber':n} for n in (1,2)]
-        if route=='/api/v3/episode/monitor':return {}
+        if route=='/api/v3/episode':return [{'id':i,'episodeFileId':i-100,'seasonNumber':1,'episodeNumber':i-100,
+                                              'monitored':flag} for i,flag in self.monitored_episodes.items()]
+        if route=='/api/v3/episode/monitor':
+            self.monitored_episodes.update(dict.fromkeys(body['episodeIds'], body['monitored']))
+            return {}
         raise AssertionError((method,path))
 
     def request(self,method,path):
@@ -114,13 +118,39 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(show['resources']),2);self.assertEqual(show['file_count'],2)
         self.assertEqual(len(show['uploads']),2)
 
+    def test_task_reports_finished_transfer_and_rechecks_verification_without_reupload(self):
+        job = self.jobs[1]
+        self.uploader.update(job, state='queued', terminal_proven=1, error='remote_hash_mismatch', retry_at=999)
+        group = next(g for g in self.app.tasks()['items'] if g['id']=='series:42')
+        item = next(u for u in group['uploads'] if u['id']==job['id'])
+        self.assertIs(item['terminal_proven'], True)
+        self.app.retry_upload({'id':job['id']})
+        row = self.uploader.db.execute('SELECT state,retry_requested,retry_at FROM jobs WHERE id=?',(job['id'],)).fetchone()
+        self.assertEqual(tuple(row), ('queued',0,0))
+        with self.uploader.db:
+            self.uploader.db.execute('ALTER TABLE jobs DROP COLUMN terminal_proven')
+        self.assertTrue(all(u['terminal_proven'] is False for u in self.app.uploads()))
+
+    def test_completed_selected_video_waits_for_import_and_unselected_files_are_not_counted(self):
+        files = self.qb.files[self.qb.items[0]['hash']]
+        extra = {'index':1,'name':'new.mkv','size':10,'progress':1,'priority':1}
+        files.extend([{**extra,'name':'Film.sample.mkv'}, {**extra,'name':'unselected.mkv','priority':0}])
+        def show():
+            return next(g for g in self.app.tasks()['items'] if g['id']=='series:42')
+        self.assertEqual((show()['waiting_video'], show()['file_count']), (False, 3))
+        files.append(extra)
+        group = show()
+        self.assertTrue(group['waiting_video'])
+        self.assertTrue(group['resources'][0]['waiting_video'])
+        self.assertEqual(group['file_count'], 4)
+
     def test_queue_shared_by_two_series_stays_out_of_project_actions(self):
         digest = self.qb.items[0]['hash']
         original = self.native.json
         def paged(method, path, body=None):
             if path.startswith('/api/v3/queue?'):
                 page = int(parse_qs(urlsplit(path).query)['page'][0])
-                batch = self.native.queue if page == 1 else [{'downloadId':digest,'seriesId':10,'episodeId':200}]
+                batch = self.native.queue if page == 1 else [{'id':3,'downloadId':digest,'seriesId':10,'episodeId':200}]
                 return {'records':batch, 'page':page, 'totalRecords':3}
             return original(method, path, body)
         self.native.json = paged
@@ -139,6 +169,19 @@ class TaskTests(unittest.TestCase):
                 return {'page':page, 'totalRecords':3, 'records':self.native.queue if page == 1 else []}
             return original(method, path, body)
         self.native.json = incomplete
+        with self.assertRaisesRegex(ValueError, '队列'):
+            self.run_action('pause')
+        self.assertFalse(self.qb.calls)
+        self.assertTrue(self.native.series[0]['monitored'])
+
+    def test_overlapping_queue_pages_cannot_pause_a_project(self):
+        original = self.native.json
+        def overlapping(method, path, body=None):
+            if path.startswith('/api/v3/queue?'):
+                page = int(parse_qs(urlsplit(path).query)['page'][0])
+                return {'page':page, 'totalRecords':3, 'records':self.native.queue if page == 1 else self.native.queue[1:]}
+            return original(method, path, body)
+        self.native.json = overlapping
         with self.assertRaisesRegex(ValueError, '队列'):
             self.run_action('pause')
         self.assertFalse(self.qb.calls)
@@ -293,6 +336,73 @@ class TaskTests(unittest.TestCase):
             self.run_action('cancel', key='torrent:'+digest)
         self.assertFalse(any(c[0]=='PUT' for c in self.native.calls))
         self.assertFalse(task_actions(self.state/'data/uploads.sqlite3'))
+
+    def test_resource_resume_restores_only_original_monitoring_after_download_resume(self):
+        digest = self.qb.items[1]['hash']
+        for episode, monitored in [(103, False), (104, True)]:
+            self.native.queue.append({'downloadId':digest,'seriesId':9,'episodeId':episode})
+            self.native.monitored_episodes[episode] = monitored
+        self.run_action('cancel', key='torrent:'+digest)
+        self.assertTrue(self.native.monitored_episodes[102])
+        self.native.monitored_episodes[104] = False  # Changed in Sonarr while waiting for the worker.
+        native_json = self.native.json
+        def lost_response(method, path, body=None, **kwargs):
+            value = native_json(method, path, body, **kwargs)
+            if path.endswith('/episode/monitor'):
+                raise OSError('response lost')
+            return value
+        with patch.object(self.native, 'json', side_effect=lost_response):
+            self.uploader.process_actions(self.sources)
+        self.uploader.process_actions(self.sources)
+        self.assertEqual(self.native.monitored_episodes, {101:True,102:False,103:False,104:False})
+        with patch.object(self.qb, 'request', side_effect=OSError('unavailable')), self.assertRaisesRegex(ValueError, '尚未确认'):
+            self.run_action('resume', key='torrent:'+digest)
+        self.assertFalse(self.native.monitored_episodes[102])
+        def interrupt(method, path, body=None):
+            if path.endswith('/episode/monitor'):
+                raise KeyboardInterrupt
+            return native_json(method, path, body)
+        with patch.object(self.native, 'json', side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_action('resume', key='torrent:'+digest)
+        self.assertEqual(self.qb.items[1]['state'], 'downloading')
+        self.assertEqual(task_actions(self.app.data/'uploads.sqlite3')[0]['error'], 'task_control_failed')
+        self.run_action('resume', key='torrent:'+digest)
+        self.assertEqual(self.native.monitored_episodes, {101:True,102:True,103:False,104:False})
+
+    def test_readded_and_legacy_resources_do_not_restore_unproven_episode_monitoring(self):
+        digest = self.qb.items[1]['hash']
+        key = 'torrent:'+digest
+        self.run_action('cancel', key=key)
+        self.uploader.process_actions(self.sources)
+        action = task_actions(self.app.data/'uploads.sqlite3')[0]
+        legacy = action['payload'].copy()
+        legacy['episode_ids'] = legacy.pop('monitored_episode_ids')
+        with self.uploader.db:
+            self.uploader.db.execute('UPDATE task_actions SET payload=? WHERE id=?', (json.dumps(legacy), key))
+        self.run_action('resume', key=key)
+        self.assertFalse(self.native.monitored_episodes[102])
+        with self.uploader.db:
+            self.uploader.db.execute("UPDATE task_actions SET action='delete',state='done',payload=? WHERE id=?",
+                                     (json.dumps(action['payload']), key))
+        with self.assertRaisesRegex(ValueError, '等待取消或删除完成'):
+            self.run_action('resume', key=key)
+        self.qb.items[1]['added_on'] += 100
+        self.run_action('resume', key=key)
+        self.assertFalse(self.native.monitored_episodes[102])
+        self.assertEqual(self.qb.items[1]['state'], 'downloading')
+
+    def test_blocked_cancel_can_be_ended_after_the_torrent_disappears(self):
+        torrent = self.qb.items[1]
+        key = 'torrent:'+torrent['hash']
+        self.run_action('cancel', key=key)
+        torrent['added_on'] += 100
+        self.uploader.process_actions(self.sources)
+        self.qb.items.remove(torrent)
+        show = next(g for g in self.app.tasks()['items'] if g['id']=='series:42')
+        self.assertTrue(show['resource_actions'][key]['can_keep'])
+        self.app.task_action({}, {'id':key,'action':'keep-remaining'})
+        self.assertFalse(task_actions(self.app.data/'uploads.sqlite3'))
+        self.assertTrue(Path(self.jobs[1]['source']).exists())
 
     def test_resuming_one_cancelled_resource_keeps_the_other_stopped(self):
         self.run_action('cancel');self.uploader.process_actions(self.sources)

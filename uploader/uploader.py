@@ -16,7 +16,7 @@ import time
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys
+from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys, TaskScopeChanged, episodes_with_monitoring
 from configure import private_write
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -621,6 +621,8 @@ class Uploader:
             except Failure as error:
                 if str(error) not in {'http_404', 'openlist_code_404'}:
                     raise
+                if job.get('native_state') is not None or job.get('terminal_proven'):
+                    self.update(job, native_state=None, terminal_proven=0)
         if not changed:
             path = str(PurePosixPath(job['stage']).parent).removeprefix('/aliyun') or '/'
             expected = f"upload {PurePosixPath(job['stage']).name} to [/aliyun]({path})"
@@ -628,7 +630,8 @@ class Uploader:
             if len(tasks) > 1:
                 raise Failure('ambiguous_upload_task')
             if tasks:
-                self.update(job, state='queued', task_id=tasks[0]['id'], task_id_from_put=0)
+                self.update(job, state='queued', task_id=tasks[0]['id'], task_id_from_put=0,
+                            native_state=None, terminal_proven=0)
                 self.poll_upload(job, manual=manual)
                 return
         stage = self.remote.find(job['stage'])
@@ -701,7 +704,7 @@ class Uploader:
         state, progress = task['state'], task.get('progress', 0)
         if type(progress) not in (int,float) or not 0 <= progress <= 100:
             raise Failure('invalid_upload_task')
-        self.update(job, progress=progress, native_state=state, retry_requested=0)
+        self.update(job, progress=progress, native_state=state, retry_requested=0, terminal_proven=int(state == 2))
         if state == 4 and not manual:
             self.update(job, state='failed', error='upload_cancelled', terminal_proven=1, retry_at=0)
             return
@@ -971,6 +974,24 @@ class Uploader:
             if stopped[0].get('state') not in {'stoppedDL','pausedDL','stoppedUP','pausedUP','error','missingFiles'}:
                 raise Failure('cleanup_waiting_for_stop')
             active.append(original)
+        if payload.get('monitored_episode_ids') and not payload.get('episodes_unmonitored'):
+            series = sources.sonarr.json('GET', '/api/v3/series/'+str(payload['series_id']))
+            if payload['group'] != 'series:'+str(series['tvdbId']):
+                raise Failure('task_changed')
+            try:
+                ids = episodes_with_monitoring(sources.sonarr, series['id'], payload['monitored_episode_ids'], True)
+            except TaskScopeChanged:
+                raise Failure('task_changed') from None
+            if not payload.get('episode_monitoring_prepared'):
+                # Save the actual changes before the PUT. A lost response must keep this restore list.
+                payload.update(monitored_episode_ids=ids, episode_monitoring_prepared=True)
+                with self.db:
+                    self.db.execute('UPDATE task_actions SET payload=? WHERE id=?',(json.dumps(payload),action['id']))
+            if ids:
+                sources.sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':ids,'monitored':False})
+            payload['episodes_unmonitored'] = True
+            with self.db:
+                self.db.execute('UPDATE task_actions SET payload=? WHERE id=?',(json.dumps(payload),action['id']))
         if payload.get('series_id'):
             busy = sources.sonarr.json('GET', '/api/v3/command')
             if any(c.get('status') in {'queued','started'} and c.get('name') in {
@@ -1133,7 +1154,8 @@ class Uploader:
                     self.recover_upload(job, manual=bool(job.get('retry_requested')))
                 elif job['state'] == 'pending':
                     if self.db.execute("""SELECT 1 FROM jobs WHERE state IN ('uploading','queued')
-                                          AND error IS NOT 'upload_unconfirmed' AND id!=?""", (job['id'],)).fetchone():
+                                          AND terminal_proven=0 AND error IS NOT 'upload_unconfirmed'
+                                          AND id!=?""", (job['id'],)).fetchone():
                         self.update(job, state='pending', error=None, retry_at=0)
                         continue
                     # An interrupted PUT has no receipt. Its old staging directory stays quarantined.
@@ -1230,14 +1252,13 @@ def _disk_guard(sources, state, now=None):
         torrent = next((t for t in managed if t['hash']==key),None)
         if not torrent or any(record[k]!=torrent.get(k) for k in ('category','save_path','added_on')):
             paused.pop(key)
-            continue
-        if torrent.get('state') not in stopped:
-            continue
-        if required(active+[torrent])+1024**3 <= disk.free:
+        elif torrent.get('state') in stopped and required(active+[torrent])+1024**3 <= disk.free:
             sources.qb.request('POST','/api/v2/torrents/start',urlencode({'hashes':key}).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
             paused.pop(key)
             active.append(torrent)
-    private_write(path,json.dumps(paused))
+        else:
+            continue
+        private_write(path,json.dumps(paused))
     return len(paused)
 
 

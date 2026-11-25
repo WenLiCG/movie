@@ -1,7 +1,13 @@
 (cinema_admin) {
     forward_auth portal:8097 {
         uri /discover/api/admin-check
+        header_up Cookie "cinema={http.request.cookie.cinema}"
+        header_up -Authorization
     }
+}
+
+(without_portal_cookie) {
+    header_up Cookie "(?:^|(;)\s*)(?:cinema=[^;]*(?:;\s*|$))+" "$1"
 }
 
 {$MOVIE_DOMAIN} {
@@ -22,6 +28,7 @@
     handle /search/* {
         import cinema_admin
         reverse_proxy prowlarr:9696 {
+            import without_portal_cookie
             header_down Location ^http://(.*)$ https://$1
             header_down Set-Cookie "^(.*)$" "$1; Secure"
         }
@@ -29,17 +36,22 @@
     handle /sonarr/* {
         import cinema_admin
         reverse_proxy sonarr:8989 {
+            import without_portal_cookie
             header_down Location ^http://(.*)$ https://$1
             header_down Set-Cookie "^(.*)$" "$1; Secure"
         }
     }
     handle /openlist/* {
         import cinema_admin
-        reverse_proxy openlist:5244
+        reverse_proxy openlist:5244 {
+            import without_portal_cookie
+        }
     }
     handle_path /qb/* {
         import cinema_admin
-        reverse_proxy qbittorrent:8080
+        reverse_proxy qbittorrent:8080 {
+            import without_portal_cookie
+        }
     }
     # Management stays on the SSH-tunnelled port, including the relay's web UI.
     @management {
@@ -48,10 +60,9 @@
     }
     respond @management "Not found" 404
     handle {
-        # The admin gate cookie is only for /discover/ and the native consoles; Emby never needs it.
         header X-Frame-Options "SAMEORIGIN"
         reverse_proxy relay:8095 {
-            header_up Cookie "(?:^|(;)\s*)cinema=[^;]*(?:;\s*)?" "$1"
+            import without_portal_cookie
         }
     }
 }

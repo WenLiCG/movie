@@ -44,7 +44,7 @@ sudo bash install.sh status
 
 默认源码和运行目录为 `/opt/cinema`。安装器不覆盖旧配置、不卸载冲突软件、不调整防火墙；依赖和容器镜像需要联网下载。Debian 12 amd64 已实测，其余受支持版本/架构未做真机安装验收。
 
-`https://你的域名/` 是电影墙，`/discover/` 是找片与追剧，`/search/`、`/sonarr/`、`/qb/`、`/openlist/` 保留原生管理入口。日常使用 HTTPS 不需要隧道；原生应用分别认证，定制页使用 Emby 管理员。
+`https://你的域名/` 是电影墙，`/discover/` 是找片与追剧。公网的 `/search/`、`/sonarr/`、`/qb/`、`/openlist/` 先由门户验证 Emby 管理员会话，再进入原生应用各自的认证。网关转发时会移除门户会话 Cookie，并保留原生应用自己的登录凭据。
 
 需要从命令行接线或轮换已保存的后台凭据时，按 [SETUP.md](docs/SETUP.md) 完成挂载后执行 `bash install.sh setup`。不要把旧服务器的私有状态当作通用部署包。
 
@@ -54,11 +54,13 @@ sudo bash install.sh status
 - 独立剧集／综艺：定制页“下载此资源”只下载所选资源，不操作追剧；分类 `cinema-tv`，保存到 `/media/downloads/tv-manual`，校验后归档 TV。
 - 删除追剧：停止监控并从列表移除，保留文件及正在进行的下载。
 - 自动追剧：在 Sonarr 添加、监控并搜索，剧库 `/media/library/tv`；qB 分类 `sonarr-tv`，保留 `/media/downloads/tv` 做种副本。
+- 操作一条追剧下载时，打开「下载与归档」中的「资源详情与操作」，即使项目只有一个种子也可单独处理。项目按钮会作用于整个追剧。单资源取消后再继续，只恢复该操作实际关闭过的剧集监控。旧任务缺少记录时只恢复下载。
 - 上传程序处理上述已完成视频及可关联的 `.srt`、`.ass`、`.ssa` 字幕。NFO、海报和蓝光目录不进入上传队列。
 - 上传先隔离到 `/aliyun/.cinema-upload`，明确成功并校验后才移到 `/aliyun/Movies` 或 `/aliyun/TV`。默认 7 天后只清理已归档且复核通过的本地源及做种任务；云端成品和失败暂存不自动删除。
 - Sonarr 可把文件名不同或位于子目录的字幕关联到剧集。程序删除导入副本前会检查整部剧的目录，有无法核实的附件时保留本地资源。
 - **Movies/TV 必须仅由这一个上传程序写入。** OpenList 阿里移动接口缺少原子同名保护；程序会检查已有冲突，但不能与人工、CloudDrive 或其他同步器并发整理同一目录。
 - 上传断线后先核对原生任务和暂存哈希。结果未确认时保留源文件，并给暂存预留磁盘空间。确认旧传输结束后，才可重传到新暂存目录。发布请求结果不明时先查任务，保留 SQLite 中的发布凭证。
+- 单个上传已确认传输结束，但暂存文件未通过校验时，后台保留该文件继续核实，让其他影片继续上传。任务页区分下载暂停、归档失败、部分已发布及等待核对。
 - Emby 只挂载云端虚拟索引，不能访问实际下载目录。默认每 10 分钟刷新索引，再由 Emby 扫描。原画不兼容时可选阿里云端转码，仍需实际客户端验收。
 
 ```bash
@@ -87,4 +89,4 @@ for script in install.sh scripts/*.sh; do bash -n "$script"; done
 python3 scripts/build_all_in_one.py
 ```
 
-安装器内含运行源码、回归用例与操作文档。每次交付的测试环境、结果和现场待验收项见[开发交接](https://github.com/WenLiCG/movie/blob/main/HANDOFF.md)。故障恢复与播放验收见[操作说明](docs/SETUP.md)，镜像版本和上游许可见[来源清单](SOURCES.md)。
+安装器内含运行源码、回归用例与操作文档。GitHub CI 使用独立测试目录安装 Playwright，运行桌面与手机尺寸的 Chrome 回归，再从解包目录构建并启动容器。每次交付的测试环境、结果和现场待验收项见[开发交接](https://github.com/WenLiCG/movie/blob/main/HANDOFF.md)。故障恢复与播放验收见[操作说明](docs/SETUP.md)，镜像版本和上游许可见[来源清单](SOURCES.md)。
