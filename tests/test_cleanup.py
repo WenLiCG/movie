@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'uploader'))
-from uploader import Uploader, candidate
+from uploader import Failure, Uploader, candidate
 from cleanup import Cleaner
 
 
@@ -248,7 +248,30 @@ class CleanupTests(unittest.TestCase):
             self.assertIn(('PUT', '/api/v3/episode/monitor'), calls)
             library.unlink()
             library_sub.unlink()
+            extra.unlink()
         self.sources.sonarr.request.side_effect = delete
+        # A sidecar added to the imported episode after planning is also removed by Sonarr.
+        plan = self.cleaner.plan(self.sources, self.torrent, 7, 1000 + 8*86400)
+        for suffix in ('.signs.mks', '.en.srt'):
+            extra = library.with_suffix(suffix)
+            extra.write_bytes(b'local only')
+            with self.assertRaisesRegex(Failure, 'cleanup_not_archived'):
+                self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+            self.sources.sonarr.request.assert_not_called()
+            self.sources.qb.request.assert_not_called()
+            extra.unlink()
+        # A library-only subtitle with its own matching published record can be removed.
+        extra = library.with_suffix('.en.srt')
+        extra.write_bytes(b'subtitle')
+        extra_job = candidate('tv-sub:42:en', extra, '/aliyun/TV/Example/episode.en.srt', 8,
+                              parent_id=job['id'])
+        self.uploader.add(extra_job)
+        self.uploader.update(extra_job, state='published', sha1=hashlib.sha1(extra.read_bytes()).hexdigest())
+        extra.write_bytes(b'replaced')
+        with self.assertRaisesRegex(Failure, 'cleanup_source_changed'):
+            self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+        self.sources.sonarr.request.assert_not_called()
+        extra.write_bytes(b'subtitle')
         self.run_cleanup()
         self.assertFalse(library.exists())
         self.assertFalse(download.exists())

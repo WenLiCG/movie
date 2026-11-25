@@ -1,4 +1,3 @@
-import hashlib
 import http.cookiejar
 from http.server import ThreadingHTTPServer
 import json
@@ -72,11 +71,27 @@ class PortalTests(unittest.TestCase):
             app.ol = Mock(side_effect=ValueError('expired'))
             self.assertFalse(app.status()['configured'])
 
+    def test_downloader_status_detects_a_misdirected_prowlarr_client(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            qb, native = Mock(), Mock()
+            app.qb = lambda:qb
+            app.client = lambda _:native
+            qb.json.return_value = {category:{'savePath':'/media/downloads/'+folder} for category, folder in (
+                ('cinema-movies','movies'), ('cinema-tv','tv-manual'), ('sonarr-tv','tv'))}
+            clients = [{'name':name, 'enable':True, 'implementation':'QBittorrent', 'fields':[
+                {'name':'host','value':'qbittorrent'}, {'name':'port','value':8080}, {'name':'category','value':category}]}
+                for name,category in [('Cinema qB','cinema-movies'), ('Cinema qB TV','cinema-tv')]]
+            native.json.side_effect = lambda method,path: clients if path == '/api/v1/downloadclient' else []
+            self.assertTrue(app.status()['checks']['downloader']['complete'])
+            clients[0]['fields'][0]['value'] = 'old-host'
+            self.assertFalse(app.status()['checks']['downloader']['complete'])
+
     def test_episode_download_targets_only_selected_ids_and_never_changes_monitoring(self):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))
             native = Mock()
-            native.json.side_effect = lambda method,path,body=None: ({'tvdbId':42} if path=='/api/v3/series/9' else {'records':[]} if '/queue?' in path else [{'id':i,'seriesId':9,'seasonNumber':1,'episodeNumber':i,'hasFile':i==3} for i in (1,2,3)] if method=='GET' else {})
+            native.json.side_effect = lambda method,path,body=None: ({'tvdbId':42} if path=='/api/v3/series/9' else {'records':[], 'totalRecords':0} if '/queue?' in path else [{'id':i,'seriesId':9,'seasonNumber':1,'episodeNumber':i,'hasFile':i==3} for i in (1,2,3)] if method=='GET' else {})
             app.client = lambda name: native
             app.require_version = Mock(return_value={})
             app.download_episodes({'series_id':9,'episode_ids':[2]})
@@ -89,7 +104,7 @@ class PortalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))
             native = Mock()
-            native.json.side_effect = lambda method, path, body=None: ([{'id':9,'tvdbId':42,'monitored':True,'qualityProfileId':77}] if path == '/api/v3/series' else ([] if path == '/api/v3/tag' else ({'records':[]} if '/queue?' in path else {'tvdbId':42} if path=='/api/v3/series/9' else [{'id':2,'seasonNumber':1,'episodeNumber':2}])))
+            native.json.side_effect = lambda method, path, body=None: ([{'id':9,'tvdbId':42,'monitored':True,'qualityProfileId':77}] if path == '/api/v3/series' else ([] if path == '/api/v3/tag' else ({'records':[], 'totalRecords':0} if '/queue?' in path else {'tvdbId':42} if path=='/api/v3/series/9' else [{'id':2,'seasonNumber':1,'episodeNumber':2}])))
             app.client = lambda name: native
             app.require_version = Mock(return_value={})
             result = app.episodes({'series':{'42':{'tvdbId':42}}}, {'id':'42'})

@@ -29,11 +29,13 @@
 
 其他应用也由 Compose 固定 digest，避免 latest 后续变化自动替换版本。公开发布及镜像存在不等于目标 VPS 已运行验证。
 
-自建服务基础镜像同样固定多平台 digest（2026-11-02 从 Docker Hub 官方标签接口核对）：
+自建服务基础镜像使用多平台 digest。Python 和 Alpine 在 2026-11-02 核对，Go 构建镜像在 2026-11-25 更新。
 
 - [Python 3.14-slim](https://hub.docker.com/v2/repositories/library/python/tags/3.14-slim)：`sha256:cd89c30eda26ee911a4611b18680086e0ea42e6f5f8cbe653d07fa7958c9cec8`。
-- [Go 1.27-alpine](https://hub.docker.com/v2/repositories/library/golang/tags/1.27-alpine)：`sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb`。
+- Go 1.27.4 Alpine 构建镜像固定为 `sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280`。[官方镜像标签](https://hub.docker.com/v2/repositories/library/golang/tags/1.27.4-alpine)
 - [Alpine 3.22](https://hub.docker.com/v2/repositories/library/alpine/tags/3.22)：`sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f`。
+
+relay 保留上游源码提交，通过 `relay/dependencies.patch` 固定修订后的 go.mod 与校验和。Go、golang.org/x/net v0.60.0 和 Gorilla WebSocket d67f41855da4 沿用各自的 BSD 风格许可。[Go 标准库公告](https://pkg.go.dev/vuln/GO-2026-6859) · [HTTP/2 公告](https://pkg.go.dev/vuln/GO-2026-6617) · [WebSocket 公告](https://pkg.go.dev/vuln/GO-2026-6278)
 
 安装器按 [Docker 官方 Debian 安装文档](https://docs.docker.com/engine/install/debian/) 配置官方 apt 源。没有使用 `curl | sh` 安装引擎；发现冲突包会停止，不卸载已有运行时。Python 为 PSF 许可，Go 为 BSD 风格许可，Alpine 所含软件分别保留其许可。
 

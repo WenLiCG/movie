@@ -7,13 +7,13 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs,urlsplit
 
 from archive import archived_keys,task_actions
 from portal.server import App
 import test_uploader
-from uploader import Uploader,candidate,Failure
+from uploader import Uploader,candidate
 
 
 class QB:
@@ -67,7 +67,7 @@ class Sonarr:
             value=next(s for s in self.series if s['id']==int(route.split('/')[-1]))
             if method=='PUT':value.update(copy.deepcopy(body))
             return copy.deepcopy(value)
-        if route=='/api/v3/queue':return {'records':copy.deepcopy(self.queue)}
+        if route=='/api/v3/queue':return {'records':copy.deepcopy(self.queue),'totalRecords':len(self.queue)}
         if route=='/api/v3/command':return self.busy
         if route=='/api/v3/tag':
             if method=='POST':self.tags.append({**body,'id':1})
@@ -113,6 +113,47 @@ class TaskTests(unittest.TestCase):
         show=next(g for g in groups if g['id']=='series:42')
         self.assertEqual(len(show['resources']),2);self.assertEqual(show['file_count'],2)
         self.assertEqual(len(show['uploads']),2)
+
+    def test_queue_shared_by_two_series_stays_out_of_project_actions(self):
+        digest = self.qb.items[0]['hash']
+        original = self.native.json
+        def paged(method, path, body=None):
+            if path.startswith('/api/v3/queue?'):
+                page = int(parse_qs(urlsplit(path).query)['page'][0])
+                batch = self.native.queue if page == 1 else [{'downloadId':digest,'seriesId':10,'episodeId':200}]
+                return {'records':batch, 'page':page, 'totalRecords':3}
+            return original(method, path, body)
+        self.native.json = paged
+        groups = {g['id']:g for g in self.app.tasks()['items']}
+        self.assertIn('torrent:'+digest, groups)
+        self.assertIn(200, self.app.queue_episode_ids(self.native))
+        self.run_action('pause')
+        self.assertEqual(self.qb.items[0]['state'], 'uploading')
+        self.assertEqual(self.qb.items[1]['state'], 'stoppedDL')
+
+    def test_incomplete_queue_cannot_pause_a_project(self):
+        original = self.native.json
+        def incomplete(method, path, body=None):
+            if path.startswith('/api/v3/queue?'):
+                page = int(parse_qs(urlsplit(path).query)['page'][0])
+                return {'page':page, 'totalRecords':3, 'records':self.native.queue if page == 1 else []}
+            return original(method, path, body)
+        self.native.json = incomplete
+        with self.assertRaisesRegex(ValueError, '队列'):
+            self.run_action('pause')
+        self.assertFalse(self.qb.calls)
+        self.assertTrue(self.native.series[0]['monitored'])
+
+    def test_pre_uploader_pause_allows_space_check_and_resume(self):
+        self.app = App(self.root/'fresh-state')
+        self.app.qb = lambda:self.qb
+        self.app.client = lambda _:self.native
+        key = 'torrent:'+self.qb.items[2]['hash']
+        self.run_action('pause', key=key)
+        with patch('portal.server.shutil.disk_usage',return_value=SimpleNamespace(free=10**12,total=10**12)):
+            self.app.check_space(100)
+        self.run_action('resume', key=key)
+        self.assertEqual(self.qb.items[2]['state'], 'uploading')
 
     def test_pause_resume_and_disk_guard_do_not_undo_user_intent(self):
         path=self.state/'data/disk-paused.json';path.write_text(json.dumps({'2'*40:{'at':1}}))
@@ -233,9 +274,25 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(self.native.series[0]['monitored'])
 
     def test_one_resource_operation_does_not_touch_other_episodes(self):
+        self.native.queue.insert(0, {'downloadId':None,'seriesId':9,'episodeId':999})
         self.run_action('delete',True,'torrent:'+'2'*40);self.uploader.process_actions(self.sources)
         self.assertTrue(Path(self.jobs[0]['source']).exists());self.assertFalse(Path(self.jobs[1]['source']).exists())
         self.assertTrue(self.native.series[0]['monitored'])
+
+    def test_queue_reassignment_cannot_unmonitor_another_series(self):
+        digest = self.qb.items[1]['hash']
+        snapshots = iter([self.native.queue, [{'downloadId':digest,'seriesId':10,'episodeId':301}]])
+        original = self.native.json
+        def reassigned(method, path, body=None):
+            if path.startswith('/api/v3/queue?'):
+                batch = next(snapshots)
+                return {'records':batch,'totalRecords':len(batch)}
+            return original(method, path, body)
+        self.native.json = reassigned
+        with self.assertRaisesRegex(ValueError, '剧集已变化'):
+            self.run_action('cancel', key='torrent:'+digest)
+        self.assertFalse(any(c[0]=='PUT' for c in self.native.calls))
+        self.assertFalse(task_actions(self.state/'data/uploads.sqlite3'))
 
     def test_resuming_one_cancelled_resource_keeps_the_other_stopped(self):
         self.run_action('cancel');self.uploader.process_actions(self.sources)

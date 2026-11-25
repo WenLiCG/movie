@@ -1,7 +1,8 @@
 * text=auto
 *.sh text eol=lf
 *.py text eol=lf
-*.patch text eol=lf
+# Unified diff context adds a space before tabs and on otherwise empty lines.
+*.patch text eol=lf whitespace=-space-before-tab,-blank-at-eol
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf

@@ -4,7 +4,9 @@ import importlib.util
 import io
 import json
 import os
+import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 import tarfile
 import tempfile
@@ -63,12 +65,26 @@ class InstallerTests(unittest.TestCase):
             (target / 'state/relay/config.yml').write_text('private-relay')
             (target / 'state/uploader').mkdir()
             (target / 'state/uploader/openlist-token').write_text('legacy-token')
+            database = target / 'state/uploader/state.sqlite3'
+            with closing(sqlite3.connect(database)) as db:
+                db.execute('CREATE TABLE uploads(id INTEGER PRIMARY KEY)')
+                db.execute('INSERT INTO uploads VALUES (42)')
+                db.commit()
+            database.chmod(0o640)
+            if os.name == 'posix' and os.geteuid() == 0:
+                os.chown(database, 1000, 1000)
+            if os.name == 'posix':
+                (database.parent / 'alias.sqlite3').hardlink_to(database)
             (target / 'media').mkdir()
             (target / 'media/video.mkv').write_bytes(b'keep-video')
             for name in ('removed.js', 'local.js'):
                 (target/'relay').mkdir(exist_ok=True)
                 (target/'relay'/name).write_text(name)
             (source/'relay/added.js').write_text('new')
+            (source/'relay/added.js').chmod(0o600)
+            (source/'relay/custom-js').mkdir()
+            (source/'relay/custom-js/search.js').write_text('new')
+            (target/'relay/custom-js').mkdir(mode=0o700)
             old_manifest = json.dumps(['compose.yaml', 'relay/removed.js'])
             (target/update_files.MANIFEST).write_text(old_manifest)
             with patch('os.chown', create=True):
@@ -81,6 +97,9 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((target / 'compose.override.yaml').read_text(), 'machine-specific-network-settings')
             self.assertEqual((target/'state/relay-token/openlist-token').read_text(), 'legacy-token')
             self.assertEqual((target/'relay/added.js').read_text(), 'new')
+            if os.name == 'posix':
+                self.assertEqual((target/'relay/added.js').stat().st_mode & 0o777, 0o644)
+                self.assertEqual((target/'relay/custom-js').stat().st_mode & 0o777, 0o755)
             self.assertFalse((target/'relay/removed.js').exists())
             backups = list((target / 'backups').glob('*.tar.gz'))
             self.assertEqual(len(backups), 1)
@@ -89,6 +108,16 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(tar.extractfile('.env').read(), b'private-settings')
                 self.assertEqual(tar.extractfile('compose.override.yaml').read(), b'machine-specific-network-settings')
                 self.assertFalse(any(n.startswith('media/') for n in tar.getnames()))
+                member = tar.getmember(database.relative_to(target).as_posix())
+                if os.name == 'posix':
+                    self.assertEqual((member.mode, member.uid, member.gid),
+                                     (0o640, database.stat().st_uid, database.stat().st_gid))
+                    self.assertTrue(tar.getmember('state/uploader/alias.sqlite3').isfile())
+                    self.assertTrue(member.isfile())
+                restored_db = base / 'restored.sqlite3'
+                restored_db.write_bytes(tar.extractfile(member).read())
+                with closing(sqlite3.connect(restored_db)) as db:
+                    self.assertEqual(db.execute('SELECT id FROM uploads').fetchall(), [(42,)])
             update_files.restore(target, backup)
             self.assertFalse((target/'relay/added.js').exists())
             self.assertEqual((target/'relay/removed.js').read_text(), 'removed.js')

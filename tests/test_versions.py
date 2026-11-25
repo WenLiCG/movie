@@ -49,7 +49,7 @@ class Sonarr:
         elif route == '/api/v3/releaseprofile/12':
             if method == 'PUT':self.profiles[0]=copy.deepcopy(body)
             value=self.profiles[0]
-        elif route == '/api/v3/queue':value={'records':[]}
+        elif route == '/api/v3/queue':value={'records':[], 'totalRecords':0}
         elif route == '/api/v3/indexer':value=[{'id':7,'name':'Site (Prowlarr)'}]
         elif route == '/api/v3/release':value=self.releases if method == 'GET' else body
         elif route in {'/api/v3/episode/monitor','/api/v3/command'}:value={}
@@ -152,10 +152,12 @@ class VersionTests(unittest.TestCase):
 
     def test_invalid_scope_is_rejected_before_pausing(self):
         self.native.series[0]['monitored']=True
-        with self.assertRaises(ValueError):
-            self.app.follow(self.session,{**self.body,'mode':'season','season':999})
-        self.assertTrue(self.native.series[0]['monitored'])
-        self.assertFalse(any(c[0] in {'PUT','POST'} for c in self.native.calls))
+        self.session['series']['42']['seasons'].append({'seasonNumber':0})
+        for season in (0, True, 1.0, 999):
+            with self.subTest(season=season), self.assertRaises(ValueError):
+                self.app.follow(self.session,{**self.body,'mode':'season','season':season})
+            self.assertTrue(self.native.series[0]['monitored'])
+            self.assertFalse(any(c[0] in {'PUT','POST'} for c in self.native.calls))
 
     def test_future_and_selected_season_keep_the_same_version(self):
         self.app.follow(self.session,{**self.body,'mode':'future'})

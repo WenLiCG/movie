@@ -72,7 +72,7 @@ def snapshot(source, target):
             with path.open('rb') as handle:
                 if handle.read(16) == b'SQLite format 3\0':
                     databases.append(path)
-    excluded = {p.relative_to(target).as_posix() + suffix for p in databases for suffix in ('', '-wal', '-shm')}
+    excluded = {p.relative_to(target).as_posix() + suffix for p in databases for suffix in ('', '-wal', '-shm', '-journal')}
     with tempfile.NamedTemporaryFile(dir=folder, delete=False) as handle:
         temp = Path(handle.name)
     try:
@@ -90,9 +90,16 @@ def snapshot(source, target):
                     copy = Path(scratch)/str(index)
                     with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)) as src, closing(sqlite3.connect(copy)) as dst:
                         src.backup(dst)
-                    tar.add(copy, arcname=path.relative_to(target).as_posix())
+                    # Restore the service's ownership and mode along with the consistent snapshot.
+                    member = tar.gettarinfo(str(path), arcname=path.relative_to(target).as_posix())
+                    member.type, member.linkname = tarfile.REGTYPE, ''
+                    member.size = copy.stat().st_size
+                    with copy.open('rb') as data:
+                        tar.addfile(member, data)
         with tarfile.open(temp) as tar:
-            if not {ROLLBACK, '.env', 'compose.yaml', 'state/relay/config.yml'} <= set(tar.getnames()):
+            required = {ROLLBACK, '.env', 'compose.yaml', 'state/relay/config.yml'}
+            required.update(path.relative_to(target).as_posix() for path in databases)
+            if not required <= set(tar.getnames()):
                 raise ValueError('备份校验失败。')
         temp.replace(backup)
     finally:
@@ -105,13 +112,18 @@ def apply(source, target, backup):
     with tarfile.open(backup) as tar:
         if set(json.load(tar.extractfile(ROLLBACK))) != touched.keys():
             raise ValueError('发行文件清单已变化，请重新生成备份。')
+    # A release extracted under umask 077 can leave even existing bind-mounted
+    # source directories unreadable to the service account.
+    directories = {parent for name in incoming for parent in Path(name).parents if parent != Path('.')}
+    for directory in sorted(directories):
+        path = target / directory
+        if not path.exists() or directory.as_posix() in {'portal', 'relay/custom-js', 'relay/custom-css'}:
+            path.mkdir(exist_ok=True)
+            path.chmod(0o755)
     for name, path in touched.items():
         if name in incoming:
-            new_dirs = [p for p in path.parents if p.is_relative_to(target) and not p.exists()]
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-            for directory in new_dirs:
-                directory.chmod(0o755)
-            shutil.copy2(incoming[name], path)
+            shutil.copyfile(incoming[name], path)
+            path.chmod(0o755 if path.suffix == '.sh' else 0o644)
         elif name != MANIFEST:
             path.unlink(missing_ok=True)
     touched[MANIFEST].write_text(json.dumps(sorted(incoming)), encoding='utf-8')

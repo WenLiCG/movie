@@ -27,7 +27,7 @@ services:
     profiles: [connected, public]
     build:
       context: ./relay
-    image: cinema-relay:9b049b8-strict5
+    image: cinema-relay:9b049b8-strict6
     restart: unless-stopped
     user: "1000:1000"
     # Internet-facing parser: no Linux capabilities or setuid escalation (writes stay in its volumes).

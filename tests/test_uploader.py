@@ -3,7 +3,6 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
-import os
 from pathlib import Path, PurePosixPath
 import socket
 import sys
@@ -480,6 +479,10 @@ class UploaderTests(unittest.TestCase):
                   "sonarr_url": self.service.url, "sonarr_api_key": "sonarr-secret"}
         sources = Sources(config, self.media)
         self.assertEqual(len(sources.downloads()), 1)
+        stale = {**self.service.files[0], "name": "missing.mkv", "index": 1}
+        self.service.files.insert(0, stale)
+        self.assertEqual([c['source'] for c in sources.downloads()], [str(self.source)])
+        self.service.files.pop(0)
         self.service.files[0]["progress"] = 0.999
         self.assertEqual(sources.downloads(), [])
         self.service.files[0]["progress"] = 1

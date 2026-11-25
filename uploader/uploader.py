@@ -16,7 +16,7 @@ import time
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from archive import VIDEO, SUBTITLES, sample, disc, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, task_actions, action_matches, delete_target, torrent_instance, episode_keys
+from archive import video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys, episode_sidecars
 from configure import private_write
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -351,7 +351,11 @@ class Sources:
                         continue
                     title = re.sub(r"[\\/:\x00-\x1f]", "_", torrent["name"]).strip(". ")[:180]
                     title = title or ("torrent-" + torrent["hash"][:12])
-                    for file in selected:
+                except (Failure, KeyError, TypeError, ValueError, OSError):
+                    log(category, "invalid_source")
+                    continue
+                for file in selected:
+                    try:
                         rel = relative(file['name'])
                         source = local_path(save.joinpath(*rel.parts), root)
                         clean = PurePosixPath(*rel.parts[1:]) if len(rel.parts) > 1 and rel.parts[0] == torrent['name'] else rel
@@ -360,40 +364,45 @@ class Sources:
                         sidecars = [f for f in files if f.get('priority', 0) > 0 and subtitle_for(f['name'], file['name'])]
                         if any(f.get('progress') != 1 for f in sidecars):
                             continue
+                        group = []
                         for sub in sidecars:
                             subrel = relative(sub['name'])
                             subsource = local_path(save.joinpath(*subrel.parts), root)
                             subclean = PurePosixPath(*subrel.parts[1:]) if len(subrel.parts) > 1 and subrel.parts[0] == torrent['name'] else subrel
-                            result.append(candidate(identity + ':' + torrent['hash'] + ':' + str(sub['index']), subsource,
+                            group.append(candidate(identity + ':' + torrent['hash'] + ':' + str(sub['index']), subsource,
                                                     f'/aliyun/{remote}/{title}/{subclean}', sub['size'], parent_id=item['id'],added_on=item['added_on']))
-                        result.append(item)
-                except (Failure, KeyError, TypeError, ValueError, OSError):
-                    log(category, "invalid_source")
+                        result.extend([*group, item])
+                    except (Failure, KeyError, TypeError, ValueError, OSError):
+                        log(category, "invalid_source")
         return result
 
     def tv(self):
         result, originals = [], {}
-        try:
-            torrents = self.qb.json('GET', '/api/v2/torrents/info', query={'filter': 'completed', 'category': 'sonarr-tv'})
-            for torrent in torrents:
-                if torrent.get('category') != 'sonarr-tv' or torrent.get('progress') != 1:
-                    continue
-                files = self.qb.json('GET', '/api/v2/torrents/files', query={'hash': torrent['hash']})
-                for file in files:
+        torrents = self.qb.json('GET', '/api/v2/torrents/info', query={'filter': 'completed', 'category': 'sonarr-tv'})
+        for torrent in torrents:
+            if torrent.get('category') != 'sonarr-tv' or torrent.get('progress') != 1:
+                continue
+            files = self.qb.json('GET', '/api/v2/torrents/files', query={'hash': torrent['hash']})
+            for file in files:
+                try:
                     if file.get('priority', 0) <= 0 or not video(file['name']):
                         continue
                     path = local_path(Path(torrent['save_path']).joinpath(*relative(file['name']).parts), self.media / 'downloads/tv')
                     st = path.stat()
                     originals[(st.st_dev, st.st_ino)] = (torrent['hash'], path, files, file['name'],torrent.get('added_on',0))
-        except (Failure, OSError, ValueError, TypeError, KeyError):
-            pass
+                except (Failure, OSError, ValueError, TypeError, KeyError):
+                    log('tv', 'invalid_source')
         for series in self.sonarr.json('GET', '/api/v3/series'):
             try:
                 root = self.media / 'library/tv'
                 series_path = local_path(series['path'], root)
                 files = self.sonarr.json('GET', '/api/v3/episodefile', query={'seriesId': series['id']})
                 episodes = self.sonarr.json('GET', '/api/v3/episode', query={'seriesId': series['id']}) if series.get('tvdbId') else []
-                for file in files:
+            except (Failure, KeyError, TypeError, ValueError, OSError):
+                log('tv', 'invalid_source')
+                continue
+            for file in files:
+                try:
                     if file.get('seriesId') != series['id']:
                         raise Failure('series_mismatch')
                     rel = relative(file['relativePath'])
@@ -427,15 +436,16 @@ class Sources:
                         if len(sub_sources) != len(expected):
                             log('tv', 'subtitle_import_pending')
                             continue
+                    group = []
                     for sub in subs:
                         sub = local_path(sub, root)
-                        result.append(candidate('tv-sub:' + str(file['id']) + ':' + sub.name, sub,
+                        group.append(candidate('tv-sub:' + str(file['id']) + ':' + sub.name, sub,
                                                 '/aliyun/TV/' + sub.relative_to(root).as_posix(), sub.stat().st_size,
                                                 torrent_hash=item['torrent_hash'], parent_id=item['id'],
                                                 download_source=str(sub_sources.get(sub,sub)),added_on=item['added_on'],tvdb_id=item['tvdb_id']))
-                    result.append(item)
-            except (Failure, KeyError, TypeError, ValueError, OSError):
-                log('tv', 'invalid_source')
+                    result.extend([*group, item])
+                except (Failure, KeyError, TypeError, ValueError, OSError):
+                    log('tv', 'invalid_source')
         return result
 
 
@@ -1015,6 +1025,8 @@ class Uploader:
         qb_paths = {p for t in active for p in torrent_paths(t, t['files'])}
         native_paths = qb_paths | {Path(f['path']) for f,_ in episode_files}
         paths = {p for t in payload['torrents'] for p in torrent_paths(t, t['files'])}
+        for file, _ in episode_files:
+            paths.update(episode_sidecars(file['path']))
         known = {}
         for job in jobs:
             for value in {job['source'], job.get('download_source') or job['source']}:

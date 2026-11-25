@@ -155,7 +155,9 @@ def emby_defaults(client):
                            'Paths': [path], 'RefreshLibrary': False, 'LibraryOptions': options})
     libraries = client.json('GET', '/Library/VirtualFolders/Query')['Items']
     for _, _, _, path, options in plans:
-        library = next(lib for lib in libraries if path in [p.rstrip('/') for p in lib['Locations']])
+        library = next((lib for lib in libraries if path in [p.rstrip('/') for p in lib['Locations']]), None)
+        if library is None:
+            raise ValueError('Emby 尚未列出媒体库，请稍后重新应用。')
         expected = {key: options[key] for key in (*defaults, *subtitle_defaults, 'SubtitleFetcherOrder', 'TypeOptions')}
         expected.update({key: options[key] for key in optional_defaults if key in options})
         if any(library['LibraryOptions'].get(key) != value for key, value in expected.items()):

@@ -34,9 +34,17 @@ jobs:
           PY
           cd "$RUNNER_TEMP/cinema"
           python3 -m unittest discover -s tests -p 'test_*.py'
-      - name: Validate Compose and build the tested relay
+      - name: Validate Compose and start the packaged services
         env:
           MOVIE_DOMAIN: cinema.example.invalid
         run: |
+          cd "$RUNNER_TEMP/cinema"
           docker compose --profile '*' config --quiet
-          docker compose --profile connected build relay
+          docker compose --profile connected build relay portal uploader
+          python3 -c "from pathlib import Path; from configure import prepare; prepare(Path.cwd(), 'cinema.example.invalid')"
+          sudo chown -R 1000:1000 state media
+          docker compose up --no-deps -d portal uploader
+          curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:8097/discover/ -o /dev/null
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8097/discover/api/session)" = 401
+          timeout 20 bash -c 'until docker compose logs uploader | grep -F waiting_for_setup; do sleep 1; done'
+          docker compose --profile public run --rm --no-deps gateway caddy validate --config /etc/caddy/Caddyfile

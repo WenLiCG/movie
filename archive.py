@@ -14,6 +14,22 @@ from configure import private_write
 
 VIDEO = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".webm"}
 SUBTITLES = {'.srt', '.ass', '.ssa'}
+CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
+
+
+def episode_sidecars(movie):
+    # Sonarr's episodefile deletion also removes tracked extras from the import folder.
+    movie = Path(movie)
+    stem = movie.stem.casefold()
+    try:
+        siblings = list(movie.parent.iterdir())
+    except FileNotFoundError:
+        return
+    for path in siblings:
+        if (path != movie and path.suffix.lower() not in CLEANUP_EXTRAS
+                and path.name.casefold().startswith((stem + '.', stem + '_', stem + '-'))
+                and not path.is_dir()):
+            yield path
 
 
 def sample(path):

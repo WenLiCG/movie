@@ -25,7 +25,7 @@ from integration import APIError, Client, connect_services, read_api_key, emby_d
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, video, SUBTITLES, create_actions, task_actions, delete_target
+from archive import archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
@@ -82,6 +82,27 @@ def integer(value, low=1, high=2147483647):
     if type(value) is not int or not low <= value <= high:
         raise ValueError(f"请输入 {low}–{high} 之间的整数。")
     return value
+
+
+def selected_season(series, body):
+    if body.get('mode') == 'season':
+        number = integer(body.get('season'))
+        if number not in [s['seasonNumber'] for s in series.get('seasons', [])]:
+            raise ValueError('季数无效。')
+        return number
+    return None
+
+
+def managed_download_client(clients, name, category):
+    named = [client for client in clients if client['name'] == name]
+    if len(named) != 1:
+        return None
+    client = named[0]
+    fields = {field['name']: field.get('value') for field in client['fields']}
+    if (client.get('enable') and client.get('implementation') == 'QBittorrent' and not client.get('categories')
+            and fields.get('category') == category and fields.get('host') == 'qbittorrent' and fields.get('port') == 8080):
+        return client
+    return None
 
 
 def tags(title):
@@ -567,9 +588,6 @@ class App:
         mode=body.get('mode','all')
         if mode not in {'all','future','season','manual'}:
             raise ValueError('请选择追更范围。')
-        candidate=session['series'][tvdb]
-        if mode=='season' and body.get('season') not in [v['seasonNumber'] for v in candidate.get('seasons',[])]:
-            raise ValueError('季数无效。')
         fields, pattern = rule(body.get('fields'))
         if not matches(pattern, release['title']):
             raise ValueError('请检查版本条件：所选资源标题并不同时满足这些条件，未保存规则。')
@@ -581,6 +599,7 @@ class App:
         info = preview['info']
         session['series'][tvdb] = {**session['series'][tvdb], 'seriesType': 'daily' if info.get('isDaily') else ('anime' if info.get('isAbsoluteNumbering') else session['series'][tvdb].get('seriesType', 'standard'))}
         series = next((s for s in sonarr.json('GET', '/api/v3/series') if s['tvdbId'] == int(tvdb)), None)
+        selected_season(series or session['series'][tvdb], body)
         if series and old and old['fields'] == fields:
             try:
                 self.require_version(sonarr, series)
@@ -669,7 +688,8 @@ class App:
         path = self.data / 'uploads.sqlite3'
         if path.exists():
             with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db, db:
-                backlog = db.execute("SELECT COALESCE(max(size),0) FROM jobs WHERE state IN ('pending','uploading')").fetchone()[0]
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+                    backlog = db.execute("SELECT COALESCE(max(size),0) FROM jobs WHERE state IN ('pending','uploading')").fetchone()[0]
         required = space_required(size, remaining, backlog, disk.total)
         if required > disk.free:
             raise ValueError(f'VPS 空间不足：需要 {required/1024**3:.1f} GB，当前可用 {disk.free/1024**3:.1f} GB（含上传暂存和安全余量）。')
@@ -682,16 +702,9 @@ class App:
         prowlarr = self.client('prowlarr')
         category = 'cinema-tv' if kind == 'tv' else 'cinema-movies'
         name = 'Cinema qB TV' if kind == 'tv' else 'Cinema qB'
-        clients = [c for c in prowlarr.json('GET', '/api/v1/downloadclient') if c['name'] == name]
-        if len(clients) != 1:
-            raise ValueError('下载器尚未完成独立下载配置，请在设置中重新自动配置。')
-        client = clients[0]
-        fields = {f['name']: f.get('value') for f in client['fields']}
+        client = managed_download_client(prowlarr.json('GET', '/api/v1/downloadclient'), name, category)
         path = '/media/downloads/tv-manual' if kind == 'tv' else '/media/downloads/movies'
-        if (not client.get('enable') or client.get('implementation') != 'QBittorrent' or client.get('categories')
-                or fields.get('category') != category or fields.get('host') != 'qbittorrent'
-                or fields.get('port') != 8080
-                or self.qb().json('GET', '/api/v2/torrents/categories').get(category, {}).get('savePath', '').rstrip('/') != path):
+        if not client or self.qb().json('GET', '/api/v2/torrents/categories').get(category, {}).get('savePath', '').rstrip('/') != path:
             raise ValueError('下载器分类或连接已变更，请重新自动配置；未提交下载。')
         # Prowlarr grabs the exact cached GUID, with an explicit client to prevent category fallback.
         prowlarr.json('POST', '/api/v1/search', {'guid': release['guid'], 'indexerId': release['indexerId'], 'downloadClientId': client['id']})
@@ -767,6 +780,7 @@ class App:
             if prepared.get('_cinema_new'):
                 return {'series_id': prepared['id'], 'message': '版本规则已保存，Sonarr 将在集数同步后按所选范围处理。'}
         existing = next((s for s in sonarr.json("GET", "/api/v3/series") if s["tvdbId"] == series["tvdbId"]), None)
+        season = selected_season(existing or series, body)
         if mode != 'manual':
             record = self.require_version(sonarr, existing or series)
             body = {**body, 'quality': record['fields']['resolution'] or 'any'}
@@ -780,9 +794,6 @@ class App:
             series = json.loads(json.dumps(existing))
         quality = body.get('quality', '1080p')
         profile = self.quality_profile(sonarr,quality)
-        season = integer(body.get('season')) if mode=='season' else None
-        if mode=='season' and season not in [s['seasonNumber'] for s in series['seasons']]:
-            raise ValueError('季数无效。')
         archived=archived_keys(self.data/'uploads.sqlite3',series['tvdbId'])
         if mode!='manual':self.release_task_block(series['tvdbId'])
         if existing:
@@ -830,9 +841,27 @@ class App:
             for e in episodes if e['seasonNumber']>0]}
 
     @staticmethod
+    def queue_records(sonarr):
+        page, records, total = 1, [], None
+        while True:
+            response = sonarr.json('GET', f'/api/v3/queue?page={page}&pageSize=200&includeSeries=true&includeEpisode=true&includeUnknownSeriesItems=true')
+            batch = response.get('records') if isinstance(response, dict) else None
+            if not isinstance(batch, list) or response.get('page', page) != page:
+                raise ValueError('Sonarr 下载队列暂时不可用，请刷新后重试。')
+            reported = response.get('totalRecords')
+            if type(reported) is not int or reported < 0 or (total is not None and reported != total):
+                raise ValueError('Sonarr 下载队列未完整确认，请刷新后重试。')
+            total = reported
+            records.extend(batch)
+            if len(records) == total:
+                return records
+            if not batch or len(records) > total:
+                raise ValueError('Sonarr 下载队列已变化，请刷新后重试。')
+            page += 1
+
+    @staticmethod
     def queue_episode_ids(sonarr):
-        value=sonarr.json('GET','/api/v3/queue?page=1&pageSize=1000&includeEpisode=true')
-        return {r.get('episodeId') or (r.get('episode') or {}).get('id') for r in (value or {}).get('records',[])}
+        return {r.get('episodeId') or (r.get('episode') or {}).get('id') for r in App.queue_records(sonarr)}
 
     def download_episodes(self, body):
         with watch_lock(self.data):
@@ -890,7 +919,7 @@ class App:
         return {'message':'已请求重新检查；只有确认旧任务结束后才会重传。'}
 
     def tasks(self, session=None, all_jobs=False):
-        # shortcut: cap queue/history views at 1000 files; paginate for a larger multi-user library.
+        # History is display-limited; task ownership and file deletion require the full queue.
         qb = self.qb()
         torrents = [v for v in qb.json('GET','/api/v2/torrents/info') if v.get('category') in {'cinema-movies','cinema-tv','sonarr-tv'}]
         uploads = self.uploads(all_jobs)
@@ -903,8 +932,12 @@ class App:
         series=sonarr.json('GET','/api/v3/series')
         by_id={s['id']:s for s in series}
         by_tvdb={s['tvdbId']:s for s in series}
-        queue=sonarr.json('GET','/api/v3/queue?page=1&pageSize=1000&includeSeries=true&includeEpisode=true').get('records',[])
-        native_hash={q['downloadId'].lower():by_id.get(q.get('seriesId') or (q.get('series') or {}).get('id')) for q in queue if q.get('downloadId')}
+        queue=self.queue_records(sonarr)
+        native_hash = collections.defaultdict(set)
+        for q in queue:
+            if q.get('downloadId'):
+                native = by_id.get(q.get('seriesId') or (q.get('series') or {}).get('id'), {})
+                native_hash[q['downloadId'].lower()].add(native.get('tvdbId'))
         names=self.localize(session,series) if session else {}
         def build(t):
             jobs = [j for j in by_hash.get(t['hash'], []) if not j.get('added_on') or j['added_on'] == t.get('added_on')]
@@ -915,8 +948,7 @@ class App:
                 job=next((j for j in jobs if j.get('download_source')==str(path) or j['source']==str(path)),None)
                 if job:file['job_id']=job['id']
             tvdbs={j['tvdb_id'] for j in jobs if j.get('tvdb_id')}
-            native=native_hash.get(t['hash'].lower())
-            if native:tvdbs.add(native['tvdbId'])
+            tvdbs.update(native_hash.get(t['hash'].lower(), ()))
             tvdb=next(iter(tvdbs)) if len(tvdbs)==1 and t['category']=='sonarr-tv' else None
             return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','download_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb}
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1048,8 +1080,10 @@ class App:
             if action=='resume' and previous and previous['action'] in {'cancel','delete'} and (previous['state']!='done' or previous['action']=='delete'):
                 raise ValueError('请等待取消或删除完成，再操作任务。')
             if resource and group['series_id'] and action in {'cancel','delete'}:
-                queued=sonarr.json('GET','/api/v3/queue?page=1&pageSize=1000&includeEpisode=true').get('records',[])
-                ids=[q.get('episodeId') or (q.get('episode') or {}).get('id') for q in queued if q.get('downloadId','').lower()==resource['hash'].lower()]
+                queued=[q for q in self.queue_records(sonarr) if (q.get('downloadId') or '').lower()==resource['hash'].lower()]
+                if any((q.get('seriesId') or (q.get('series') or {}).get('id')) != group['series_id'] for q in queued):
+                    raise TaskScopeChanged('资源关联的剧集已变化，请刷新任务列表后重试。')
+                ids=[q.get('episodeId') or (q.get('episode') or {}).get('id') for q in queued]
                 payload['episode_ids']=[v for v in ids if type(v) is int]
                 if payload['episode_ids']:
                     sonarr.json('PUT','/api/v3/episode/monitor',{'episodeIds':payload['episode_ids'],'monitored':False})
@@ -1098,7 +1132,8 @@ class App:
                     if resource:
                         if parent and parent['action']=='cancel':
                             db.execute("UPDATE task_actions SET state='released' WHERE id=?",(group['id'],))
-                    db.executemany("UPDATE jobs SET state='pending',retry_at=0,failures=0,restart_count=0 WHERE id=? AND state='cancelled'",[(j['id'],) for j in jobs])
+                    if jobs:
+                        db.executemany("UPDATE jobs SET state='pending',retry_at=0,failures=0,restart_count=0 WHERE id=? AND state='cancelled'",[(j['id'],) for j in jobs])
             return {'message':'已提交删除所有；后台将逐项核实云端原件、清理索引并扫描 Emby，完成前保留此任务。' if payload['delete_all'] else {'pause':'已暂停本项目下载。','resume':'已恢复下载。','cancel':'已请求取消下载，文件保留；正在核对并结束相关上传。','delete':'已请求删除项目；确认上传及入库结束后处理本地文件，云端影片保留。'}[action]}
 
     def status(self):
@@ -1128,9 +1163,7 @@ class App:
                         return False, '下载器分类或保存目录未完成，请重新自动配置下载器。'
                 clients = client('prowlarr').json('GET', '/api/v1/downloadclient')
                 for name, category in [('Cinema qB', 'cinema-movies'), ('Cinema qB TV', 'cinema-tv')]:
-                    found = [c for c in clients if c['name'] == name and c.get('enable') and c.get('implementation') == 'QBittorrent'
-                             and not c.get('categories') and any(f['name'] == 'category' and f.get('value') == category for f in c['fields'])]
-                    if len(found) != 1:
+                    if not managed_download_client(clients, name, category):
                         return False, '下载器的电影或独立剧集连接未完成，请重新自动配置下载器。'
                 return True, '下载器登录与电影、独立剧集、追更分类正常。'
             except (ValueError, OSError, KeyError):
@@ -1206,6 +1239,10 @@ class App:
                 'credentials': {'openlist': not checks['cloud']['complete'], 'qb': not checks['downloader']['complete']},
                 'indexers': count, 'prowlarr_ok': checks['indexers']['complete'],
                 'sonarr_ok': checks['television']['complete'], 'checks': checks}
+
+
+class CinemaServer(ThreadingHTTPServer):
+    app: App
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1366,10 +1403,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self.reply({"error": "会话已失效，请使用 Emby 管理员账号登录。"}, 401)
-        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as error:
             # Never echo upstream payloads: they may embed tokens or signed URLs.
             message = "操作未完成，请检查输入、服务登录或配置后重试。"
-            error = sys.exception()
             if isinstance(error, ValueError) and str(error).startswith(("请", "已", "搜索", "结果", "下载器", "云盘", "VPS", "/aliyun", "Sonarr", "登录", "会话", "追更", "季数")):
                 message = str(error)
             self.reply({"error": message}, 400)
@@ -1377,6 +1413,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     os.umask(0o077)
-    server = ThreadingHTTPServer(("0.0.0.0", 8097), Handler)
+    server = CinemaServer(("0.0.0.0", 8097), Handler)
     server.app = App()
     server.serve_forever()
