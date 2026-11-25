@@ -16,7 +16,7 @@ import time
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from archive import VIDEO, SUBTITLES, sample, disc, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, task_actions, action_matches, delete_target, torrent_instance, episode_keys
+from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys
 from configure import private_write
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -65,6 +65,43 @@ def local_path(value, root, missing_ok=False):
     return path
 
 
+def series_sidecars(sources, episodes):
+    # Sonarr can associate extras anywhere in a series by episode ID, regardless of name.
+    by_series = {}
+    # Sonarr excludes video formats from its existing-extra importer.
+    excluded = VIDEO | CLEANUP_EXTRAS
+    for episode in episodes:
+        by_series.setdefault(episode['series_id'], {})[episode['file_id']] = Path(episode['path'])
+    for series_id, expected in by_series.items():
+        files = sources.sonarr.json('GET', '/api/v3/episodefile', query={'seriesId': series_id})
+        if not any(f['id'] in expected for f in files):
+            continue  # A previous attempt already removed the native episode files.
+        series = sources.sonarr.json('GET', '/api/v3/series/' + str(series_id))
+        if series['id'] != series_id:
+            raise Failure('cleanup_episode_changed')
+        root = local_path(series['path'], sources.media/'library/tv')
+        native_paths = set()
+        for f in files:
+            path = local_path(f['path'], root, missing_ok=True)
+            if f['seriesId'] != series_id or (f['id'] in expected and path != expected[f['id']]):
+                raise Failure('cleanup_episode_changed')
+            native_paths.add(path)
+        directories = [root]
+        while directories:
+            with os.scandir(directories.pop()) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode) or (os.name == 'nt' and info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                        raise Failure('unsafe_or_missing_source')
+                    if stat.S_ISDIR(info.st_mode):
+                        directories.append(path)
+                    elif not stat.S_ISREG(info.st_mode):
+                        raise Failure('unsafe_or_missing_source')
+                    elif path not in native_paths and path.suffix.lower() not in excluded:
+                        yield path
+
+
 @contextlib.contextmanager
 def open_source(path, root):
     path = local_path(path, root)
@@ -106,6 +143,13 @@ def matches_payload(path, root, job):
             return False
         current = path.stat(follow_symlinks=False)
         return (current.st_dev, current.st_ino) == before[:2] and fingerprint(handle) == before
+
+
+def recheck_series_sidecars(sources, episodes, verified):
+    # Hashing a torrent or waiting for an Emby scan can take long enough for a new import.
+    for path in series_sidecars(sources, episodes):
+        if path not in verified or not matches_payload(path, *verified[path]):
+            raise Failure('cleanup_local_unverified')
 
 
 def torrent_paths(torrent, files):
@@ -351,7 +395,11 @@ class Sources:
                         continue
                     title = re.sub(r"[\\/:\x00-\x1f]", "_", torrent["name"]).strip(". ")[:180]
                     title = title or ("torrent-" + torrent["hash"][:12])
-                    for file in selected:
+                except (Failure, KeyError, TypeError, ValueError, OSError):
+                    log(category, "invalid_source")
+                    continue
+                for file in selected:
+                    try:
                         rel = relative(file['name'])
                         source = local_path(save.joinpath(*rel.parts), root)
                         clean = PurePosixPath(*rel.parts[1:]) if len(rel.parts) > 1 and rel.parts[0] == torrent['name'] else rel
@@ -360,40 +408,45 @@ class Sources:
                         sidecars = [f for f in files if f.get('priority', 0) > 0 and subtitle_for(f['name'], file['name'])]
                         if any(f.get('progress') != 1 for f in sidecars):
                             continue
+                        group = []
                         for sub in sidecars:
                             subrel = relative(sub['name'])
                             subsource = local_path(save.joinpath(*subrel.parts), root)
                             subclean = PurePosixPath(*subrel.parts[1:]) if len(subrel.parts) > 1 and subrel.parts[0] == torrent['name'] else subrel
-                            result.append(candidate(identity + ':' + torrent['hash'] + ':' + str(sub['index']), subsource,
+                            group.append(candidate(identity + ':' + torrent['hash'] + ':' + str(sub['index']), subsource,
                                                     f'/aliyun/{remote}/{title}/{subclean}', sub['size'], parent_id=item['id'],added_on=item['added_on']))
-                        result.append(item)
-                except (Failure, KeyError, TypeError, ValueError, OSError):
-                    log(category, "invalid_source")
+                        result.extend([*group, item])
+                    except (Failure, KeyError, TypeError, ValueError, OSError):
+                        log(category, "invalid_source")
         return result
 
     def tv(self):
         result, originals = [], {}
-        try:
-            torrents = self.qb.json('GET', '/api/v2/torrents/info', query={'filter': 'completed', 'category': 'sonarr-tv'})
-            for torrent in torrents:
-                if torrent.get('category') != 'sonarr-tv' or torrent.get('progress') != 1:
-                    continue
-                files = self.qb.json('GET', '/api/v2/torrents/files', query={'hash': torrent['hash']})
-                for file in files:
+        torrents = self.qb.json('GET', '/api/v2/torrents/info', query={'filter': 'completed', 'category': 'sonarr-tv'})
+        for torrent in torrents:
+            if torrent.get('category') != 'sonarr-tv' or torrent.get('progress') != 1:
+                continue
+            files = self.qb.json('GET', '/api/v2/torrents/files', query={'hash': torrent['hash']})
+            for file in files:
+                try:
                     if file.get('priority', 0) <= 0 or not video(file['name']):
                         continue
                     path = local_path(Path(torrent['save_path']).joinpath(*relative(file['name']).parts), self.media / 'downloads/tv')
                     st = path.stat()
                     originals[(st.st_dev, st.st_ino)] = (torrent['hash'], path, files, file['name'],torrent.get('added_on',0))
-        except (Failure, OSError, ValueError, TypeError, KeyError):
-            pass
+                except (Failure, OSError, ValueError, TypeError, KeyError):
+                    log('tv', 'invalid_source')
         for series in self.sonarr.json('GET', '/api/v3/series'):
             try:
                 root = self.media / 'library/tv'
                 series_path = local_path(series['path'], root)
                 files = self.sonarr.json('GET', '/api/v3/episodefile', query={'seriesId': series['id']})
                 episodes = self.sonarr.json('GET', '/api/v3/episode', query={'seriesId': series['id']}) if series.get('tvdbId') else []
-                for file in files:
+            except (Failure, KeyError, TypeError, ValueError, OSError):
+                log('tv', 'invalid_source')
+                continue
+            for file in files:
+                try:
                     if file.get('seriesId') != series['id']:
                         raise Failure('series_mismatch')
                     rel = relative(file['relativePath'])
@@ -427,15 +480,16 @@ class Sources:
                         if len(sub_sources) != len(expected):
                             log('tv', 'subtitle_import_pending')
                             continue
+                    group = []
                     for sub in subs:
                         sub = local_path(sub, root)
-                        result.append(candidate('tv-sub:' + str(file['id']) + ':' + sub.name, sub,
+                        group.append(candidate('tv-sub:' + str(file['id']) + ':' + sub.name, sub,
                                                 '/aliyun/TV/' + sub.relative_to(root).as_posix(), sub.stat().st_size,
                                                 torrent_hash=item['torrent_hash'], parent_id=item['id'],
                                                 download_source=str(sub_sources.get(sub,sub)),added_on=item['added_on'],tvdb_id=item['tvdb_id']))
-                    result.append(item)
-            except (Failure, KeyError, TypeError, ValueError, OSError):
-                log('tv', 'invalid_source')
+                    result.extend([*group, item])
+                except (Failure, KeyError, TypeError, ValueError, OSError):
+                    log('tv', 'invalid_source')
         return result
 
 
@@ -931,9 +985,11 @@ class Uploader:
                      for job in jobs if job['state'] == 'published'), key=lambda job: job['id']):
                 raise Failure('task_changed')
             episode_files = self.episode_deletions(sources, jobs, payload.get('series_id'))
-            paths, verified = self.check_local_deletion(sources, payload, jobs, torrents, active, episode_files)
+            episodes = [{'series_id': f['seriesId'], 'file_id': f['id'], 'path': f['path']} for f, _ in episode_files]
+            paths, verified = self.check_local_deletion(sources, payload, jobs, torrents, active, episodes)
             if payload.get('delete_all'):
                 self.delete_cloud_and_index(jobs, payload, sources, action['id'], action['at'])
+            recheck_series_sidecars(sources, episodes, verified)
             for file, ids in episode_files:
                 if ids:
                     sources.sonarr.json('PUT', '/api/v3/episode/monitor', {'episodeIds':ids,'monitored':False})
@@ -1009,12 +1065,13 @@ class Uploader:
             raise Failure('unsafe_or_missing_source') from None
         return claimed
 
-    def check_local_deletion(self, sources, payload, jobs, torrents, active, episode_files):
+    def check_local_deletion(self, sources, payload, jobs, torrents, active, episodes):
         claimed = self.protected_paths(sources, torrents.values(), {t['hash'] for t in payload['torrents']},
                                        {j['id'] for j in jobs})
         qb_paths = {p for t in active for p in torrent_paths(t, t['files'])}
-        native_paths = qb_paths | {Path(f['path']) for f,_ in episode_files}
+        native_paths = qb_paths | {Path(e['path']) for e in episodes}
         paths = {p for t in payload['torrents'] for p in torrent_paths(t, t['files'])}
+        paths.update(series_sidecars(sources, episodes))
         known = {}
         for job in jobs:
             for value in {job['source'], job.get('download_source') or job['source']}:

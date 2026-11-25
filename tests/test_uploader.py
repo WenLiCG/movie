@@ -3,7 +3,6 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
-import os
 from pathlib import Path, PurePosixPath
 import socket
 import sys
@@ -78,9 +77,9 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(value)
 
     def do_POST(self):
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
         if self.path.startswith('/api/admin/task/upload/info?'):
             return self.reply({'code':200,'data':{'id':'native-upload','state':self.server.task_state,'progress':100 if self.server.task_state == 2 else 35}})
-        raw = self.rfile.read(int(self.headers["Content-Length"]))
         if self.path == "/api/v2/auth/login":
             assert parse_qs(raw.decode())["username"] == ["test-user"]
             headers = {"Set-Cookie": self.server.login_cookie} if self.server.login_cookie else {}
@@ -480,6 +479,10 @@ class UploaderTests(unittest.TestCase):
                   "sonarr_url": self.service.url, "sonarr_api_key": "sonarr-secret"}
         sources = Sources(config, self.media)
         self.assertEqual(len(sources.downloads()), 1)
+        stale = {**self.service.files[0], "name": "missing.mkv", "index": 1}
+        self.service.files.insert(0, stale)
+        self.assertEqual([c['source'] for c in sources.downloads()], [str(self.source)])
+        self.service.files.pop(0)
         self.service.files[0]["progress"] = 0.999
         self.assertEqual(sources.downloads(), [])
         self.service.files[0]["progress"] = 1

@@ -69,17 +69,39 @@ const {chromium} = require('playwright');
     await page.locator('#search-form button').click();
     await page.locator('.result-row').waitFor();
     assert.equal(await page.locator('#results .result-row').count(), 1);
+    assert(await page.locator('.row-meta').getByText('1 KiB', {exact: true}).isVisible());
+    let downloadRoute;
+    await page.route('**/discover/api/download-release', route => { downloadRoute = route; });
+    await page.getByRole('button', {name: '下载此资源', exact: true}).click();
+    await page.locator('#free').check();
+    const pending = page.getByRole('button', {name: '正在提交…', exact: true});
+    assert(await pending.isDisabled(), 'filter changes must preserve a pending submission');
+    await downloadRoute.fulfill({json: {message: '已提交此资源'}});
+    await page.getByRole('button', {name: '已提交', exact: true}).waitFor();
+    await page.locator('#free').uncheck();
+    assert(await page.getByRole('button', {name: '已提交', exact: true}).isDisabled());
+    await page.locator('#dismiss-notice').click();
+
+    await page.locator('#query').fill('');
+    assert(await page.locator('#recommendations').isVisible());
+    assert.equal(await page.locator('.result-row').count(), 0);
+    await page.locator('#query').fill('示例剧');
     searchFails = true;
     await page.locator('#search-form button').click();
     await page.locator('#notice').waitFor({state: 'visible'});
     assert.match(await page.locator('#notice').innerText(), /服务暂时不可用|无法连接影院服务/);
     searchFails = false;
 
+    await page.locator('nav [data-view=settings]').click();
+    await page.locator('#refresh-token').fill('synthetic-unused-token');
+    await page.locator('#days').fill('123');
     await page.locator('#logout').click();
     await page.locator('#login').waitFor({state: 'visible'});
     assert.equal(await page.locator('#results').innerText(), '');
     assert.equal(await page.locator('#workspace').isHidden(), true);
     assert.equal(await page.locator('#task-list').innerText(), '');
+    assert.equal(await page.locator('#refresh-token').inputValue(), '');
+    assert.equal(await page.locator('#query').inputValue(), '');
 
     await page.locator('#username').fill('demo');
     await page.locator('#password').fill('synthetic-only');
@@ -98,11 +120,25 @@ const {chromium} = require('playwright');
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await page.waitForFunction(() => document.getElementById('days').value === '3');
 
+    await page.route('**/discover/api/metrics', route => route.fulfill({status: 503, json: {}}));
+    await page.evaluate(() => metrics());
+    assert.equal(await page.locator('#disk-label').innerText(), '暂不可用');
+    assert(await page.locator('#disk-meter').isHidden());
+    await page.unroute('**/discover/api/metrics');
+    await page.evaluate(() => metrics());
+    assert(await page.locator('#disk-meter').isVisible());
+
     await page.locator('nav [data-view=tasks]').click();
     const retry = page.getByRole('button', {name: '重新上传', exact: true});
     await retry.focus();
     await page.evaluate(() => tasks());
     await page.waitForFunction(() => document.activeElement?.dataset.taskControl === 'job1:retry');
+
+    await page.locator('nav [data-view=playbacks]').click();
+    await page.getByText('暂无播放记录。', {exact: false}).waitFor();
+    await page.route('**/discover/api/playbacks', route => route.fulfill({status: 503, json: {error: '稍后再试'}}));
+    await page.locator('#refresh-playbacks').click();
+    await page.getByText('刷新失败，仍显示上次结果。', {exact: true}).waitFor();
 
     await page.locator('nav [data-view=series]').click();
     await page.getByText('更多', {exact: true}).click();
@@ -113,7 +149,7 @@ const {chromium} = require('playwright');
     await page.locator('#follow-dialog').evaluate(dialog => dialog.close());
 
     assert.deepEqual(errors, []);
-    console.log('Independent UI flows passed: startup 503, stale sign-out, settings focus, retry focus, season 0 hidden.');
+    console.log('Independent UI flows passed: startup 503, submission state, search reset, sign-out drafts, settings and retry focus, metrics recovery, stale playback, season 0 hidden.');
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

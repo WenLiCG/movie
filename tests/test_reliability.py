@@ -1,9 +1,7 @@
 """Recovery, archive exclusions and disk ownership regression checks."""
 import json
 from pathlib import Path
-import sqlite3
 import tempfile
-import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -138,10 +136,12 @@ class BoundaryTests(unittest.TestCase):
             sources.qb=Mock();sources.sonarr=Mock()
             torrent={'hash':'a'*40,'category':'sonarr-tv','progress':1,'save_path':str(raw)}
             files=[{'name':n,'priority':1,'progress':1,'size':(raw/n).stat().st_size} for n in ('episode.mkv','episode.zh-CN.srt')]
-            sources.qb.json.side_effect=lambda m,p,**k: [torrent] if p.endswith('/info') else files
+            stale = {'name':'missing.mkv','priority':1,'progress':1,'size':99}
+            sources.qb.json.side_effect=lambda m,p,**k: [torrent] if p.endswith('/info') else [stale, *files]
             series={'id':9,'tvdbId':42,'path':str(library)}
             episode={'id':7,'seriesId':9,'relativePath':'episode.mkv','path':str(library/'episode.mkv'),'size':5}
-            sources.sonarr.json.side_effect=lambda m,p,**k: [series] if p.endswith('/series') else [episode] if p.endswith('/episodefile') else [{'episodeFileId':7,'seasonNumber':1,'episodeNumber':1}]
+            missing = {**episode, 'id':6, 'path':str(library/'missing.mkv'), 'relativePath':'missing.mkv'}
+            sources.sonarr.json.side_effect=lambda m,p,**k: [series] if p.endswith('/series') else [missing, episode] if p.endswith('/episodefile') else [{'episodeFileId':7,'seasonNumber':1,'episodeNumber':1}]
             candidates=sources.tv()
             self.assertEqual(len(candidates),2)
             sub=next(v for v in candidates if v['parent_id'])
@@ -154,7 +154,7 @@ class BoundaryTests(unittest.TestCase):
             app=App(Path(temp));native=Mock();app.client=lambda _:native
             app.require_version=Mock()
             episodes=[{'id':n,'seasonNumber':1,'episodeNumber':n,'hasFile':False} for n in range(1,206)]
-            native.json.side_effect=lambda m,p,b=None: ({'tvdbId':42} if p=='/api/v3/series/9' else {'records':[]} if '/queue?' in p else episodes if '/episode?' in p else {})
+            native.json.side_effect=lambda m,p,b=None: ({'tvdbId':42} if p=='/api/v3/series/9' else {'records':[], 'totalRecords':0} if '/queue?' in p else episodes if '/episode?' in p else {})
             app.download_episodes({'series_id':9,'episode_ids':list(range(1,206))})
             commands=[c.args[2]['episodeIds'] for c in native.json.call_args_list if c.args[0]=='POST']
             self.assertEqual(list(map(len,commands)),[100,100,5])

@@ -2,9 +2,9 @@
 
 一个安装文件部署 Prowlarr 搜索、Sonarr 追剧、qBittorrent 下载做种、OpenList 上传、Emby 电影墙与严格直连播放层。应用之间的配置由脚本接线；小型 Python 上传程序负责“确认完成后才发布”。适用 Debian 12/13，amd64/arm64。
 
-**已在 Debian 12 测试 VPS 完成部署、PT 搜索接线和真实影片云端发布；长时间播放及第二台全新 VPS 重装仍待验收。** 不把容器运行当成业务验收。它是一键安装多服务，不是离线镜像包；部署和操作分别见 [新 VPS 安装说明](docs/NEW-VPS.md)与[使用说明](docs/DISCOVER.md)。
+管理员在 `/discover/` 找片、按版本追剧、查看下载与归档进度，观众从域名首页进入 Emby。下载完成后默认继续保种 7 天。只有通过归档复核的任务才进入本地清理，设为 0 可关闭自动清理。
 
-**新增找片与追剧页面 `/discover/`**：追剧项目合并、暂停/取消/选择本地删除、免二次密码进入 Emby、中央搜索、默认 1080p（无匹配时显示全部）、体积升序、清晰度/编码/站点筛选、一键下载、电影／剧集综艺两个资源入口、按选中版本持续追更、中文剧名与自动加载选集、Emby/找片页全局亮色主题、阿里云盘 Token 引导、下载器自动配置，以及 VPS 磁盘/内存/CPU。默认下载完成 7 天后清理已确认云端发布的本地文件与做种任务，0 关闭；云端影片保留。已部署到测试 VPS，真实 HTTPS 登录、资源数据、站点搜索、画质筛选和原生接线通过；已有真实影片发布入库，自行生成资源的取消、重启恢复、外挂字幕和保留期清理通过；长时间播放仍待验收。首次连接、清理边界和已有部署更新命令见 [定制页面说明](docs/DISCOVER.md)。
+Debian 12 测试 VPS 曾完成 PT 搜索接线和真实影片云端发布。本轮交付范围是 GitHub 源码；长时间播放及第二台全新 VPS 重装仍待验收。
 
 ```text
 电影：Prowlarr 搜索 → qB 下载、保留做种 ───────────┐
@@ -23,7 +23,7 @@
 完整操作步骤见 **[新 VPS 部署说明](docs/NEW-VPS.md)**，包含 Windows 上传/隧道、首次账号、云盘向导、站点接线及 HTTPS。
 
 1. 准备 Debian 12/13 VPS 和自己的域名，放行 SSH、80/443 和 BT 56881/TCP+UDP。
-2. 上传单文件安装器和 SHA256，在 VPS 校验后运行：
+2. 从源码交付时，先在仓库根目录运行 `python scripts/build_all_in_one.py`。将 `dist/` 下生成的安装器与同名 `.sha256` 文件上传到 VPS 的 `/root`，校验后运行：
 
 ```bash
 cd /root
@@ -46,7 +46,7 @@ bash install.sh status
 
 `https://你的域名/` 是电影墙，`/discover/` 是找片与追剧，`/search/`、`/sonarr/`、`/qb/`、`/openlist/` 保留原生管理入口。日常使用 HTTPS 不需要隧道；原生应用分别认证，定制页使用 Emby 管理员。
 
-需要不同 OpenList 管理员账号或原生命令行接线时，按 [SETUP.md](docs/SETUP.md) 完成挂载后执行 `bash install.sh setup`。不要把旧服务器的私有状态当作通用部署包。
+需要从命令行接线或轮换已保存的后台凭据时，按 [SETUP.md](docs/SETUP.md) 完成挂载后执行 `bash install.sh setup`。不要把旧服务器的私有状态当作通用部署包。
 
 ## 日常操作与数据边界
 
@@ -56,6 +56,7 @@ bash install.sh status
 - 自动追剧：在 Sonarr 添加、监控并搜索，剧库 `/media/library/tv`；qB 分类 `sonarr-tv`，保留 `/media/downloads/tv` 做种副本。
 - 上传程序处理上述已完成视频及可关联的 `.srt`、`.ass`、`.ssa` 字幕。NFO、海报和蓝光目录不进入上传队列。
 - 上传先隔离到 `/aliyun/.cinema-upload`，明确成功并校验后才移到 `/aliyun/Movies` 或 `/aliyun/TV`。默认 7 天后只清理已归档且复核通过的本地源及做种任务；云端成品和失败暂存不自动删除。
+- Sonarr 可把文件名不同或位于子目录的字幕关联到剧集。程序删除导入副本前会检查整部剧的目录，有无法核实的附件时保留本地资源。
 - **Movies/TV 必须仅由这一个上传程序写入。** OpenList 阿里移动接口缺少原子同名保护；程序会检查已有冲突，但不能与人工、CloudDrive 或其他同步器并发整理同一目录。
 - 上传断线后先核对原生任务和暂存哈希。结果未确认时保留源文件，并给暂存预留磁盘空间。确认旧传输结束后，才可重传到新暂存目录。发布请求结果不明时先查任务，保留 SQLite 中的发布凭证。
 - Emby 只挂载云端虚拟索引，不能访问实际下载目录。默认每 10 分钟刷新索引，再由 Emby 扫描。原画不兼容时可选阿里云端转码，仍需实际客户端验收。
@@ -79,14 +80,9 @@ sudo bash install.sh stop
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
-bash -n install.sh
-# 以下是开发/重新打包操作：
+node --test tests/*.test.cjs
+for script in install.sh scripts/*.sh; do bash -n "$script"; done
 python3 scripts/build_all_in_one.py
-# 可选，宿主正式运行无需 Node：
-node tests/search-entry.test.cjs
-node tests/watch-handoff.test.cjs
-node tests/task-controls.test.cjs
-node tests/portal-resilience.test.cjs
 ```
 
-验证涵盖目录保护、私有文件权限、原生接口接线逻辑、HTTP 流式上传与失败恢复、单文件安全解包、Bash 语法、Compose 配置解析、中文刮削配置和搜索导航。回归用例数量与最近一次结果以 [HANDOFF.md](HANDOFF.md) 的验证记录为准（历史上 120 项回归曾在 Debian 12 执行平台适用项通过）；Windows 通过刮削、登录、安装包和任务界面相关检查。镜像构建、网关配置及浏览器交互通过。真实生成资源验证了上传取消、重启恢复、字幕、归档和本地保留期清理。另一台全新 VPS、长时间播放及磁盘压力测试尚未执行。失败恢复和播放边界见 [docs/SETUP.md](docs/SETUP.md)，版本及许可见 [SOURCES.md](SOURCES.md)。
+安装器内含运行源码、回归用例与操作文档。每次交付的测试环境、结果和现场待验收项见[开发交接](https://github.com/WenLiCG/movie/blob/main/HANDOFF.md)。故障恢复与播放验收见[操作说明](docs/SETUP.md)，镜像版本和上游许可见[来源清单](SOURCES.md)。

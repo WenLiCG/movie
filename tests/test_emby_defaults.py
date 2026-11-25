@@ -179,6 +179,22 @@ class DefaultsTests(unittest.TestCase):
             self.assertTrue((Path(temp) / 'emby-defaults.applied').is_file())
             self.assertEqual(apply.call_count, 2)
 
+    def test_pending_library_readback_keeps_first_login_available(self):
+        api = Emby4102()
+        auth = Mock()
+        auth.json.return_value = {'AccessToken': 'token', 'User': {'Id': '1', 'Policy': {'IsAdministrator': True}}}
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            app.client = Mock(side_effect=[auth, api, api])
+            api.opener = Mock()
+            # Emby has accepted both creates but has not listed the folders yet.
+            with patch.object(api, 'request'):
+                sid, session = app.login({'username': 'admin', 'password': 'password'})
+            self.assertIn(sid, app.sessions)
+            self.assertFalse((app.state / 'emby-defaults.applied').exists())
+            app.metadata_defaults(session)
+            self.assertTrue((app.state / 'emby-defaults.applied').is_file())
+
     def test_non_administrator_cannot_initialize_defaults(self):
         with tempfile.TemporaryDirectory() as temp, patch('portal.server.emby_defaults') as apply:
             app = App(Path(temp)); native = Mock(); app.client = lambda _: native

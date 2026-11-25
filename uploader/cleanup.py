@@ -6,12 +6,8 @@ import re
 import time
 from urllib.parse import urlencode
 
-from uploader import Failure, VIDEO, SUBTITLES, DOWNLOADS, local_path, relative, verify, log, disc, matches_payload, torrent_paths
-from archive import watch_lock, task_actions, torrent_instance
-
-
-# qB removes the whole payload. Only known metadata, artwork and fonts can go without archive evidence.
-CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
+from uploader import Failure, DOWNLOADS, local_path, relative, verify, log, matches_payload, torrent_paths, series_sidecars, recheck_series_sidecars
+from archive import CLEANUP_EXTRAS, VIDEO, SUBTITLES, disc, watch_lock, task_actions, torrent_instance
 
 
 def needs_archive(path):
@@ -56,7 +52,9 @@ class Cleaner:
             local_path(save, root)
         files = sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": torrent["hash"]})
         paths, jobs, episodes = [], [], []
-        published = [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE state='published' AND hidden=0")]
+        published = {}
+        for row in self.db.execute("SELECT * FROM jobs WHERE state='published' AND hidden=0"):
+            published.setdefault(row['size'], []).append(dict(row))
         for file in files:
             rel = relative(file["name"])
             path = save.joinpath(*rel.parts)
@@ -73,7 +71,7 @@ class Cleaner:
             paths.append(str(path))
             if not needs_archive(rel):
                 continue
-            matches = [j for j in published if Path(j['source']).exists() and (os.path.samefile(j['source'], path)
+            matches = [j for j in published.get(file['size'], ()) if Path(j['source']).exists() and (os.path.samefile(j['source'], path)
                        or (path.suffix.lower() in SUBTITLES and j.get('download_source') == str(path) and j.get('torrent_hash') == torrent['hash']))]
             if len(matches) != 1:
                 raise Failure('cleanup_not_archived')
@@ -136,7 +134,23 @@ class Cleaner:
             for path in plan["paths"]:
                 local_path(path, root)
             selected = {j['id'] for j in plan['jobs']}
-            owned = set(torrent_paths(current, files)) | {Path(j['source']) for j in plan['jobs']}
+            plan_sources = {Path(j['source']): j for j in plan['jobs']}
+            owned = set(torrent_paths(current, files)) | plan_sources.keys()
+            verified_extras = {}
+            for extra in series_sidecars(sources, plan['episodes']):
+                if extra in plan_sources:
+                    verified_extras[extra] = sources.media/'library/tv', plan_sources[extra]
+                    continue
+                job = self.db.execute("""SELECT * FROM jobs WHERE source=?
+                    AND state='published' AND hidden=0""", (str(extra),)).fetchone()
+                if not job or job['parent_id'] not in selected:
+                    raise Failure('cleanup_not_archived')
+                verify(self.uploader.remote.find(job['dest']), job)
+                if not matches_payload(extra, sources.media/'library/tv', job):
+                    raise Failure('cleanup_source_changed')
+                selected.add(job['id'])
+                owned.add(extra)
+                verified_extras[extra] = sources.media/'library/tv', job
             if owned & self.uploader.protected_paths(sources, torrents, {plan['hash']}, selected):
                 raise Failure('cleanup_shared_file')
             self.form(sources, "stop", {"hashes": plan["hash"]})
@@ -154,6 +168,7 @@ class Cleaner:
                     if not source.samefile(raw) and not matches_payload(source, sources.media/'library/tv', job):
                         raise Failure('cleanup_source_changed')
 
+            recheck_series_sidecars(sources, plan['episodes'], verified_extras)
             self.remove_episodes(sources, plan)
             latest = sources.qb.json("GET", "/api/v2/torrents/info", query={"hashes": plan["hash"]})
             if not latest or not self.same_download(plan, latest[0]) or latest[0].get('state') not in {'stoppedUP','pausedUP'}:

@@ -14,6 +14,7 @@ from configure import private_write
 
 VIDEO = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".webm"}
 SUBTITLES = {'.srt', '.ass', '.ssa'}
+CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
 
 
 def sample(path):

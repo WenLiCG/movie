@@ -1,6 +1,6 @@
 # 新 VPS 部署说明
 
-本文对应 2026-11-03 完整源码与单文件安装包。推荐使用定制页面完成云盘和下载器接线；原生手动配置及排查另见 [SETUP.md](SETUP.md)。
+推荐使用定制页面完成云盘和下载器接线；原生手动配置及排查另见 [SETUP.md](SETUP.md)。
 
 ## 1. 准备服务器和域名
 
@@ -14,7 +14,7 @@
 
 ## 2. 上传并安装
 
-在 Windows 解压交付包，进入包含 `cinema-all-in-one.sh` 的文件夹。PowerShell 执行，替换 SSH 地址：
+使用 GitHub 源码时，在仓库根目录运行 `python scripts/build_all_in_one.py`，进入生成的 `dist` 目录。若已有交付包，直接进入包含 `cinema-all-in-one.sh` 的文件夹。PowerShell 执行，替换 SSH 地址：
 
 ```powershell
 scp .\cinema-all-in-one.sh .\cinema-all-in-one.sh.sha256 root@你的VPS地址:/root/
@@ -37,7 +37,7 @@ bash cinema-all-in-one.sh
 
 ## 3. 打开管理页面，完成首次账号设置
 
-Windows 双击交付包里的 **Open.cmd**，输入 `root@你的VPS地址` 或实际 SSH 用户名和主机名。随后按 SSH 提示认证，并保持窗口开启。脚本不保存密码，默认 SSH 端口 22；自定义端口可在文件末尾的 ssh 命令增加 `-p 端口`。
+Windows 双击源码根目录或交付包里的 **Open.cmd**，输入 `root@你的VPS地址` 或实际 SSH 用户名和主机名。随后按 SSH 提示认证，并保持窗口开启。脚本不保存密码，默认 SSH 端口 22；自定义端口可在文件末尾的 ssh 命令增加 `-p 端口`。
 
 也可在本机终端手动建立隧道：
 

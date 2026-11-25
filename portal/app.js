@@ -5,7 +5,16 @@ let episodeGeneration = 0, episodeTimer = null, episodeDeadline = 0, episodeVers
 let selectedRelease = null, versionPreview = null, versionGeneration = 0;
 const versionLabels = {group:'发布组',resolution:'清晰度',codec:'编码',source:'片源类型',platform:'片源平台',audio:'音轨',subtitles:'字幕'};
 const versionInputs = {group:'version-group',resolution:'quality',codec:'version-codec',source:'version-source',platform:'version-platform',audio:'version-audio',subtitles:'version-subtitles'};
-const size = n => `${(n / 1024 ** 3).toFixed(1)} GB`;
+function size(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '大小未知';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
+  let unit = 0;
+  while (bytes >= 1024 && unit < units.length - 1) {
+    bytes /= 1024;
+    unit++;
+  }
+  return `${Number(bytes.toFixed(1))} ${units[unit]}`;
+}
 if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
   const ports = {'/': [8095, '/'], '/search/': [9696, '/search/'], '/sonarr/': [8989, '/sonarr/'], '/qb/': [8080, '/'], '/openlist/': [5244, '/openlist/']};
   document.querySelectorAll('a[href]').forEach(a => { const target = ports[a.getAttribute('href')]; if (target) a.href = `${location.protocol}//${location.hostname}:${target[0]}${target[1]}`; });
@@ -38,7 +47,29 @@ async function api(path, body) {
   return data;
 }
 async function action(button, work) { button.disabled = true; try { await work(); } catch (error) { notice(error.message, true); } finally { button.disabled = false; } }
-function signedIn(value) { if (value) { $('notice').hidden = true; loadRecommendations(); } if (!value) { recommendationGeneration++; searchGeneration++; csrf = ''; items = []; submittedReleases.clear(); $('results').replaceChildren(); $('result-count').textContent = ''; $('filters').hidden = true; $('search-warning').hidden = true; $('tv-download-note').hidden = true; $('search').classList.remove('has-results'); $('welcome').hidden = false; ['series-list', 'task-list', 'playback-list'].forEach(id => $(id).replaceChildren()); currentView = 'search'; document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== 'search'); document.querySelectorAll('[data-view]').forEach(el => el.dataset.view === 'search' ? el.setAttribute('aria-current', 'page') : el.removeAttribute('aria-current')); $('follow-dialog').close(); $('episodes-dialog').close(); $('task-dialog').close(); } $('login').hidden = value; $('workspace').hidden = !value; $('metrics').hidden = !value; $('logout').hidden = !value; $('watch').hidden=!value; document.querySelector('nav').hidden = !value; }
+function signedIn(value) {
+  $('notice').hidden = true;
+  if (value) {
+    loadRecommendations();
+  } else {
+    recommendationGeneration++;
+    csrf = '';
+    $('cloud-form').reset();
+    $('retention-form').reset();
+    delete $('days').dataset.edited;
+    $('query').value = '';
+    document.querySelector('[name=kind][value=movie]').checked = true;
+    $('recommendation-groups').replaceChildren();
+    resetSearch();
+    ['series-list', 'task-list', 'playback-list'].forEach(id => $(id).replaceChildren());
+    $('task-refresh-status').textContent = $('playback-refresh-status').textContent = '';
+    show('search');
+    ['follow-dialog', 'episodes-dialog', 'task-dialog'].forEach(id => $(id).close());
+  }
+  $('login').hidden = value;
+  for (const id of ['workspace', 'metrics', 'logout', 'watch']) $(id).hidden = !value;
+  document.querySelector('nav').hidden = !value;
+}
 let recommendationGeneration=0;
 async function loadRecommendations(){
   const generation=++recommendationGeneration;
@@ -76,7 +107,18 @@ document.querySelectorAll('[data-view]').forEach(el => el.onclick = () => show(e
 $('login-form').onsubmit = event => { event.preventDefault(); action(event.submitter, async () => { const result = await api('login', {username: $('username').value, password: $('password').value}); csrf = result.csrf; $('password').value = ''; signedIn(true); await status(); await metrics(); }); };
 $('logout').onclick = () => action($('logout'), async () => { await api('logout', {}); csrf = ''; signedIn(false); });
 let searchGeneration=0, searchWarnings=[];
-const submittedReleases=new Set();
+function resetSearch() {
+  searchGeneration++;
+  items = [];
+  $('results').replaceChildren();
+  $('result-count').textContent = '';
+  for (const id of ['filters', 'search-warning', 'tv-download-note']) $(id).hidden = true;
+  $('search').classList.remove('has-results');
+  $('welcome').hidden = $('recommendation-groups').childElementCount > 0;
+}
+$('query').addEventListener('input', () => {
+  if (!$('query').value.trim()) resetSearch();
+});
 async function search() {
   const generation=++searchGeneration;
   kind=document.querySelector('[name=kind]:checked').value;
@@ -158,6 +200,29 @@ function openFollow(item) {
   $('submit-version').disabled=false;$('submit-version').textContent='保存追更范围';$('follow-dialog').showModal();
 }
 $('follow-dialog').addEventListener('close',()=>{versionGeneration++;});
+function releaseDownload(item, tv) {
+  // Reuse the control while filters redraw this result, including during a submission.
+  if (item.downloadButton) return item.downloadButton;
+  const title = tv ? '下载此资源' : '下载';
+  const button = node('button', undefined, tv ? undefined : 'primary', 'download');
+  const label = node('span', title);
+  button.append(label);
+  button.onclick = async () => {
+    button.disabled = true;
+    label.textContent = '正在提交…';
+    try {
+      const result = tv ? await api('download-release', {release_id: item.id}) : await api('download', {id: item.id});
+      label.textContent = '已提交';
+      notice(result.message);
+    } catch (error) {
+      label.textContent = title;
+      button.disabled = false;
+      notice(error.message, true);
+    }
+  };
+  item.downloadButton = button;
+  return button;
+}
 function render() {
   const values=items.filter(i=>(!$('resolution').value||i.resolution===$('resolution').value)&&(!$('codec').value||i.codec===$('codec').value)&&(!$('site').value||i.site===$('site').value)&&(!$('free').checked||i.free));
   $('search-warning').textContent=searchWarnings.join(' '); $('search-warning').hidden=!searchWarnings.length;
@@ -169,11 +234,10 @@ function render() {
     if(item.subtitle)el.firstChild.insertBefore(node('p',item.subtitle,'row-description'),el.firstChild.lastChild);
     if(item.labels?.length){const labels=node('div',undefined,'release-labels');item.labels.forEach(v=>labels.append(node('span',v,'release-label')));el.firstChild.append(labels);}
     if(kind==='tv'){
-      const download=node('button',submittedReleases.has(item.id)?'已提交':'下载此资源',undefined,'download');if(submittedReleases.has(item.id))download.disabled=true;else download.onclick=()=>action(download,async()=>{const r=await api('download-release',{release_id:item.id});submittedReleases.add(item.id);download.textContent='已提交';download.onclick=null;notice(r.message);});
       const follow=node('button','按此版本追更','primary','follow');follow.onclick=()=>action(follow,()=>openResource(item));
-      const actions=node('div',undefined,'row-actions');actions.append(download,follow);el.append(actions);
+      const actions=node('div',undefined,'row-actions');actions.append(releaseDownload(item,true),follow);el.append(actions);
     }else{
-      const button=node('button',submittedReleases.has(item.id)?'已提交':'下载','primary','download');if(submittedReleases.has(item.id))button.disabled=true;else button.onclick=()=>action(button,async()=>{const r=await api('download',{id:item.id});submittedReleases.add(item.id);button.textContent='已提交';button.onclick=null;notice(r.message);});el.append(button);
+      el.append(releaseDownload(item,false));
     }
     $('results').append(el);
   });
@@ -445,7 +509,7 @@ async function tasks() {
     else if(detailKey)list.querySelector(`details[data-key="${CSS.escape(detailKey)}"] > summary`)?.focus({preventScroll:true});
     refresh.textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
   } catch(error) {
-    refresh.textContent='刷新失败，仍显示上次结果。';
+    refresh.textContent=list.childElementCount?'刷新失败，仍显示上次结果。':'暂时无法读取任务，请刷新重试。';
     throw error;
   } finally {tasksBusy=false;if(tasksAgain){tasksAgain=false;tasks().catch(()=>{});}}
 }
@@ -491,10 +555,41 @@ async function playbacks(){
       if(item.error_status)el.firstChild.append(node('p',`期间出现 HTTP ${item.error_status} 错误；请检查登录、云盘连接或更换云端播放版本。`,'warning-text'));
       $('playback-list').append(el);
     });
-  }finally{playbacksBusy=false;}
+    $('playback-refresh-status').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  } catch(error) {
+    $('playback-refresh-status').textContent=$('playback-list').childElementCount?'刷新失败，仍显示上次结果。':'暂时无法读取播放记录，请刷新重试。';
+    throw error;
+  } finally {playbacksBusy=false;}
 }
 $('refresh-playbacks').onclick=()=>action($('refresh-playbacks'),playbacks);
-async function metrics() { if (metricsBusy || !csrf) return; metricsBusy = true; try { const r = await api('metrics'); $('metrics-time').textContent = '刚刚更新 · 每 10 秒刷新'; for (const name of ['disk', 'memory']) { const v = r[name]; $(name + '-label').textContent = v ? `${size(v.used)} / ${size(v.total)}` : '暂不可用'; if (v) {$(name + '-meter').value = 100 * v.used / v.total; $(name+'-meter').classList.toggle('high',name==='disk'&&v.used/v.total>.85);} } $('cpu-label').textContent = r.cpu === null ? '采样中' : `${r.cpu.toFixed(1)}%`; if (r.cpu !== null) $('cpu-meter').value = r.cpu; } catch { $('metrics-time').textContent = '状态暂不可用，稍后自动重试'; } finally { metricsBusy = false; } }
+async function metrics() {
+  if (metricsBusy || !csrf) return;
+  metricsBusy = true;
+  try {
+    const r = await api('metrics');
+    $('metrics-time').textContent = '刚刚更新 · 每 10 秒刷新';
+    for (const name of ['disk', 'memory']) {
+      const value = r[name], meter = $(name + '-meter');
+      $(name + '-label').textContent = value ? `${size(value.used)} / ${size(value.total)}` : '暂不可用';
+      meter.hidden = !value;
+      if (value) {
+        meter.value = 100 * value.used / value.total;
+        meter.classList.toggle('high', name === 'disk' && meter.value > 85);
+      }
+    }
+    $('cpu-label').textContent = r.cpu === null ? '采样中' : `${r.cpu.toFixed(1)}%`;
+    $('cpu-meter').hidden = r.cpu === null;
+    if (r.cpu !== null) $('cpu-meter').value = r.cpu;
+  } catch {
+    $('metrics-time').textContent = '状态暂不可用，稍后自动重试';
+    for (const name of ['disk', 'memory', 'cpu']) {
+      $(name + '-label').textContent = '暂不可用';
+      $(name + '-meter').hidden = true;
+    }
+  } finally {
+    metricsBusy = false;
+  }
+}
 setInterval(() => { if (!document.hidden && csrf) { metrics(); if (currentView === 'tasks') tasks().catch(() => {}); if(currentView==='playbacks')playbacks().catch(()=>{}); } }, 10000);
 window.addEventListener('focus', () => { if (csrf && currentView === 'settings') status().catch(e => notice(e.message, true)); });
 (async () => {

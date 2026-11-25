@@ -229,6 +229,19 @@ class DeleteAllTests(unittest.TestCase):
         self.assertIn('/aliyun/Movies/Old',self.cloud.objects)
         self.assertIsNotNone(self.uploader.db.execute('SELECT id FROM jobs WHERE id=?',(other['id'],)).fetchone())
 
+    def test_tv_delete_preserves_imported_sidecar_added_after_confirmation(self):
+        self.submit('series:42')
+        video = Path(self.jobs[0]['source'])
+        sidecar = video.parent/'Subs/Alternate.S01E01.zh.srt'
+        sidecar.parent.mkdir()
+        sidecar.write_bytes(b'only local copy')
+        self.uploader.process_actions(self.sources)
+        action = next(a for a in task_actions(self.state/'data/uploads.sqlite3') if a['id']=='series:42')
+        self.assertEqual((action['state'], action['error']), ('blocked', 'cleanup_local_unverified'))
+        self.assertTrue(video.exists())
+        self.assertTrue(sidecar.exists())
+        self.assertFalse(any(call[0] == 'DELETE' for call in self.native.calls))
+
     def test_tv_project_clears_archive_evidence_but_preserves_other_versions(self):
         self.cloud.objects.update({'/aliyun/TV':{'is_dir':True},'/aliyun/TV/Show':{'is_dir':True}})
         job=self.jobs[0]

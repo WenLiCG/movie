@@ -5,11 +5,11 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'uploader'))
-from uploader import Uploader, candidate
+from uploader import Failure, Uploader, candidate
 from cleanup import Cleaner
 
 
@@ -242,18 +242,61 @@ class CleanupTests(unittest.TestCase):
         self.files[0]['name'] = 'episode.mkv'
         calls = []
         native = {'id': 42, 'seriesId': 5, 'tvdbId':100, 'path': str(library), 'size': job['size']}
-        self.sources.sonarr.json.side_effect = lambda method, path, *args, **kwargs: (calls.append((method, path)) or ([{'id': 10, 'episodeFileId': 42,'seasonNumber':1,'episodeNumber':1}] if path == '/api/v3/episode' else ([native] if path == '/api/v3/episodefile' else native)))
+        series = {'id': 5, 'tvdbId': 100, 'path': str(library.parent)}
+        self.sources.sonarr.json.side_effect = lambda method, path, *args, **kwargs: (calls.append((method, path)) or (series if path == '/api/v3/series/5' else [{'id': 10, 'episodeFileId': 42,'seasonNumber':1,'episodeNumber':1}] if path == '/api/v3/episode' else ([native] if path == '/api/v3/episodefile' else native)))
         def delete(method, path):
             calls.append((method, path))
             self.assertIn(('PUT', '/api/v3/episode/monitor'), calls)
             library.unlink()
             library_sub.unlink()
+            extra.unlink()
         self.sources.sonarr.request.side_effect = delete
+        # A sidecar added to the imported episode after planning is also removed by Sonarr.
+        plan = self.cleaner.plan(self.sources, self.torrent, 7, 1000 + 8*86400)
+        other = library.parent.parent/'Another Show/Subs/unknown.srt'
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b'unrelated series')
+        nested = library.parent/'Subs/Alternate.S01E01.zh.srt'
+        nested.parent.mkdir()
+        with patch('uploader.os.scandir', side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+        self.sources.qb.request.assert_not_called()
+        for extra in (library.with_suffix('.signs.mks'), library.with_suffix('.en.srt'), nested):
+            extra.write_bytes(b'local only')
+            with self.assertRaisesRegex(Failure, 'cleanup_not_archived'):
+                self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+            self.sources.sonarr.request.assert_not_called()
+            self.sources.qb.request.assert_not_called()
+            extra.unlink()
+        # A library-only subtitle with its own matching published record can be removed.
+        extra = library.with_suffix('.en.srt')
+        extra.write_bytes(b'subtitle')
+        extra_job = candidate('tv-sub:42:en', extra, '/aliyun/TV/Example/episode.en.srt', 8,
+                              parent_id=job['id'])
+        self.uploader.add(extra_job)
+        self.uploader.update(extra_job, state='published', sha1=hashlib.sha1(extra.read_bytes()).hexdigest())
+        extra.write_bytes(b'replaced')
+        with self.assertRaisesRegex(Failure, 'cleanup_source_changed'):
+            self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+        self.sources.sonarr.request.assert_not_called()
+        extra.write_bytes(b'subtitle')
+        find = self.remote.find.side_effect
+        def add_subtitle_while_checking(path):
+            if path == job['dest']:
+                nested.write_bytes(b'new during verification')
+            return find(path)
+        with patch.object(self.remote, 'find', side_effect=add_subtitle_while_checking):
+            with self.assertRaisesRegex(Failure, 'cleanup_local_unverified'):
+                self.cleaner.execute(self.sources, plan, 7, 1000 + 8*86400)
+        self.sources.sonarr.request.assert_not_called()
+        nested.unlink()
         self.run_cleanup()
         self.assertFalse(library.exists())
         self.assertFalse(download.exists())
         self.assertFalse(raw_sub.exists())
         self.assertFalse(library_sub.exists())
+        self.assertTrue(other.exists())
         from archive import archived_keys
         self.assertEqual(archived_keys(self.root/'uploads.sqlite3',100),{(1,1)})
         self.assertEqual(self.deleted, ['a' * 40])
