@@ -8,7 +8,7 @@
 
 本节汇总当前代码的实际状态，后面的历次记录保留当时的证据。两者不一致时以本节和代码为准。
 
-- **主线与回归。** `main` 已包含 PR #9–#12 和本轮复审。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建以及 portal/uploader 启动检查。它不部署任何环境。
+- **主线与回归。** `main` 已包含 PR #9–#13（[PR #13](https://github.com/WenLiCG/movie/pull/13) 为本轮复审）。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建以及 portal/uploader 启动检查。它不部署任何环境。
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
 - **尚未现场验收。** 全新 Debian VPS 重装、现场升级与回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放。
 
@@ -27,7 +27,7 @@
 
 行为提示：HSTS 一年（不含子域，回滚服务端无法立即撤销）；含未归档文件的种子不自动清理，磁盘可能增长；取消/删除的退避只保存在内存中，重启后清零。
 
-## 2026-11-25 第三轮复审（分支 `review/2026-11-25-round3`）
+## 2026-11-25 第三轮复审（PR #13，分支 `review/2026-11-25-round3`）
 
 **版本对比。** 本机没有以 GitHub 为 origin 的最新工作副本。`/workspace/cli-reviews/movie-20261122/repo` 是 2026-11-22 复审的克隆，停在 `0796cfd` 之上 5 个未推送提交，工作区干净；其内容已由 PR #9 合并进主线（逐文件对比只差 PR #9 额外的独立复核与修正）。`/workspace/movie/mv9`、`mv9b` 是 Draft PR #6/#7 的旧快照，`mv9b` 与 `origin/mv-9b-movie3` 的文件树相同，`mv9` 更旧，均无未提交修改。因此以 GitHub `main@b73a226`（PR #12 合并后，CI 通过）为基线，重新克隆到独立目录工作，没有改动上述旧目录。
 
