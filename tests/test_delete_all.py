@@ -232,7 +232,8 @@ class DeleteAllTests(unittest.TestCase):
     def test_tv_delete_preserves_imported_sidecar_added_after_confirmation(self):
         self.submit('series:42')
         video = Path(self.jobs[0]['source'])
-        sidecar = video.with_suffix('.zh.srt')
+        sidecar = video.parent/'Subs/Alternate.S01E01.zh.srt'
+        sidecar.parent.mkdir()
         sidecar.write_bytes(b'only local copy')
         self.uploader.process_actions(self.sources)
         action = next(a for a in task_actions(self.state/'data/uploads.sqlite3') if a['id']=='series:42')

@@ -6,8 +6,8 @@ import re
 import time
 from urllib.parse import urlencode
 
-from uploader import Failure, DOWNLOADS, local_path, relative, verify, log, matches_payload, torrent_paths
-from archive import CLEANUP_EXTRAS, VIDEO, SUBTITLES, disc, episode_sidecars, watch_lock, task_actions, torrent_instance
+from uploader import Failure, DOWNLOADS, local_path, relative, verify, log, matches_payload, torrent_paths, series_sidecars, recheck_series_sidecars
+from archive import CLEANUP_EXTRAS, VIDEO, SUBTITLES, disc, watch_lock, task_actions, torrent_instance
 
 
 def needs_archive(path):
@@ -134,24 +134,23 @@ class Cleaner:
             for path in plan["paths"]:
                 local_path(path, root)
             selected = {j['id'] for j in plan['jobs']}
-            plan_sources = {Path(j['source']) for j in plan['jobs']}
-            owned = set(torrent_paths(current, files)) | plan_sources
-            for episode in plan['episodes']:
-                parent = next((j for j in plan['jobs'] if j.get('identity') == 'tv:' + str(episode['file_id'])), None)
-                if parent is None:
-                    raise Failure('cleanup_episode_mapping_missing')
-                for extra in episode_sidecars(episode['path']):
-                    if extra in plan_sources:
-                        continue
-                    job = self.db.execute("""SELECT * FROM jobs WHERE source=? AND parent_id=?
-                        AND state='published' AND hidden=0""", (str(extra), parent['id'])).fetchone()
-                    if not job:
-                        raise Failure('cleanup_not_archived')
-                    verify(self.uploader.remote.find(job['dest']), job)
-                    if not matches_payload(extra, sources.media/'library/tv', job):
-                        raise Failure('cleanup_source_changed')
-                    selected.add(job['id'])
-                    owned.add(extra)
+            plan_sources = {Path(j['source']): j for j in plan['jobs']}
+            owned = set(torrent_paths(current, files)) | plan_sources.keys()
+            verified_extras = {}
+            for extra in series_sidecars(sources, plan['episodes']):
+                if extra in plan_sources:
+                    verified_extras[extra] = sources.media/'library/tv', plan_sources[extra]
+                    continue
+                job = self.db.execute("""SELECT * FROM jobs WHERE source=?
+                    AND state='published' AND hidden=0""", (str(extra),)).fetchone()
+                if not job or job['parent_id'] not in selected:
+                    raise Failure('cleanup_not_archived')
+                verify(self.uploader.remote.find(job['dest']), job)
+                if not matches_payload(extra, sources.media/'library/tv', job):
+                    raise Failure('cleanup_source_changed')
+                selected.add(job['id'])
+                owned.add(extra)
+                verified_extras[extra] = sources.media/'library/tv', job
             if owned & self.uploader.protected_paths(sources, torrents, {plan['hash']}, selected):
                 raise Failure('cleanup_shared_file')
             self.form(sources, "stop", {"hashes": plan["hash"]})
@@ -169,6 +168,7 @@ class Cleaner:
                     if not source.samefile(raw) and not matches_payload(source, sources.media/'library/tv', job):
                         raise Failure('cleanup_source_changed')
 
+            recheck_series_sidecars(sources, plan['episodes'], verified_extras)
             self.remove_episodes(sources, plan)
             latest = sources.qb.json("GET", "/api/v2/torrents/info", query={"hashes": plan["hash"]})
             if not latest or not self.same_download(plan, latest[0]) or latest[0].get('state') not in {'stoppedUP','pausedUP'}:

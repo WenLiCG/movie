@@ -5,7 +5,16 @@ let episodeGeneration = 0, episodeTimer = null, episodeDeadline = 0, episodeVers
 let selectedRelease = null, versionPreview = null, versionGeneration = 0;
 const versionLabels = {group:'发布组',resolution:'清晰度',codec:'编码',source:'片源类型',platform:'片源平台',audio:'音轨',subtitles:'字幕'};
 const versionInputs = {group:'version-group',resolution:'quality',codec:'version-codec',source:'version-source',platform:'version-platform',audio:'version-audio',subtitles:'version-subtitles'};
-const size = n => `${(n / 1024 ** 3).toFixed(1)} GB`;
+function size(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '大小未知';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
+  let unit = 0;
+  while (bytes >= 1024 && unit < units.length - 1) {
+    bytes /= 1024;
+    unit++;
+  }
+  return `${Number(bytes.toFixed(1))} ${units[unit]}`;
+}
 if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
   const ports = {'/': [8095, '/'], '/search/': [9696, '/search/'], '/sonarr/': [8989, '/sonarr/'], '/qb/': [8080, '/'], '/openlist/': [5244, '/openlist/']};
   document.querySelectorAll('a[href]').forEach(a => { const target = ports[a.getAttribute('href')]; if (target) a.href = `${location.protocol}//${location.hostname}:${target[0]}${target[1]}`; });

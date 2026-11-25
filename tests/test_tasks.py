@@ -51,7 +51,7 @@ class QB:
 
 class Sonarr:
     def __init__(self,root):
-        self.series=[{'id':9,'tvdbId':42,'title':'Show','monitored':True,'tags':[]},
+        self.series=[{'id':9,'tvdbId':42,'path':str(root/'library/tv/Show'),'title':'Show','monitored':True,'tags':[]},
                      {'id':10,'tvdbId':99,'title':'Show','monitored':False,'tags':[]}]
         self.queue=[{'downloadId':str(n)*40,'seriesId':9,'episodeId':100+n} for n in (1,2)]
         self.tags=[];self.calls=[];self.busy=[];self.files=[]

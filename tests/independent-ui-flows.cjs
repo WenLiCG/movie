@@ -69,6 +69,7 @@ const {chromium} = require('playwright');
     await page.locator('#search-form button').click();
     await page.locator('.result-row').waitFor();
     assert.equal(await page.locator('#results .result-row').count(), 1);
+    assert(await page.locator('.row-meta').getByText('1 KiB', {exact: true}).isVisible());
     let downloadRoute;
     await page.route('**/discover/api/download-release', route => { downloadRoute = route; });
     await page.getByRole('button', {name: '下载此资源', exact: true}).click();
