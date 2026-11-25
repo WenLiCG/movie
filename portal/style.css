@@ -252,6 +252,7 @@ dialog p{font-size:14px}
 .loading-state{display:flex;align-items:center;gap:12px;padding:20px 0;color:var(--muted)}
 .spinner{width:20px;height:20px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;flex-shrink:0;animation:cinema-spin .8s linear infinite}
 @keyframes cinema-spin{to{transform:rotate(360deg)}}
+.inline-spinner{display:inline-block;width:14px;height:14px;margin-right:8px;vertical-align:-2px}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 [hidden]{display:none!important}
 @media(max-width:1150px){

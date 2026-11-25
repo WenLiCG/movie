@@ -105,6 +105,20 @@ class WiringTests(unittest.TestCase):
             integration.ensure_categories(api)
         self.assertEqual(len(api.calls), 1)
 
+    def test_unreachable_service_is_named_without_its_address(self):
+        import urllib.error
+        for base, prefix in [("http://sonarr:8989/sonarr", "本地应用 Sonarr 暂时"), ("http://127.0.0.1:9696/search", "本地应用 Prowlarr 暂时"),
+                             ("http://qbittorrent:8080", "本地应用 qBittorrent 暂时"), ("http://203.0.113.9:1", "本地应用暂时")]:
+            client = integration.Client(base)
+            client.opener = SimpleNamespace(open=lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("refused")))
+            with self.assertRaises(ValueError) as caught:
+                client.json("GET", "/api/v3/series?apikey=secret")
+            message = str(caught.exception)
+            self.assertTrue(message.startswith(prefix + "无法连接"), message)
+            self.assertNotIn("setup", message)  # Also shown in the portal, where "retry setup" misleads.
+            for private in ("http", "secret", "8989", "203.0.113.9"):
+                self.assertNotIn(private, message)
+
     def test_api_key_read_never_echoes_malformed_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.xml"

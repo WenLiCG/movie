@@ -20,11 +20,26 @@ class APIError(ValueError):
         self.status = status
 
 
+SERVICE_HOSTS = {"emby": "Emby", "openlist": "OpenList", "qbittorrent": "qBittorrent", "sonarr": "Sonarr", "prowlarr": "Prowlarr"}
+SERVICE_PORTS = {8096: "Emby", 5244: "OpenList", 8080: "qBittorrent", 8989: "Sonarr", 9696: "Prowlarr"}
+
+
+def service_name(base):
+    """Name the bundled app behind a base URL so outage messages say which one to check."""
+    parts = urllib.parse.urlsplit(base)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return SERVICE_HOSTS.get(parts.hostname or "") or SERVICE_PORTS.get(port) or ""
+
+
 class Client:
     timeout = 90
     def __init__(self, base, key=None):
         self.base = base.rstrip("/")
         self.key = key
+        self.service = service_name(self.base)
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), NoRedirect(),
@@ -52,7 +67,9 @@ class Client:
             error.close()
             raise APIError(error.code, f"{path.split('?')[0]} 返回 HTTP {error.code}；请检查应用设置和登录。") from None
         except (urllib.error.URLError, TimeoutError, OSError):
-            raise ValueError("本地应用尚不可用；请检查 docker compose ps，稍后重试 setup。") from None
+            # Shared by the portal and `install.sh setup`; name the app, never the URL or credentials.
+            name = f" {self.service} " if self.service else ""
+            raise ValueError(f"本地应用{name}暂时无法连接或响应超时；请稍后重试，必要时用 docker compose ps 检查服务状态。") from None
 
     def json(self, method, path, body=None, form=None):
         raw = self.request(method, path, body, form)

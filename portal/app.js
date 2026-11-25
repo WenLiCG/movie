@@ -112,7 +112,7 @@ async function loadRecommendations(){
     $('welcome').hidden=values.length>0||$('search').classList.contains('has-results');
   }catch(error){if(generation===recommendationGeneration)$('recommendation-status').textContent='站点近期列表暂时不可用；仍可直接搜索。';}
 }
-const metaTones = {'免费':'success','追更中':'success','已发布':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','归档中':'info','同步集数中':'info','已暂停':'warning','下载已暂停':'warning','操作待核对':'warning','等待归档复核':'warning','下载异常':'danger','归档失败':'danger','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
+const metaTones = {'免费':'success','追更中':'success','已发布':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','归档中':'info','同步集数中':'info','等待导入':'info','等待上传':'info','已暂停':'warning','下载已暂停':'warning','操作待核对':'warning','等待归档复核':'warning','待选版本':'warning','未发现可归档视频':'warning','下载异常':'danger','归档失败':'danger','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
 function row(title, meta, cls = 'result-row') {
   const el = node('article', undefined, cls), body = node('div', undefined, 'row-body');
   body.append(node('h3', title, 'row-title', cls === 'series-row' ? 'tv' : cls === 'task-row' ? 'download' : cls === 'playback-row' ? 'play' : cls === 'upload-row' ? undefined : kind === 'tv' ? 'tv' : 'film'));
@@ -149,7 +149,8 @@ async function search() {
   const generation=++searchGeneration;
   kind=document.querySelector('[name=kind]:checked').value;
   const requestedKind=kind, query=$('query').value;
-  $('result-count').textContent='正在搜索，请稍候…'; $('results').replaceChildren();
+  const spinner=node('span',undefined,'spinner inline-spinner');spinner.setAttribute('aria-hidden','true');
+  $('result-count').replaceChildren(spinner,'正在搜索各站点，可能需要几十秒…'); $('results').replaceChildren();
   $('filters').hidden=true; $('search-warning').hidden=true; $('welcome').hidden=true; $('search').classList.add('has-results');
   try {
     const result=await api('search?'+new URLSearchParams({q:query,kind:requestedKind}));
@@ -164,7 +165,7 @@ async function search() {
   } catch(e) { if(generation===searchGeneration){$('result-count').textContent='搜索未完成，请检查站点连接后重试。';throw e;} }
 }
 $('search-form').onsubmit=event=>{event.preventDefault();action(event.submitter||$('search-form').querySelector('button'),search);};
-document.querySelectorAll('[name=kind]').forEach(input=>input.onchange=()=>{if($('query').value.trim())search().catch(e=>notice(e.message,true));});
+document.querySelectorAll('[name=kind]').forEach(input=>input.onchange=()=>{if($('query').value.trim())action($('search-form').querySelector('button'),search);});
 function versionSummary(fields) { return Object.entries(fields || {}).filter(([,v])=>v).map(([k,v])=>`${versionLabels[k]}：${v}`).join(' · '); }
 function currentVersionFields() {
   return Object.fromEntries(Object.entries(versionInputs).map(([key,id])=>[key,$(id).value.trim()]));
@@ -369,6 +370,8 @@ $('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter|
   if(selectedRelease)Object.assign(body,{release_id:selectedRelease.id,fields:Object.fromEntries(Object.entries(versionInputs).map(([key,input])=>[key,$(input).value.trim()])),confirmed:$('version-confirm').checked,replace:$('replace-version').checked});
   const result=await api('follow',body);
   $('follow-dialog').close();notice(result.message||'版本规则已保存。');
+  // The list only auto-polls while episodes sync, so show the new rule and monitoring state now.
+  if(currentView==='series')series().catch(e=>notice(e.message,true));
   if(mode==='manual')await openEpisodes({id,title});
 });};
 let statusBusy=false, qbCredentialsNeeded=null;
@@ -403,19 +406,24 @@ async function series(){
     seriesPreparing=r.items.some(s=>s.preparing);
     if(!r.items.length)$('series-list').append(node('p','还没有追剧。搜索剧集／综艺，选择资源版本后开始追更。','empty','tv'));
     r.items.forEach(s=>{
-      const el=row(s.title,[s.original_title,s.year,`已归档 ${s.archived||0} 集`,!s.version?.valid?'规则异常':s.preparing?'同步集数中':s.monitored?'追更中':'已暂停',s.nextAiring?'下次更新 '+new Date(s.nextAiring).toLocaleDateString():'暂无下次播出时间'],'series-row');
-      el.firstChild.append(node('p',s.version?.valid?'版本条件：'+versionSummary(s.version.fields):'尚无有效版本规则；请先选择资源版本。',s.version?.valid?'row-description':'warning-text'));
+      // A series without a rule needs one chosen; a rule Sonarr no longer matches needs repair.
+      const valid=s.version?.valid===true, unchosen=!valid&&s.version?.reason==='missing';
+      const el=row(s.title,[s.original_title,s.year,`已归档 ${s.archived||0} 集`,!valid?(unchosen?'待选版本':'规则异常'):s.preparing?'同步集数中':s.monitored?'追更中':'已暂停',s.nextAiring?'下次更新 '+new Date(s.nextAiring).toLocaleDateString():'暂无下次播出时间'],'series-row');
+      el.firstChild.append(node('p',valid?'版本条件：'+versionSummary(s.version.fields):unchosen?'尚未选择资源版本。选好版本后才能选集下载或恢复追更。':'Sonarr 中的版本规则或专属标签已变更，请重新选择版本；修复前不会发起新的下载。',valid?'row-description':'warning-text'));
       const more=node('details',undefined,'more-actions'), summary=node('summary','更多'), menu=node('div'); more.append(summary,menu);
+      // Pick the side before opening: 'toggle' fires asynchronously, after the menu could paint off-screen.
+      summary.addEventListener('click',()=>{if(!more.open)menu.classList.toggle('align-left',more.getBoundingClientRect().right<210);});
       more.addEventListener('toggle',()=>{
         if(!more.open)return;
         document.querySelectorAll('.more-actions[open]').forEach(other=>{if(other!==more)other.open=false;});
-        menu.classList.toggle('align-left',more.getBoundingClientRect().right<210);
       });
-      const change=node('button',s.version?.valid?'更换版本':'选择版本');change.onclick=()=>{more.open=false;chooseVersionForSeries(s);};
-      const select=node('button','选集下载',undefined,'download');select.disabled=!s.version?.valid;select.onclick=()=>action(select,()=>openEpisodes({id:String(s.tvdbId),title:s.title}));
-      const scope=node('button','设置追更范围');scope.disabled=!s.version?.valid;scope.onclick=()=>{more.open=false;openFollow(s);};
-      const actions=node('div',undefined,'row-actions');actions.append(select);
-      menu.append(scope,change);actions.append(more);
+      const change=valid?node('button','更换版本'):node('button','选择版本','primary','follow');change.onclick=()=>{more.open=false;chooseVersionForSeries(s);};
+      const select=node('button','选集下载',undefined,'download');select.onclick=()=>action(select,()=>openEpisodes({id:String(s.tvdbId),title:s.title}));
+      const scope=node('button','设置追更范围');scope.onclick=()=>{more.open=false;openFollow(s);};
+      const actions=node('div',undefined,'row-actions');
+      // Without a valid rule, episode download and scope are unavailable, so the fix is the visible action.
+      if(valid){actions.append(select);menu.append(scope,change);}else actions.append(change);
+      actions.append(more);
       const pause=node('button',s.monitored?'暂停追更':'恢复追更',undefined,s.monitored?'pause':'play');pause.disabled=!s.monitored&&(!s.version?.valid||s.preparing);pause.onclick=()=>action(pause,async()=>{notice((await api('monitor',{id:s.id,monitored:!s.monitored})).message);await series();});actions.prepend(pause);
       const remove=node('button','删除追剧','quiet');remove.onclick=()=>{more.open=false;if(confirm(`删除《${s.title}》的追剧？停止自动追更并从列表移除；已有文件和正在下载的任务保留。`))return action(remove,async()=>{const r=await api('remove-series',{id:s.id});await series();notice(r.message);$('refresh-series').focus();});};menu.append(remove);
       el.append(actions);$('series-list').append(el);
@@ -471,7 +479,10 @@ function taskState(group, unfinished) {
     return unfinished.every(r => r.state === first) ? (qbStates[first] || '下载中') : '下载中';
   }
   if (uploads.some(u => !['published','cancelled'].includes(u.state))) return '归档中';
-  return uploads.some(u => u.state === 'published') ? '部分已发布' : '等待导入';
+  if (uploads.some(u => u.state === 'published')) return '部分已发布';
+  // Sonarr must import tracked episodes first; other downloads go straight to the uploader.
+  if (group.waiting_video) return group.tvdb_id ? '等待导入' : '等待上传';
+  return '未发现可归档视频';
 }
 function taskButtons(target, status, disabled=false) {
   const box=node('div',undefined,'task-actions');
@@ -600,7 +611,7 @@ async function tasks() {
         t.files.filter(f=>f.priority).forEach(f=>{
           const job=t.uploads.find(j=>j.id===f.job_id);
           if(job){resource.append(uploadRow(job,!multiple&&!g.tvdb_id,!!g.tvdb_id));linked.add(job.id);}
-          else {const fileRow=row(g.tvdb_id?episodeTitle(f.name):f.name,[t.progress<1?(qbStates[t.state]||'下载中'):'等待导入或上传',`${(f.progress*100).toFixed(1)}%`,size(f.size)],'upload-row');fileRow.firstChild.firstChild.title=f.name;fileRow.firstChild.firstChild.hidden=!multiple&&!g.tvdb_id;resource.append(fileRow);}
+          else if(multiple||g.tvdb_id){const fileRow=row(g.tvdb_id?episodeTitle(f.name):f.name,[t.progress<1?(qbStates[t.state]||'下载中'):'等待导入或上传',`${(f.progress*100).toFixed(1)}%`,size(f.size)],'upload-row');fileRow.firstChild.firstChild.title=f.name;resource.append(fileRow);}
         });
         t.uploads.filter(j=>!linked.has(j.id)).forEach(j=>{resource.append(uploadRow(j,!multiple&&!g.tvdb_id,!!g.tvdb_id));linked.add(j.id);});
         if(g.tvdb_id){

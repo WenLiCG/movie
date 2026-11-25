@@ -199,7 +199,10 @@ class App:
         except APIError as error:
             if error.status == 401:
                 raise ValueError("登录失败：Emby 用户名或密码不正确。") from None
-            raise
+            raise ValueError(f"登录失败：Emby 暂时没有正常响应（HTTP {error.status}），请确认 Emby 正在运行后重试。") from None
+        except ValueError:
+            # Unreachable, timed out or non-JSON: an outage, not a credential problem.
+            raise ValueError("登录失败：暂时无法连接 Emby，请确认 Emby 正在运行后重试。") from None
         if not isinstance(result, dict):
             raise ValueError("登录失败：Emby 未返回有效会话，请稍后重试。")
         if not result.get("AccessToken") or result.get("User", {}).get("Policy", {}).get("IsAdministrator") is not True:
@@ -285,7 +288,7 @@ class App:
     @staticmethod
     def ol(client, method, path, value=None):
         response = client.json(method, path, value)
-        if response.get("code") != 200:
+        if not isinstance(response, dict) or response.get("code") != 200:
             raise ValueError("云盘操作失败，请检查授权或打开 OpenList 查看挂载状态。")
         return response.get("data")
 
@@ -1416,7 +1419,8 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             versions[v['tvdbId']] = {'valid': True, 'fields': app.require_version(sonarr, v, profiles, records)['fields']}
                         except ValueError:
-                            versions[v['tvdbId']] = {'valid': False}
+                            # 'missing': no rule chosen yet; 'invalid': the saved rule no longer matches Sonarr.
+                            versions[v['tvdbId']] = {'valid': False, 'reason': 'invalid' if str(v['tvdbId']) in records else 'missing'}
                     counts = archived_counts(app.data/'uploads.sqlite3', [v.get('tvdbId') for v in values])
                     pending = read_requests(app.data)
                     return self.reply({"items": [{**{k: v.get(k) for k in ("id", "tvdbId", "year", "monitored", "nextAiring", "statistics", "seasons")}, **localized[v['tvdbId']], 'version': versions[v['tvdbId']], 'archived': counts.get(v['tvdbId'], 0), 'preparing': str(v['tvdbId']) in pending} for v in values]})
@@ -1480,6 +1484,13 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(error, ValueError) and not isinstance(error, APIError) and str(error).startswith(USER_ERROR_PREFIXES):
                 message = str(error)
             self.reply({"error": message}, 400)
+        except Exception as error:  # noqa: BLE001 - last resort for unexpected upstream shapes
+            # Without this the worker thread dies and the browser reports a network failure.
+            # Log only the exception class and API path; messages and queries can hold private data.
+            endpoint = self.path.split("?", 1)[0]
+            endpoint = endpoint if re.fullmatch(r"/discover/api/[a-z-]{1,40}", endpoint) else "-"
+            print(f"portal {self.command} {endpoint} {type(error).__name__}", file=sys.stderr, flush=True)
+            self.reply({"error": "服务处理请求时出错，请稍后重试；如反复出现，请查看 portal 日志。"}, 500)
 
 
 if __name__ == "__main__":
