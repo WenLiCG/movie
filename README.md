@@ -28,18 +28,18 @@ Debian 12 测试 VPS 曾完成 PT 搜索接线和真实影片云端发布。本�
 ```bash
 cd /root
 sha256sum -c cinema-all-in-one.sh.sha256
-bash cinema-all-in-one.sh
+sudo bash cinema-all-in-one.sh
 ```
 
 3. Windows 双击 `Open.cmd`，输入新的 `用户@VPS地址`；保持隧道窗口开启，完成 Emby、OpenList、Prowlarr、Sonarr 和 qB 首次账号设置。
-4. 打开 `http://127.0.0.1:8097/discover/`，使用 Emby 管理员登录，首次登录自动创建电影、电视剧媒体库并应用中文刮削默认设置；填写 Open Refresh Token，自动连接云盘和下载器，再通过“配置 Indexer”添加自己的站点。首次填写 OpenList 和 qB 各自的账号；无需与 Emby 一致，已连接后沿用服务凭据。
+4. 打开 `http://127.0.0.1:8097/discover/`，使用 Emby 管理员登录，首次登录自动创建电影、电视剧媒体库并应用中文刮削默认设置；填写 Open Refresh Token，自动连接云盘和下载器，再通过“配置 Indexer”添加自己的站点。首次填写 OpenList 和 qB 各自的账号；无需与 Emby 一致，已连接后沿用服务凭据，可在设置页随时手动刷新全部服务检查状态。
 5. 在 VPS 构建播放入口并开启 HTTPS：
 
 ```bash
 cd /opt/cinema
-docker compose --profile connected up -d --build relay uploader
-bash install.sh public
-bash install.sh status
+sudo docker compose --profile connected up -d --build relay uploader
+sudo bash install.sh public
+sudo bash install.sh status
 ```
 
 默认源码和运行目录为 `/opt/cinema`。安装器不覆盖旧配置、不卸载冲突软件、不调整防火墙；依赖和容器镜像需要联网下载。Debian 12 amd64 已实测，其余受支持版本/架构未做真机安装验收。
@@ -81,6 +81,8 @@ sudo bash install.sh stop
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
 node --test tests/*.test.cjs
+NODE_PATH=<playwright目录> node tests/check_ui.cjs
+NODE_PATH=<playwright目录> node tests/independent-ui-flows.cjs
 for script in install.sh scripts/*.sh; do bash -n "$script"; done
 python3 scripts/build_all_in_one.py
 ```

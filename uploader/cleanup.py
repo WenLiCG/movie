@@ -227,7 +227,7 @@ class Cleaner:
         def retention():
             value = days
             if self.settings_path is not None and self.settings_path.exists():
-                value = json.loads(self.settings_path.read_text()).get('retention_days', days)
+                value = json.loads(self.settings_path.read_text(encoding='utf-8')).get('retention_days', days)
             if type(value) is not int or not 0 <= value <= 3650:
                 raise Failure('invalid_retention_days')
             return value

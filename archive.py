@@ -151,9 +151,24 @@ def archived_keys(dbpath, tvdb):
             JOIN jobs j ON j.id=a.job_id WHERE a.tvdb_id=? AND j.state='published' ''', (tvdb,)))
 
 
+def archived_counts(dbpath, tvdb_ids):
+    ids = [tvdb for tvdb in tvdb_ids if type(tvdb) is int]
+    path = Path(dbpath)
+    if not ids or not path.exists():
+        return {}
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='archived'").fetchone():
+            return {}
+        marks = ','.join('?' for _ in ids)
+        rows = db.execute(f'''SELECT a.tvdb_id, COUNT(DISTINCT a.season || ':' || a.episode)
+            FROM archived a JOIN jobs j ON j.id=a.job_id
+            WHERE a.tvdb_id IN ({marks}) AND j.state='published' GROUP BY a.tvdb_id''', ids)
+        return dict(rows)
+
+
 def read_requests(data):
     path = Path(data) / 'watch-requests.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
 def save_requests(data, values):
