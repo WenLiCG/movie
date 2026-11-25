@@ -180,7 +180,7 @@ def check_public(root):
     if (emby.findtext("IsStartupWizardCompleted") or "").lower() != "true":
         raise ValueError("请先完成 Emby 首次设置及管理员密码配置。")
     print("为确认隐藏账号也没有免密入口，临时登录 Emby 检查用户；不会保存本次密码和会话。")
-    username = input("Emby 管理员用户名 [jsjcjsjc]: ").strip() or "jsjcjsjc"
+    username = input("Emby 管理员用户名 [cinema-admin]: ").strip() or "cinema-admin"
     verify_emby_accounts(username, getpass.getpass("Emby 管理员密码（不回显）: "))
     print("初始化和搜索认证检查通过。公网开启不代表真实播放验收通过。")
 

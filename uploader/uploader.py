@@ -565,7 +565,7 @@ class Uploader:
         path = Path('/runtime/instance-id')
         if not path.exists():
             return None
-        value = path.read_text().strip()
+        value = path.read_text(encoding='utf-8').strip()
         if not re.fullmatch(r'[a-fA-F0-9-]{36}', value):
             raise Failure('invalid_instance_marker')
         return value
@@ -1172,7 +1172,7 @@ def reconcile_watches(sources, state, config_dir):
         requests = read_requests(state)
         if not requests:
             return
-        records = json.loads((Path(config_dir) / 'versions.json').read_text())
+        records = json.loads((Path(config_dir) / 'versions.json').read_text(encoding='utf-8'))
         series = sources.sonarr.json('GET', '/api/v3/series')
         profiles = sources.sonarr.json('GET', '/api/v3/releaseprofile')
         for tvdb, request in list(requests.items()):
@@ -1198,7 +1198,7 @@ def disk_guard(sources, state, now=None):
 def _disk_guard(sources, state, now=None):
     now = time.time() if now is None else now
     path = Path(state) / 'disk-paused.json'
-    paused = json.loads(path.read_text()) if path.exists() else {}
+    paused = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
     torrents = sources.qb.json('GET', '/api/v2/torrents/info')
     managed = [t for t in torrents if t.get('category') in DOWNLOADS and t.get('progress',0)<1
                and not t.get('state','').lower().startswith(('checking','moving','error','missing'))]
@@ -1207,8 +1207,9 @@ def _disk_guard(sources, state, now=None):
     backlog = 0
     dbpath = Path(state) / 'uploads.sqlite3'
     if dbpath.exists():
-        with sqlite3.connect(dbpath.resolve().as_uri()+'?mode=ro',uri=True) as db:
-            backlog = db.execute("SELECT COALESCE(max(size),0) FROM jobs WHERE state IN ('pending','uploading')").fetchone()[0]
+        with contextlib.closing(sqlite3.connect(dbpath.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+                backlog = db.execute("SELECT COALESCE(max(size),0) FROM jobs WHERE state IN ('pending','uploading')").fetchone()[0]
     disk = shutil.disk_usage(sources.media)
     reserve = max(5*1024**3, int(disk.total*.08))
     def required(values):
@@ -1247,7 +1248,7 @@ def monitor(uploader, config_dir, stop):
         status = {'at':time.time(), 'activity':uploader.activity, 'discovery_issue':uploader.discovery_issue,
                   'disk_paused':0, 'error':None}
         try:
-            config = json.loads(config_path.read_text())
+            config = json.loads(config_path.read_text(encoding='utf-8'))
             if sources is None or config != active_config:
                 sources = Sources(config, uploader.media)
                 sources.qb.timeout = 15
@@ -1272,7 +1273,7 @@ def main():
         while not Path("/config/config.json").is_file():
             log("uploader", "waiting_for_setup")
             time.sleep(30)
-        config = json.loads(Path("/config/config.json").read_text())
+        config = json.loads(Path("/config/config.json").read_text(encoding="utf-8"))
         for key in ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key"):
             if not isinstance(config.get(key), str) or not config[key] or any(ord(c) < 32 for c in config[key]):
                 raise Failure("invalid_configuration")
@@ -1286,7 +1287,7 @@ def main():
         active_config, next_discovery = None, 0
         try:
             while True:
-                config = json.loads(Path("/config/config.json").read_text())
+                config = json.loads(Path("/config/config.json").read_text(encoding="utf-8"))
                 if config != active_config:
                     uploader.remote = OpenList(config["openlist_url"], config["openlist_token"])
                     sources = Sources(config, media)

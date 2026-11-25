@@ -25,12 +25,18 @@ from integration import APIError, Client, connect_services, read_api_key, emby_d
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target
+from archive import archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
         "prowlarr": "http://prowlarr:9696/search"}
 STATIC = Path(__file__).parent
+USER_ERROR_PREFIXES = (
+    "请", "已", "搜索", "结果", "下载器", "云盘", "VPS", "/aliyun", "Sonarr", "Emby",
+    "OpenList", "qB", "Prowlarr", "prowlarr", "sonarr", "登录", "会话", "追更",
+    "季数", "所选集数", "播放记录", "影院", "同名", "重复的", "当前应用", "应用设置",
+    "本地应用", "需要", "无法",
+)
 
 
 class TaskScopeChanged(ValueError):
@@ -124,9 +130,9 @@ class Metrics:
         result = {"disk": {"total": disk.total, "used": disk.used, "free": disk.free}}
         try:
             mem = {line.split(":")[0]: int(line.split()[1]) * 1024
-                   for line in (proc / "meminfo").read_text().splitlines() if len(line.split()) >= 2}
+                   for line in (proc / "meminfo").read_text(encoding="utf-8").splitlines() if len(line.split()) >= 2}
             result["memory"] = {"total": mem["MemTotal"], "used": mem["MemTotal"] - mem["MemAvailable"]}
-            values = list(map(int, (proc / "stat").read_text().splitlines()[0].split()[1:]))
+            values = list(map(int, (proc / "stat").read_text(encoding="utf-8").splitlines()[0].split()[1:]))
             # guest/guest_nice are already included in user/nice.
             current = (sum(values[:8]), values[3] + values[4])
             with self.lock:
@@ -157,11 +163,11 @@ class App:
 
     def config(self):
         path = self.state / "config.json"
-        return json.loads(path.read_text()) if path.exists() else {}
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
     def settings(self):
         path = self.state / "settings.json"
-        return json.loads(path.read_text()) if path.exists() else {"retention_days": 7}
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"retention_days": 7}
 
     def login(self, body, peer="local"):
         username = text(body.get("username"))
@@ -291,8 +297,15 @@ class App:
             if not password:
                 raise ValueError('请填写 OpenList 管理员账号和密码，仅用于本次连接。')
             text(password,1024)
-            login = self.ol(client, 'POST', '/api/auth/login', {'username':username,'password':password})
-            client.opener.addheaders = [("Authorization", login["token"])]
+            try:
+                response = client.json('POST', '/api/auth/login', {'username':username,'password':password})
+            except APIError as error:
+                if error.status in {400, 401, 403}:
+                    raise ValueError('OpenList 管理员登录失败，请检查 OpenList 用户名和密码。') from None
+                raise
+            if not isinstance(response, dict) or response.get('code') != 200 or not (response.get('data') or {}).get('token'):
+                raise ValueError('OpenList 管理员登录失败，请检查 OpenList 用户名和密码。')
+            client.opener.addheaders = [("Authorization", response["data"]["token"])]
             token = self.ol(client, "GET", "/api/admin/setting/get?key=token")["value"]
         client.opener.addheaders = [("Authorization", token)]
         return client, token
@@ -368,7 +381,8 @@ class App:
             client.opener.addheaders = [('X-Emby-Token', session['token'])]
             emby_defaults(client)
             private_write(marker, '1\n')
-        self.localized.clear()
+        with self.lock:
+            self.localized.clear()
         return {'message': '已应用中文刮削推荐设置，并提交补充缺失资料和图片；已有手工修改及海报保留。'}
 
     def localize(self, session, values, query=None):
@@ -389,32 +403,47 @@ class App:
             except (ValueError, OSError):
                 return None
         # Reuse Emby's installed providers; IDs, not translated titles, determine the series match.
-        matches = []
-        missing = [v for v in values if self.localized.get(v['tvdbId'], {}).get('expires', 0) < time.time()]
+        now = time.time()
+        with self.lock:
+            snapshot = dict(self.localized)
+        missing = [v for v in values if snapshot.get(v['tvdbId'], {}).get('expires', 0) < now]
+        matches, failed = [], set()
         if query and missing:
             found = fetch(query)
             matches.extend(found or [])
-        if not query:
+        if not query and missing:
             with ThreadPoolExecutor(max_workers=4) as pool:
-                for result in pool.map(lambda v: fetch(v['title'], v), missing):
-                    matches.extend(result or [])
-        for value in values:
+                for value, fetched in zip(missing, pool.map(lambda v: fetch(v['title'], v), missing)):
+                    if fetched is None:
+                        failed.add(value['tvdbId'])
+                    else:
+                        matches.extend(fetched)
+        updates = {}
+        for value in missing:
             for match in matches:
                 ids = match.get('ProviderIds') or {}
                 same = str(ids.get('Tvdb', '')) == str(value['tvdbId']) or (
                     value.get('tmdbId') and str(ids.get('Tmdb', '')) == str(value['tmdbId']))
                 if same and chinese(match.get('Name')):
-                    self.localized[value['tvdbId']] = {'title': match['Name'], 'overview': match.get('Overview'), 'expires': time.time() + 86400}
+                    updates[value['tvdbId']] = {'title': match['Name'], 'overview': match.get('Overview'), 'expires': now + 86400}
                     break
-        result = {}
-        if not query:
+        if updates or not query and missing:
             with self.lock:
-                for value in missing:
-                    key = value['tvdbId']
-                    if self.localized.get(key, {}).get('expires', 0) < time.time():
-                        self.localized[key] = {'expires': time.time() + 300}
+                if len(self.localized) > 1024:
+                    self.localized = {k: v for k, v in self.localized.items() if v.get('expires', 0) > now}
+                    while len(self.localized) > 1024:
+                        self.localized.pop(next(iter(self.localized)))
+                self.localized.update(updates)
+                if not query:
+                    for value in missing:
+                        key = value['tvdbId']
+                        if key not in updates and self.localized.get(key, {}).get('expires', 0) < now:
+                            # Confirmed lack of Chinese metadata is cached 24h; transient Emby failures retry in 5m.
+                            self.localized[key] = {'expires': now + (300 if key in failed else 86400)}
+                snapshot = dict(self.localized)
+        result = {}
         for value in values:
-            cached = self.localized.get(value['tvdbId'], {})
+            cached = snapshot.get(value['tvdbId'], {})
             aliases = value.get('alternateTitles') or []
             title = cached.get('title') or next((a['title'] for a in aliases if chinese(a.get('title'))), value['title'])
             result[value['tvdbId']] = {'title': title, 'original_title': value['title'] if title != value['title'] else '',
@@ -525,6 +554,8 @@ class App:
         return {"items": sorted(items, key=lambda i: i['size']), 'warnings': warnings}
 
     def stored_release(self, session, rid, kind=None):
+        if not isinstance(rid, str) or not rid:
+            raise ValueError('请选择有效的资源条目。')
         stored = session.get('results', {}).get(rid)
         if not stored or stored[0] < time.time():
             raise ValueError('结果已过期，请重新搜索。')
@@ -565,10 +596,10 @@ class App:
 
     def version_records(self):
         path = self.state / 'versions.json'
-        return json.loads(path.read_text()) if path.exists() else {}
+        return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
-    def require_version(self, sonarr, series, profiles=None):
-        record = self.version_records().get(str(series['tvdbId']))
+    def require_version(self, sonarr, series, profiles=None, records=None):
+        record = (self.version_records() if records is None else records).get(str(series['tvdbId']))
         if not record:
             raise ValueError('请先在剧集／综艺搜索中选择资源，保存该剧的版本规则。')
         profiles = sonarr.json('GET', '/api/v3/releaseprofile') if profiles is None else profiles
@@ -582,8 +613,9 @@ class App:
         rid = text(body.get('release_id'))
         release = self.stored_release(session, rid, 'tv')
         preview = session.get('version_previews', {}).get(rid)
-        tvdb = str(body.get('id'))
-        if not preview or int(tvdb) not in preview['candidates'] or body.get('confirmed') is not True:
+        raw_id = body.get('id')
+        tvdb = str(raw_id).strip() if isinstance(raw_id, (str, int)) and type(raw_id) is not bool else ''
+        if not preview or not tvdb.isdigit() or int(tvdb) not in preview['candidates'] or body.get('confirmed') is not True:
             raise ValueError('请先预览资源并确认正确的剧集与全部版本条件。')
         mode=body.get('mode','all')
         if mode not in {'all','future','season','manual'}:
@@ -911,7 +943,12 @@ class App:
 
     def retry_upload(self, body):
         job_id = text(body.get('id'), 64)
-        with closing(sqlite3.connect(self.data / 'uploads.sqlite3', timeout=10)) as db, db:
+        path = self.data / 'uploads.sqlite3'
+        if not path.exists():
+            raise ValueError('请刷新任务列表后重试。')
+        with closing(sqlite3.connect(path, timeout=10)) as db, db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+                raise ValueError('请刷新任务列表后重试。')
             job = db.execute('SELECT state,error FROM jobs WHERE id=?', (job_id,)).fetchone()
             if not job or job[0] not in {'failed','uploading','queued','moving','uploaded'}:
                 raise ValueError('请刷新任务列表后重试。')
@@ -938,7 +975,7 @@ class App:
             if q.get('downloadId'):
                 native = by_id.get(q.get('seriesId') or (q.get('series') or {}).get('id'), {})
                 native_hash[q['downloadId'].lower()].add(native.get('tvdbId'))
-        names=self.localize(session,series) if session else {}
+        actions = task_actions(self.data/'uploads.sqlite3')
         def build(t):
             jobs = [j for j in by_hash.get(t['hash'], []) if not j.get('added_on') or j['added_on'] == t.get('added_on')]
             jobs = list({v['id']:v for j in jobs for v in [j, *children.get(j['id'], [])]}.values())
@@ -953,6 +990,10 @@ class App:
             return {k:t.get(k) for k in ('hash','name','progress','state','dlspeed','size','category','save_path','download_path','added_on')} | {'uploads':jobs,'files':files,'tvdb_id':tvdb}
         with ThreadPoolExecutor(max_workers=4) as pool:
             resources=list(pool.map(build,torrents))
+        needed_tvdbs = ({r['tvdb_id'] for r in resources if r.get('tvdb_id')}
+                        | {j['tvdb_id'] for j in uploads if j.get('tvdb_id')}
+                        | {a['payload'].get('tvdb_id') for a in actions if a['payload'].get('tvdb_id')})
+        names=self.localize(session,[s for s in series if s.get('tvdbId') in needed_tvdbs]) if session and needed_tvdbs else {}
         groups={}
         def group(key,tvdb,title):
             if key not in groups:
@@ -970,7 +1011,7 @@ class App:
             key='series:'+str(job['tvdb_id']) if job.get('tvdb_id') else ('torrent:'+job['torrent_hash'] if job.get('torrent_hash') else 'job:'+job['id'])
             value=group(key,job.get('tvdb_id'),job['dest'].removeprefix('/aliyun/').split('/')[1])
             value['uploads'].extend([job, *[j for j in children[job['id']] if j['id'] not in linked]])
-        for action in task_actions(self.data/'uploads.sqlite3'):
+        for action in actions:
             if action['action']=='delete' and action['state']=='done':
                 continue
             payload=action['payload'];key=payload['group']
@@ -990,7 +1031,7 @@ class App:
             value['file_count']=len(value['uploads'])+sum(sum(1 for f in r['files'] if not f.get('job_id')) for r in value['resources'])
         issue = None
         try:
-            heartbeat = json.loads((self.data/'heartbeat.json').read_text())
+            heartbeat = json.loads((self.data/'heartbeat.json').read_text(encoding='utf-8'))
             found = heartbeat.get('discovery_issue')
             if isinstance(found, dict) and time.time()-heartbeat['at'] < 300:
                 issue = {'dest':found['dest'],'message':archive_error(found['error'])}
@@ -1114,7 +1155,7 @@ class App:
                 create_actions(db)
                 db.execute('INSERT OR REPLACE INTO task_actions VALUES (?,?,?,?,?,?)',(key,action,json.dumps(payload),'done' if action in {'pause','resume'} else 'pending',None,time.time()))
             disk_path=self.data/'disk-paused.json'
-            disk=json.loads(disk_path.read_text()) if disk_path.exists() else {}
+            disk=json.loads(disk_path.read_text(encoding='utf-8')) if disk_path.exists() else {}
             for r in resources:
                 disk.pop(r['hash'],None)
             private_write(disk_path,json.dumps(disk))
@@ -1211,7 +1252,7 @@ class App:
         initialized = (self.state / 'emby-defaults.applied').is_file()
         checks['metadata'] = {'complete': initialized, 'message': 'Emby 中文默认配置已初始化，后续可自行调整。' if initialized else 'Emby 默认配置未完成，请点击“应用推荐刮削设置”重试并查看原因。'}
         try:
-            heartbeat = json.loads((self.data / 'heartbeat.json').read_text())
+            heartbeat = json.loads((self.data / 'heartbeat.json').read_text(encoding='utf-8'))
             fresh = time.time() - heartbeat['at'] < 300
             alive = fresh and time.time() - heartbeat.get('activity',{}).get('at',0) < 600
             detail = '上传服务正常。' if alive else '上传服务超过 5 分钟未更新或主循环长时间没有进展，请检查服务。'
@@ -1255,19 +1296,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply(self, value, status=200, cookie=None, mime="application/json; charset=utf-8"):
         raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
-        if cookie:
-            secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
-            self.send_header('Set-Cookie', 'cinema=; Max-Age=0; Path=/discover/; HttpOnly; SameSite=Strict' + secure)
-            self.send_header("Set-Cookie", cookie + "; Path=/; HttpOnly; SameSite=Strict" + secure)
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+            if cookie:
+                secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+                self.send_header('Set-Cookie', 'cinema=; Max-Age=0; Path=/discover/; HttpOnly; SameSite=Strict' + secure)
+                self.send_header("Set-Cookie", cookie + "; Path=/; HttpOnly; SameSite=Strict" + secure)
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def do_GET(self):
         self.handle_request()
@@ -1292,7 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
                 parsed = urlsplit(origin)
                 if parsed.netloc != self.headers.get("Host") or parsed.scheme not in {"http", "https"}:
                     return self.reply({"error": "请求来源无效，请刷新页面。"}, 403)
-                if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
                     raise ValueError("请求格式无效。")
                 size = int(self.headers.get("Content-Length", 0))
                 if not 0 < size <= 16384:
@@ -1305,14 +1349,13 @@ class Handler(BaseHTTPRequestHandler):
                 forwarded = self.headers.get('X-Forwarded-For', '').rsplit(',', 1)[-1].strip()
                 if forwarded:
                     try:
-                        trusted = ipaddress.ip_address(peer).is_loopback
-                        trusted |= peer in socket.gethostbyname_ex('gateway')[2]
+                        trusted = ipaddress.ip_address(peer).is_loopback or peer in socket.gethostbyname_ex('gateway')[2]
                         if trusted:
                             peer = str(ipaddress.ip_address(forwarded))
                     except (ValueError, OSError):
                         pass
                 sid, session = app.login(body, peer)
-                return self.reply({"csrf": session["csrf"]}, cookie="cinema=" + sid)
+                return self.reply({"csrf": session["csrf"], "username": session["username"]}, cookie="cinema=" + sid)
             cookies = SimpleCookie(self.headers.get("Cookie", ""))
             sid = cookies["cinema"].value if "cinema" in cookies else ""
             if path == "/api/logout" and self.command == "POST":
@@ -1338,20 +1381,23 @@ class Handler(BaseHTTPRequestHandler):
                 if path == '/api/recommendations':
                     return self.reply(app.recommendations())
                 if path == "/api/series":
-                    values = app.client("sonarr").json("GET", "/api/v3/series")
-                    removed_tags = {t['id'] for t in app.client('sonarr').json('GET', '/api/v3/tag') if t['label'] == 'cinema-unfollowed'}
+                    sonarr = app.client("sonarr")
+                    values = sonarr.json("GET", "/api/v3/series")
+                    removed_tags = {t['id'] for t in sonarr.json('GET', '/api/v3/tag') if t['label'] == 'cinema-unfollowed'}
                     values = [v for v in values if not removed_tags.intersection(v.get('tags', []))]
                     session.setdefault('series', {}).update({str(v['tvdbId']): v for v in values})
                     localized = app.localize(session, values)
-                    profiles = app.client('sonarr').json('GET', '/api/v3/releaseprofile')
+                    profiles = sonarr.json('GET', '/api/v3/releaseprofile')
+                    records = app.version_records()
                     versions = {}
                     for v in values:
                         try:
-                            versions[v['tvdbId']] = {'valid': True, 'fields': app.require_version(app.client('sonarr'), v, profiles)['fields']}
+                            versions[v['tvdbId']] = {'valid': True, 'fields': app.require_version(sonarr, v, profiles, records)['fields']}
                         except ValueError:
                             versions[v['tvdbId']] = {'valid': False}
+                    counts = archived_counts(app.data/'uploads.sqlite3', [v.get('tvdbId') for v in values])
                     pending = read_requests(app.data)
-                    return self.reply({"items": [{**{k: v.get(k) for k in ("id", "tvdbId", "year", "monitored", "nextAiring", "statistics", "seasons")}, **localized[v['tvdbId']], 'version': versions[v['tvdbId']], 'archived': len(archived_keys(app.data/'uploads.sqlite3', v['tvdbId'])), 'preparing': str(v['tvdbId']) in pending} for v in values]})
+                    return self.reply({"items": [{**{k: v.get(k) for k in ("id", "tvdbId", "year", "monitored", "nextAiring", "statistics", "seasons")}, **localized[v['tvdbId']], 'version': versions[v['tvdbId']], 'archived': counts.get(v['tvdbId'], 0), 'preparing': str(v['tvdbId']) in pending} for v in values]})
                 if path == "/api/tasks":
                     return self.reply(app.tasks(session))
                 if path == '/api/playbacks':
@@ -1396,17 +1442,20 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({'error':'Emby 暂时无法验证会话，请稍后重试。'}, 503)
         except PermissionError:
             if path == '/api/admin-check':
-                self.send_response(302)
-                self.send_header('Location', '/discover/')
-                self.send_header('Cache-Control', 'no-store')
-                self.send_header('Content-Length','0')
-                self.end_headers()
+                try:
+                    self.send_response(302)
+                    self.send_header('Location', '/discover/')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Content-Length','0')
+                    self.end_headers()
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    pass
                 return
             self.reply({"error": "会话已失效，请使用 Emby 管理员账号登录。"}, 401)
         except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as error:
             # Never echo upstream payloads: they may embed tokens or signed URLs.
             message = "操作未完成，请检查输入、服务登录或配置后重试。"
-            if isinstance(error, ValueError) and str(error).startswith(("请", "已", "搜索", "结果", "下载器", "云盘", "VPS", "/aliyun", "Sonarr", "登录", "会话", "追更", "季数")):
+            if isinstance(error, ValueError) and not isinstance(error, APIError) and str(error).startswith(USER_ERROR_PREFIXES):
                 message = str(error)
             self.reply({"error": message}, 400)
 

@@ -17,10 +17,12 @@ const {chromium} = require('playwright');
     status: () => ({settings: {retention_days: retentionDays}, credentials: {openlist: false, qb: false}, checks, cleanup: {done: 0, pending: 0, deferred: 0, reasons: []}}),
     metrics: {disk: {used: 1024, total: 2048}, memory: {used: 1024, total: 2048}, cpu: 1},
     recommendations: {items: []},
-    search: {items: [{id: 'tv-1', title: '示例剧.S01.1080p', size: 1024, resolution: '1080p', codec: 'H.264', seeders: 3, site: 'local', free: true}], warnings: []},
-    series: {items: [{id: 1, tvdbId: 42, title: '示例剧', year: 2026, monitored: true, archived: 0, version: {valid: true, fields: {resolution: '1080p'}}, seasons: [{seasonNumber: 0, name: 'Specials'}, {seasonNumber: 1}, {seasonNumber: 2}]}]},
-    tasks: {items: [{id: 'movie:1', name: '示例电影', file_count: 1, uploads: [{id: 'job1', dest: '/aliyun/Movies/A/A.mkv', state: 'failed', error: 'upload_unconfirmed'}], resources: [{hash: 'abc', name: '示例电影', size: 100, progress: 1, state: 'stalledUP', files: [], uploads: []}]}]},
+    search: {items: [{id: 'tv-1', title: '示例剧.S01.1080p.WEB-DL.H.264-HHWEB', size: 1024, resolution: '1080p', codec: 'H.264', seeders: 3, site: 'local', free: true}, {id: 'tv-2', title: '示例剧.S01.2160p.WEB-DL.H.265-HHWEB', size: 4096, resolution: '4K', codec: 'H.265', seeders: 2, site: 'local', free: false}], warnings: []},
+    series: {items: [{id: 1, tvdbId: 42, title: '示例剧', year: 2026, monitored: true, archived: 1, version: {valid: true, fields: {group: 'HHWEB', resolution: '1080p', codec: 'H.264', source: 'WEB-DL', platform: '', audio: '', subtitles: ''}}, seasons: [{seasonNumber: 0, name: 'Specials'}, {seasonNumber: 1}, {seasonNumber: 2}]}]},
+    tasks: {items: [{id: 'movie:1', name: '示例电影', file_count: 1, uploads: [{id: 'job1', dest: '/aliyun/Movies/A/A.mkv', state: 'failed', error: 'upload_unconfirmed'}], resources: [{hash: 'abc', name: '示例电影', size: 2048, dlspeed: 512, progress: 0.5, state: 'downloading', files: [], uploads: []}]}]},
     playbacks: {items: []},
+    'preview-version': {available: true, title: '示例剧.S01.1080p.WEB-DL.H.264-HHWEB', fields: {group: 'HHWEB', resolution: '1080p', codec: 'H.264', source: 'WEB-DL', platform: '', audio: '', subtitles: ''}, episodes: 'S01', missing: ['platform', 'audio', 'subtitles'], candidates: [{id: '42', title: '示例剧', year: 2026, seasons: [1, 2], version: {group: 'HHWEB', resolution: '1080p', codec: 'H.264', source: 'WEB-DL', platform: '', audio: '', subtitles: ''}}, {id: '43', title: '示例剧特别篇', year: 2026, seasons: [1], version: null}]},
+    episodes: {series_id: 1, version_ready: true, items: [{id: 101, seasonNumber: 1, episodeNumber: 1, title: '第一集', hasFile: false, archived: true, downloading: false}, {id: 201, seasonNumber: 2, episodeNumber: 1, title: '第二季首集', hasFile: false, archived: false, downloading: false}]},
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
@@ -67,17 +69,37 @@ const {chromium} = require('playwright');
     await page.locator('[name=kind][value=tv]').check();
     await page.locator('#query').fill('示例剧');
     await page.locator('#search-form button').click();
-    await page.locator('.result-row').waitFor();
-    assert.equal(await page.locator('#results .result-row').count(), 1);
-    assert(await page.locator('.row-meta').getByText('1 KiB', {exact: true}).isVisible());
+    await page.locator('.result-row').first().waitFor();
+    assert.equal(await page.locator('#results .result-row').count(), 2);
+    assert(await page.locator('.row-meta').first().getByText('1 KiB', {exact: true}).isVisible());
+    // Filtering shows filtered/total count and one-click reset.
+    await page.locator('#codec').selectOption('AV1');
+    assert.match(await page.locator('#result-count').innerText(), /显示 0 \/ 共 2 个结果/);
+    await page.getByRole('button', {name: /显示全部资源/}).click();
+    assert.equal(await page.locator('#results .result-row').count(), 2);
+
+    // Follow dialog keeps user edits across candidate switches and gates replace confirmation on real changes.
+    await page.locator('.result-row').first().getByRole('button', {name: '按此版本追更', exact: true}).click();
+    await page.locator('#version-content').waitFor({state: 'visible'});
+    await page.locator('#series-match').selectOption('42');
+    assert.equal(await page.locator('#replace-version-row').isHidden(), true);
+    await page.locator('#version-extra summary').click();
+    await page.locator('#version-subtitles').fill('CHS');
+    assert.equal(await page.locator('#replace-version-row').isHidden(), false);
+    await page.locator('#series-match').selectOption('43');
+    assert.equal(await page.locator('#version-subtitles').inputValue(), 'CHS');
+    await page.locator('#cancel-follow').click();
+
     let downloadRoute;
     await page.route('**/discover/api/download-release', route => { downloadRoute = route; });
-    await page.getByRole('button', {name: '下载此资源', exact: true}).click();
+    await page.locator('.result-row').first().getByRole('button', {name: '下载此资源', exact: true}).click();
     await page.locator('#free').check();
+    assert.match(await page.locator('#result-count').innerText(), /显示 1 \/ 共 2 个结果/);
     const pending = page.getByRole('button', {name: '正在提交…', exact: true});
     assert(await pending.isDisabled(), 'filter changes must preserve a pending submission');
     await downloadRoute.fulfill({json: {message: '已提交此资源'}});
     await page.getByRole('button', {name: '已提交', exact: true}).waitFor();
+    assert(await page.locator('#notice-action').isVisible(), 'download notice offers direct jump to tasks');
     await page.locator('#free').uncheck();
     assert(await page.getByRole('button', {name: '已提交', exact: true}).isDisabled());
     await page.locator('#dismiss-notice').click();
@@ -129,6 +151,9 @@ const {chromium} = require('playwright');
     assert(await page.locator('#disk-meter').isVisible());
 
     await page.locator('nav [data-view=tasks]').click();
+    await page.locator('.task-row').first().waitFor();
+    assert(await page.locator('.task-row .row-meta').first().getByText('2 KiB', {exact: true}).isVisible());
+    assert(await page.locator('.task-row .row-meta').first().getByText('512 B/s', {exact: true}).isVisible());
     const retry = page.getByRole('button', {name: '重新上传', exact: true});
     await retry.focus();
     await page.evaluate(() => tasks());
@@ -141,12 +166,30 @@ const {chromium} = require('playwright');
     await page.getByText('刷新失败，仍显示上次结果。', {exact: true}).waitFor();
 
     await page.locator('nav [data-view=series]').click();
+    await page.getByRole('button', {name: '选集下载', exact: true}).click();
+    await page.locator('#episode-list label').first().waitFor();
+    assert.equal(await page.locator('#episode-season').inputValue(), '2', 'defaults to first season with selectable episodes');
+    const selectBtn = await page.locator('#select-season').boundingBox();
+    const refreshBtn = await page.locator('#refresh-episodes').boundingBox();
+    assert(refreshBtn.x - (selectBtn.x + selectBtn.width) >= 6, 'episode toolbar buttons have clear spacing');
+    await page.locator('#select-season').click();
+    assert.equal(await page.locator('#select-season').innerText(), '取消本季全选');
+    await page.locator('#cancel-episodes').click();
+
+    await page.setViewportSize({width: 320, height: 800});
     await page.getByText('更多', {exact: true}).click();
+    const moreBox = await page.locator('.more-actions > div').boundingBox();
+    assert(moreBox.x >= 0 && moreBox.x + moreBox.width <= 320, 'more-actions menu stays within 320px viewport');
+    await page.setViewportSize({width: 1280, height: 900});
     await page.getByRole('button', {name: '设置追更范围', exact: true}).click();
+    assert.equal(await page.locator('.more-actions').evaluate(el => el.open), false);
     await page.locator('#follow-dialog').waitFor({state: 'visible'});
     const seasons = await page.locator('#season option').evaluateAll(options => options.map(option => option.value));
     assert.deepEqual(seasons, ['1', '2']);
     await page.locator('#follow-dialog').evaluate(dialog => dialog.close());
+
+    await page.locator('nav [data-view=settings]').click();
+    assert(await page.locator('#refresh-settings').isVisible());
 
     assert.deepEqual(errors, []);
     console.log('Independent UI flows passed: startup 503, submission state, search reset, sign-out drafts, settings and retry focus, metrics recovery, stale playback, season 0 hidden.');

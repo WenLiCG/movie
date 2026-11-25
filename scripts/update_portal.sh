@@ -58,15 +58,16 @@ update_files apply "$BACKUP"
 docker compose --profile '*' config --quiet
 if [[ ! -s state/openlist-runtime/instance-id ]]; then
     python3 - <<'PY_UPLOADS'
-import json, sqlite3
+import contextlib, json, sqlite3
 from pathlib import Path
 from integration import Client
 p=Path('state/uploader/data/uploads.sqlite3')
 if p.exists():
-    with sqlite3.connect(p) as db:
-        if db.execute("SELECT 1 FROM jobs WHERE state IN ('uploading','queued','moving')").fetchone():
-            raise SystemExit('请等待正在上传或发布的任务结束后，再安装此次升级。')
-config=json.loads(Path('state/uploader/config.json').read_text())
+    with contextlib.closing(sqlite3.connect(p.resolve().as_uri()+'?mode=ro', uri=True)) as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE state IN ('uploading','queued','moving')").fetchone():
+                raise SystemExit('请等待正在上传或发布的任务结束后，再安装此次升级。')
+config=json.loads(Path('state/uploader/config.json').read_text(encoding='utf-8'))
 client=Client('http://127.0.0.1:5244/openlist')
 client.opener.addheaders=[('Authorization',config['openlist_token'])]
 value=client.json('GET','/api/admin/task/upload/undone')

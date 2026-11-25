@@ -183,6 +183,17 @@ class VersionTests(unittest.TestCase):
         for marker in ('6Audios','CHS','CHT'):
             self.assertFalse(matches(pattern,title.replace(marker,'')))
 
+    def test_chinese_subtitle_version_roundtrips_as_utf8_and_invalid_series_id_fails_cleanly(self):
+        for bad_id in ('', None, True, 'not-a-number'):
+            with self.assertRaisesRegex(ValueError, '请先预览资源并确认'):
+                self.app.save_version(self.session, {**self.body, 'id': bad_id})
+        self.session['results']['r'][1]['title'] = TITLE.replace('-HHWEB', '.中字.简繁-HHWEB')
+        fields = {**self.body['fields'], 'subtitles': '中字,简繁'}
+        self.app.save_version(self.session, {**self.body, 'fields': fields})
+        reloaded = App(Path(self.temp.name))
+        reloaded.client = lambda service: self.native
+        self.assertEqual(reloaded.version_records()['42']['fields']['subtitles'], '中字,简繁')
+
     def test_one_off_download_uses_exact_cached_resource_without_touching_sonarr(self):
         prowlarr=Mock()
         prowlarr.json.return_value=[{'id':5,'name':'Cinema qB TV','implementation':'QBittorrent','enable':True,

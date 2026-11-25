@@ -195,6 +195,19 @@ class BoundaryTests(unittest.TestCase):
             calls=[c.args[2].decode() for c in qb.request.call_args_list]
             self.assertEqual(calls,['hashes=a','hashes=a'])
 
+    def test_disk_guard_handles_database_with_only_task_actions_table(self):
+        import sqlite3
+        from contextlib import closing
+        from archive import create_actions
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            with closing(sqlite3.connect(base / 'uploads.sqlite3')) as db, db:
+                create_actions(db)
+            sources = Mock(media=base)
+            sources.qb.json.return_value = []
+            with patch('uploader.shutil.disk_usage', return_value=Mock(total=60 * 1024**3, free=40 * 1024**3)):
+                self.assertEqual(disk_guard(sources, base), 0)
+
     def test_login_limit_is_per_source_and_session_has_no_password(self):
         with tempfile.TemporaryDirectory() as temp:
             app=App(Path(temp));native=Mock()

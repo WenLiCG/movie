@@ -2,7 +2,29 @@
 
 更新于 2026-11-25（北京时间）。项目把 PT 搜索、下载做种、云盘归档和 Emby 播放串在一起。`/discover/` 是管理员操作台，域名根路径是 Emby 电影墙。Python 服务使用标准库，前端直接提供静态文件，relay 通过固定版本的 Go 上游和本仓库补丁构建。
 
-## 2026-11-25 主线审查与交付
+## 2026-11-25 端到端复审、体验优化与交付
+
+本轮开始时本地工作目录为空且无其他本地副本，直接克隆 `WenLiCG/movie` 最新 `origin/main`（`e204041`，已含合并后的 PR #10）作为工作基线。历史开放分支 PR #2、#5 及 Draft PR #6、#7 保持原状未动，2026-11-19 停止交接归档目录完整保留。
+
+| 严重度 | 发现的问题 | 本轮修复 |
+| --- | --- | --- |
+| 中 | `Handler` 错误前缀白名单过窄，吞没了 `emby_defaults` 全部 7 条原因提示、`playback_records`、`download_episodes`、`connect_services`（OpenList/qB）等中文诊断信息；OpenList 管理员登录失败被误报为挂载异常 | 补齐受控中文诊断前缀并显式排除 `APIError`/内部异常回显；OpenList `/api/auth/login` 失败单独提示管理员用户名或密码错误；校验空/布尔型剧集 ID 与资源 ID。 |
+| 中 | 浏览器切换或取消请求导致 `Handler.reply()` 写入中断（`ConnectionAbortedError` / `BrokenPipeError`）时，外层 `except OSError` 再次向已关闭连接写 400 响应头并抛出未捕获异常 | 在 `Handler.reply()` 及 `/api/admin-check` 跳转中安全吸收客户端断连异常，避免二次写响应报错。 |
+| 中 | `versions.json`、`watch-requests.json` 等文件以 UTF-8（`ensure_ascii=False`）写入，但多处 `.read_text()` 未指定 `encoding='utf-8'`，在 Windows 等非 UTF-8 默认编码环境读写中文版本标记（如`中字`）会乱码或解码失败 | 统一 `portal/server.py`、`archive.py`、`uploader/uploader.py`、`uploader/cleanup.py` 与 `scripts/update_portal.sh` 的 UTF-8 读取编码。 |
+| 中 | `App.localize()` 丢失 `None` 与空列表区分，导致确认无中文名的剧集仅缓存 5 分钟（与文档 24 小时不符），且未加锁、无容量上限；`/api/tasks` 每 10 秒轮询会对全部 Sonarr 剧集发起本地化查询；`/api/series` 按剧逐次重开 SQLite 和重读配置 | 区分暂态失败（5 分钟重试）与确认无中文元数据（24 小时缓存），全程加锁并限制缓存上限；`tasks()` 仅查询当前活动任务关联的剧集；`/api/series` 合并配置读取与单次 SQLite 归档计数查询；回环地址 `X-Forwarded-For` 短路跳过 `gateway` DNS 解析。 |
+| 低-中 | `_disk_guard` 每 10 秒读取 SQLite 未使用 `closing()` 关闭连接且未检查 `jobs` 表是否存在；`retry_upload` 与 `update_portal.sh` 缺少库文件或 `jobs` 表前置判断；`configure.py` `check_public` 默认管理员名硬编码个人账号 | 补齐 `closing()` 与 `sqlite_master` 表存在检查，避免空库误建或升级前缺表报错；默认管理员提示统一为文档约定的 `cinema-admin`。 |
+| 中（UI/UX） | 320px 手机宽度下“我的追剧 → 更多”菜单向左溢出视口外（实测 `x = -79px`），且点击外部/按 Esc/点击菜单项不自动收起；“看片”复用固定命名窗口会覆盖正在播放的标签页 | “更多”菜单增加边框与视口自适应左右对齐（320px 实测 `x = 31px` 完全在视口内），支持单开互斥、点击外部与 Esc 关闭；“看片”改为每次打开新标签页交接会话。 |
+| 低-中（UI/UX） | 追更弹窗切换候选剧集时清空用户刚填写的版本条件，未识别提示不随输入更新，条件未变仍显示换版勾选；选集弹窗按钮 0px 贴合且默认停在无可选集的第 1 季；搜索被默认 1080p 过滤后不显示总数且缺少一键重置；任务总览缺少体积与实时下载速度；设置页缺少手动刷新按钮 | 追更弹窗保留用户输入、实时更新提示且仅在条件实际改变时显示并要求勾选换版；选集弹窗增加按钮间距、默认选中首个有可下载集数的季并联动“全选/取消本季全选”；搜索显示“显示 X / 共 Y 个结果”与一键重置筛选；任务行展示总大小与实时速度，下载提示支持一键跳转任务页且常规提示 8 秒自动收起；追剧 `同步集数中` 自动轮询；设置页补齐顶部“刷新”按钮。 |
+
+### 2026-11-25 复审验证结果
+
+- **Python 回归**：Windows（Python 3.14.3）运行 `python -m unittest discover -s tests -p "test_*.py"` 共 **202 项通过**（4 项 Unix 专属条件跳过）；WSL Linux（Python 3.14.4）在源码及单文件安装包解包目录运行共 **202 项通过**（1 项 Windows 启动器跳过）。`python -m compileall -q .` 通过。
+- **安装包与脚本**：`python3 scripts/build_all_in_one.py` 生成单文件安装器并通过 `sha256sum -c` 校验，安全解包 79 个发行文件；`bash -n install.sh scripts/update_portal.sh scripts/openlist-start.sh` 及 `node --check portal/app.js portal/theme.js portal/paint.js` 全部通过。
+- **Node 与真实浏览器多视口测试**：`node --test tests/*.test.cjs` 4 套全部通过；本机 Google Chrome + Playwright 执行 `tests/check_ui.cjs` 与扩展后的 `tests/independent-ui-flows.cjs` 全部通过（覆盖 1440/1024/768/390/320px 五档视口、深浅主题对比度、Emby 主题同步、存储禁用降级、筛选计数与重置、追更输入保留与换版门控、选集季定位、320px 菜单防溢出、任务速率展示及设置刷新）。额外启动真实 `portal/server.py` 配合本地 HTTP 上游替身完成端到端截图与交互核验。
+- **Go relay 构建与漏洞复查**：在 WSL 隔离目录拉取固定上游 `9b049b885388108c61f234244c1249f9a52a8dd6`，按 `relay/Dockerfile` 顺序重放全部补丁，4 个包的 `TestStrict`、`go vet`、`go mod verify` 及 `GOOS=linux GOARCH=amd64` 静态构建全部通过；`govulncheck` 确认第三方依赖可达漏洞为 0（WSL 宿主机自带 Go 1.26.8 报告的标准库旧版提示在 `relay/Dockerfile` 固定的 `golang:1.27.4-alpine` 镜像中已修复）。
+- **未在本机执行项**：本机与 WSL 未安装 Docker 引擎及 Caddy 二进制，`docker compose --profile '*' config`、容器镜像构建与 `caddy validate` 由推送后的 GitHub Actions（`regression.yml`）自动执行；真实 VPS、PT 站点、阿里云盘及多端长时间播放仍需现场验收。
+
+## 2026-11-25 主线审查与交付（PR #10）
 
 基线为 PR #9 合并后的 `cd2c455`。获取远端历史后，本地与远端 main 相差 0 个提交、文件差异为空，两棵工作树均无未提交修改。较早的 #2、#5、#6、#7 各有独立范围，尤其 #7 的公网方案有历史验收阻塞。本轮沿用单域名和现有服务架构。候选提交、检查与最终合并记录见 [PR #10](https://github.com/WenLiCG/movie/pull/10)。
 

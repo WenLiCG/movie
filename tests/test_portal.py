@@ -348,6 +348,110 @@ class PortalTests(unittest.TestCase):
                 sock.sendall(b'POST /discover/api/login HTTP/1.1\r\nHost: x\r\n')  # never finishes the headers
                 self.assertEqual(sock.recv(1024), b'')  # server closed the idle connection
 
+    def test_authored_user_errors_surface_while_internal_and_upstream_errors_stay_masked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby = Mock()
+            emby.json.side_effect = lambda method, path, *args: (
+                {'AccessToken': 'private-emby-token', 'User': {'Id': 'admin', 'Policy': {'IsAdministrator': True}}}
+                if 'Authenticate' in path else {'Policy': {'IsAdministrator': True}})
+            app.client = lambda name: emby
+            _, call = self._serve(app)
+            with patch('portal.server.emby_defaults'):
+                _, login = call('login', {'username': 'admin', 'password': 'test'})
+            headers = {'X-CSRF-Token': login['csrf']}
+            for target, message in [
+                ('metadata_defaults', '同名媒体库使用了其他目录，请先在 Emby 检查。'),
+                ('playbacks', '播放记录暂时无法读取，请检查播放服务及目录权限。'),
+                ('download_episodes', '所选集数无效、本地或云端已有，或正在下载，请刷新后重试。'),
+                ('configure', 'OpenList 管理员登录失败，请检查 OpenList 用户名和密码。'),
+                ('configure', 'qB 登录失败；请输入当前网页登录密码。'),
+            ]:
+                with patch.object(app, target, side_effect=ValueError(message)):
+                    err, payload = (call('playbacks') if target == 'playbacks'
+                                    else call(target.replace('_', '-'), {}, headers))
+                    self.assertEqual(err.code, 400, target)
+                    self.assertEqual(payload['error'], message)
+            for secret_err in (APIError(500, 'https://secret.example/token=abc'),
+                               ValueError('internal secret detail'),
+                               KeyError('secret_field')):
+                with patch.object(app, 'metadata_defaults', side_effect=secret_err):
+                    err, payload = call('metadata-defaults', {}, headers)
+                    self.assertEqual(err.code, 400)
+                    self.assertEqual(payload['error'], '操作未完成，请检查输入、服务登录或配置后重试。')
+
+    def test_openlist_admin_login_failure_gives_credential_specific_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            ol = Mock()
+            app.client = lambda name: ol
+            ol.json.return_value = {'code': 400, 'message': 'password is incorrect'}
+            with self.assertRaisesRegex(ValueError, 'OpenList 管理员登录失败'):
+                app.openlist({'username': 'admin'}, {'openlist_password': 'wrong'})
+            ol.json.side_effect = APIError(401, '/api/auth/login 返回 HTTP 401')
+            with self.assertRaisesRegex(ValueError, 'OpenList 管理员登录失败'):
+                app.openlist({'username': 'admin'}, {'openlist_password': 'wrong'})
+
+    def test_localize_caches_confirmed_absence_24h_and_retries_transient_failure_in_5m(self):
+        app = App()
+        emby = Mock()
+        app.client = lambda _: emby
+        series = [{'tvdbId': 101, 'title': 'Western Show'}, {'tvdbId': 102, 'title': 'Flaky Show'}]
+        emby.json.side_effect = lambda method, path, body: (
+            (_ for _ in ()).throw(OSError('timeout')) if body['SearchInfo']['ProviderIds']['Tvdb'] == '102' else [])
+        with patch('portal.server.time.time', return_value=1000):
+            first = app.localize({'token': 't'}, series)
+        self.assertEqual((first[101]['title'], first[102]['title']), ('Western Show', 'Flaky Show'))
+        self.assertEqual(emby.json.call_count, 2)
+        emby.json.side_effect = lambda method, path, body: [{'Name': '恢复后的中文名', 'ProviderIds': {'Tvdb': '102'}}]
+        # After 6 minutes: 102 (transient failure) is retried, while 101 (confirmed absence) stays cached for 24h.
+        with patch('portal.server.time.time', return_value=1360):
+            second = app.localize({'token': 't'}, series)
+        self.assertEqual(emby.json.call_count, 3)
+        self.assertEqual((second[101]['title'], second[102]['title']), ('Western Show', '恢复后的中文名'))
+
+    def test_tasks_only_localizes_series_referenced_by_active_work_and_retry_upload_guards_missing_db(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            with self.assertRaisesRegex(ValueError, '刷新任务列表'):
+                app.retry_upload({'id': 'missing'})
+            self.assertFalse((app.data / 'uploads.sqlite3').exists())
+            qb, sonarr = Mock(), Mock()
+            qb.json.side_effect = lambda method, path: (
+                [{'hash': 'h1', 'name': 'S1', 'category': 'sonarr-tv', 'progress': 0.5, 'state': 'downloading',
+                  'dlspeed': 1024, 'size': 2048, 'save_path': '/media/downloads/tv', 'added_on': 1}]
+                if path.endswith('/info') else [])
+            sonarr.json.side_effect = lambda method, path: (
+                [{'id': 1, 'tvdbId': 10, 'title': 'Active'}, {'id': 2, 'tvdbId': 20, 'title': 'Idle'}]
+                if path == '/api/v3/series' else {'page': 1, 'totalRecords': 1, 'records': [{'downloadId': 'h1', 'seriesId': 1, 'episodeId': 5}]})
+            app.qb = lambda: qb
+            app.client = lambda _: sonarr
+            seen = []
+            app.localize = lambda session, values: (seen.extend(v['tvdbId'] for v in values) or {10: {'title': '活动剧集'}})
+            tasks = app.tasks({'token': 'admin'})
+            self.assertEqual(seen, [10])
+            self.assertEqual(tasks['items'][0]['name'], '活动剧集')
+
+    def test_loopback_forwarded_for_skips_gateway_dns_and_aborted_reply_does_not_double_fault(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            emby = Mock()
+            emby.json.side_effect = lambda method, path, *args: (
+                {'AccessToken': 'tok', 'User': {'Id': 'admin', 'Policy': {'IsAdministrator': True}}}
+                if 'Authenticate' in path else {'Policy': {'IsAdministrator': True}})
+            app.client = lambda _: emby
+            _, call = self._serve(app)
+            with patch('portal.server.emby_defaults'), \
+                    patch('portal.server.socket.gethostbyname_ex', side_effect=AssertionError('should short-circuit')) as dns:
+                _, login = call('login', {'username': 'admin', 'password': 'pw'}, {'X-Forwarded-For': '198.51.100.9'})
+            dns.assert_not_called()
+            self.assertEqual(login['username'], 'admin')
+            self.assertIn(('198.51.100.9', 'admin'), app.attempts)
+            dummy = Mock()
+            dummy.headers = {}
+            dummy.wfile.write.side_effect = ConnectionAbortedError('client gone')
+            Handler.reply(dummy, {'ok': True})  # Must swallow mid-write client abort cleanly.
+
 
 if __name__ == '__main__':
     unittest.main()
