@@ -22,7 +22,7 @@
 - Node 的 4 个回归文件通过，两套本地 Chrome 浏览器检查覆盖 320–1440px、明暗主题、键盘、凭据草稿清空、下载提交、刷新失败及恢复。真实 portal 配本机 HTTP 上游替身验证登录、搜索、下载、任务暂停与恢复、退出及 401；浏览器也通过同一 portal 提交下载并查看任务。
 - Python 的 Ruff E9、F 检查通过。mypy 按 portal/运维脚本及 uploader 镜像各自的模块布局运行，12 个源码文件通过；项目大部分函数尚无类型注解。Bash、JavaScript 语法、Compose 全 profile 配置通过。
 - 固定上游重放补丁后，四个 Go 包的 TestStrict、go vet、go mod verify、Linux amd64 编译通过。govulncheck 源码与二进制扫描从基线的 6 项可达公告降至 0；复扫仍有 2 项导入包、1 项依赖模块层面的未调用提示。Python/浏览器产品代码使用标准库及原生 API。仓库 Dependabot 告警接口未启用，第三方服务镜像的全量 OS 漏洞未扫描。
-- 排查中一项 Windows 上传恢复测试在多个套件并发时出现一次 network_or_protocol，单独重跑及全套通过。首次 mypy 将部署为平级模块的 uploader 当作命名空间包；按镜像布局重跑。首次 PowerShell 构建和扫描因带点的 Go tag 参数被拆开退出，修正命令后重跑通过。
+- Windows 上传恢复测试曾间歇出现 network_or_protocol 或停在 queued。复核发现本机 OpenList 测试替身在读取任务轮询请求体前就响应并断开；调整为读完请求体再响应，继续保留原有发布及防误删断言。首次 mypy 将部署为平级模块的 uploader 当作命名空间包；按镜像布局重跑。首次 PowerShell 构建和扫描因带点的 Go tag 参数被拆开退出，修正命令后重跑通过。
 - CI 在 Ubuntu 运行源码及解包目录的 Python 测试、Node 和 Bash 检查及安装器 SHA256 校验。容器阶段从解包目录构建 portal、uploader 和 relay，启动前两项，检查首页、未登录会话、上传器等待接线以及 Caddy 配置。一次扩展附件检查的中间版本把未登记的视频也列入附件范围，原有删除范围回归失败。按固定 Sonarr 的非视频附件规则修正，保留相邻及新到的视频。首轮容器检查在容器刚启动、监听尚未就绪时遇到连接重置；现有就绪探测已覆盖该错误，仍须收到真实首页及预期会话响应才算通过。当前提交的运行结果见 [GitHub Actions](https://github.com/WenLiCG/movie/actions/workflows/regression.yml)。
 
 ### 使用与现场边界
