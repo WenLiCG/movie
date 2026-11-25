@@ -69,6 +69,8 @@ sudo docker compose logs --tail=100 uploader sonarr prowlarr
 sudo bash install.sh stop
 ```
 
+页面提示“本地应用 Sonarr（或 Emby、Prowlarr、qBittorrent、OpenList）暂时无法连接”时，用 `sudo docker compose ps` 确认该服务在运行，再看 `sudo docker compose logs --tail=100 <服务名>`。其他现象的排查顺序见[开发交接](HANDOFF.md#部署备份与排查)。
+
 `stop` 保留所有数据，不执行删除或 `down -v`。重新运行 `install` 启动基础服务，`setup` 启动已配置的播放和上传，`public` 恢复公网入口。`install.sh` 本身不升级或覆盖旧部署；已有部署从独立的新源码目录运行 `sudo bash scripts/update_portal.sh /opt/cinema` 升级，脚本先备份源码、配置状态和 SQLite 快照，失败时恢复旧源码与镜像。仍建议事先另行备份 `.env`、整个 `state/`（包括上传数据库）和媒体，详见 [现有部署升级](docs/DISCOVER.md#更新已有部署)。
 
 ## 源码与验证

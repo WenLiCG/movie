@@ -2,7 +2,145 @@
 
 更新于 2026-11-25（北京时间）。项目把 PT 搜索、下载做种、云盘归档和 Emby 播放串在一起。`/discover/` 是管理员操作台，域名根路径是 Emby 电影墙。Python 服务使用标准库，前端直接提供静态文件，relay 通过固定版本的 Go 上游和本仓库补丁构建。
 
-## 2026-11-25 下载恢复、上传队列与网关交付复审
+本文按以下顺序组织：当前状态与待决事项、本轮复审、接手指南（取得源码、代码入口、验证、部署与排查），最后是历次交付记录（新→旧）。
+
+## 当前状态与待决事项（2026-11-25 汇总）
+
+本节汇总当前代码的实际状态，后面的历次记录保留当时的证据。两者不一致时以本节和代码为准。
+
+- **主线与回归。** `main` 已包含 PR #9–#12 和本轮复审。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建以及 portal/uploader 启动检查。它不部署任何环境。
+- **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
+- **尚未现场验收。** 全新 Debian VPS 重装、现场升级与回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放。
+
+需要所有者决定或现场数据才能处理的事项（均未改变现有行为）：
+
+| 事项 | 当前行为 | 处理建议 |
+| --- | --- | --- |
+| OpenList 移动返回 500 等非授权错误 | 任务停在 `moving`（显示“正在等待云端移动任务确认”），只观察不重放，避免与网盘侧移动冲突 | 先在测试环境复现。是否在“暂存仍在、目标不存在、无移动任务并静默一段时间”后退回 `uploaded`，需要结合 OpenList/阿里云实际语义决定 |
+| 字幕子任务失败 | 父视频保持 `subtitle_pending`，任务页可重新上传字幕 | 是否允许跳过字幕先发布视频属于产品决策 |
+| 管理入口与 Emby 同源 | 发往 Emby 的 `cinema` Cookie 已剥离；同源 XSS 理论上仍可调用管理路径 | 根治需要把 `/discover/` 和原生后台迁到独立子域，属于部署形态变更 |
+| 超大片库性能 | uploader/cleanup 每轮重建候选并逐项打开 SQLite；单次响应上限 8 MiB | 需要真实大库数据评估后再做分页和缓存 |
+| relay 播放日志 | 同步写入、全局锁内执行，改名失败后静默停止记录 | 低优先级；可改为单写入 goroutine |
+| 网关容器 `cap_drop`、relay `read_only` | 未启用 | 需要能运行容器的环境验证上游写路径 |
+
+已在后续提交中解决、旧记录里仍列为待办的两项：按任务名找回的上传现在要求云端 SHA1 与源文件一致才发布（`uploader.py` 的 `poll_upload`）；自动清理改为白名单，只有 NFO、常见图片和字体可不经归档随种子删除，`.mks`、`.ttml`、样片等未归档文件会保留整个种子（`cleanup.py` 的 `needs_archive`）。
+
+行为提示：HSTS 一年（不含子域，回滚服务端无法立即撤销）；含未归档文件的种子不自动清理，磁盘可能增长；取消/删除的退避只保存在内存中，重启后清零。
+
+## 2026-11-25 第三轮复审（分支 `review/2026-11-25-round3`）
+
+**版本对比。** 本机没有以 GitHub 为 origin 的最新工作副本。`/workspace/cli-reviews/movie-20261122/repo` 是 2026-11-22 复审的克隆，停在 `0796cfd` 之上 5 个未推送提交，工作区干净；其内容已由 PR #9 合并进主线（逐文件对比只差 PR #9 额外的独立复核与修正）。`/workspace/movie/mv9`、`mv9b` 是 Draft PR #6/#7 的旧快照，`mv9b` 与 `origin/mv-9b-movie3` 的文件树相同，`mv9` 更旧，均无未提交修改。因此以 GitHub `main@b73a226`（PR #12 合并后，CI 通过）为基线，重新克隆到独立目录工作，没有改动上述旧目录。
+
+**审查方式。** 通读文档、配置、测试和全部源码；用真实 `portal/server.py` 连接本机 HTTP 上游替身（Emby、Prowlarr、Sonarr、qB、OpenList，均为合成数据），在 Chrome 中按 1280px 和 390px 走完登录、搜索、下载、按版追更、我的追剧、任务、播放记录、设置和退出，并逐项检查服务故障时的提示。
+
+| 严重度 | 用户可能遇到的情况 | 本轮修复 | 回归证据 |
+| --- | --- | --- | --- |
+| 中 | 窄屏打开“更多”菜单时，`<details>` 的 toggle 事件异步触发，菜单先按右对齐画到屏幕外（320px 实测 x=−79），随后才移回。现有 320px 浏览器回归因此时过时不过：同一环境下未改动的基线连续 3 次失败 | 在 summary 的 click（展开之前）决定对齐方向 | 修复后同环境连续 3 次通过 |
+| 中 | 上游返回空正文或非对象 JSON 时，`App.ol()` 抛出未捕获的 AttributeError，工作线程直接断开连接，浏览器显示“无法连接影院服务，请检查网络”，把服务端问题误导为网络问题 | `ol()` 校验响应结构；请求处理增加兜底，返回 JSON 500“服务处理请求时出错”，stderr 只记录方法、接口路径和异常类名 | 新增 2 项测试，旧代码报错 |
+| 中 | Emby 停止或重启时登录，提示是“请检查输入…”（像输入错误）或“稍后重试 setup”（把人引向命令行） | 区分三种情况：密码错误、Emby 未正常响应（附 HTTP 状态）、无法连接 Emby | 新增测试，旧代码失败 |
+| 低-中 | 任一内部服务不可达时，提示不说明是哪个服务，在网页中还要求“重试 setup” | `integration.Client` 按容器名或回环端口指明 Emby/OpenList/qBittorrent/Sonarr/Prowlarr，不包含地址或查询参数；文字同时适用于网页与 `install.sh setup` | 新增测试，旧代码失败 |
+| 中 | 在“我的追剧”保存追更范围或版本后列表不刷新（只有“同步集数中”时才轮询），状态停留在旧值 | 保存后立即刷新列表 | 浏览器回归新增断言；旧 `app.js` 等待新行超时 |
+| 中 | 从未选择版本的剧显示红色“规则异常”；唯一的修复入口“选择版本”藏在“更多”菜单里，可见的“选集下载”却是禁用状态 | `/api/series` 返回 `reason`（`missing` 或 `invalid`）。前端显示琥珀色“待选版本”或红色“规则异常”，直接显示主按钮“选择版本”，规则无效时不显示不可用的选集和范围按钮 | Python 测试与浏览器断言 |
+| 低 | 下载完成后一律显示“等待导入”，电影和独立剧集并不经过 Sonarr 导入；没有可归档视频（原盘、仅附件）的资源也显示“等待导入”，看起来会无限等待。单文件独立下载在标题行下又重复一行相同的状态和进度 | 追剧显示“等待导入”，其他下载显示“等待上传”，无可归档视频显示“未发现可归档视频”；去掉重复行 | `task-controls.test.cjs` 新增 3 项，旧代码失败 |
+| 低 | 搜索可能持续几十秒，期间只有一行文字；切换“电影/剧集”触发的重新搜索不禁用按钮，可重复提交 | 显示加载动效和预计耗时；切换类型与提交走相同的按钮禁用流程 | 真实门户浏览器检查 |
+| 文档 | `docs/SETUP.md` 的隧道命令缺少 8097，按文档无法打开 `/discover/` | 补齐端口并加入对照表 | — |
+
+**经审查保留的设计。** 管理员会话每次请求都回查 Emby（撤销管理员权限立即生效，现有测试要求如此）；CSRF 同时校验 Origin、JSON 类型、大小和常量时间比较的令牌，Cookie 为 HttpOnly + SameSite=Strict；前端统一用 `textContent` 构建 DOM 并配合严格 CSP；上传发布、删除确认清单、保留期清理和 relay 逐资源授权的证据链没有发现需要改动的问题。
+
+**兼容性。** 没有数据库迁移，也没有新增依赖。`/api/series` 只新增字段，缺少该字段时前端按原来的“规则异常”处理。升级方式不变：`sudo bash /新源码目录/scripts/update_portal.sh /opt/cinema`。回滚为 revert 本轮合并提交后重新运行同一脚本。
+
+### 本轮验证
+
+环境：Linux 6.12，Python 3.13.5，Node 24.22.1，Google Chrome 156，Playwright 1.63，本机 Go 1.27.3，另下载 Dockerfile 固定的 Go 1.27.4。本机没有 Docker 和 Caddy。
+
+- **基线**（未改代码）：Python 211 项通过、1 项 Windows 启动器跳过；Node 4 个文件通过；`check_ui.cjs` 通过；`independent-ui-flows.cjs` 首次通过，随后同环境 3 次均在 320px 菜单断言失败（即上表第一项）。
+- **修改后**：Python 216 项通过、1 项跳过；`node --test tests/*.test.cjs` 4 个文件通过；`check_ui.cjs` 通过；`independent-ui-flows.cjs` 连续 3 次通过。所有新增断言都在对应的旧代码上确认会失败。
+- **安装包**：`python3 scripts/build_all_in_one.py` 后 `sha256sum -c` 通过；按 CI 方式解包得到 77 个发行文件，被改动的文件与源码一致；解包目录内 Python 216 项通过、1 项跳过。
+- **真实门户端到端**：真实 `portal/server.py` 加本机上游替身，Chrome 1280px 与 390px 走完登录（错误密码与正确密码）、电影与剧集搜索、提交下载、按版追更弹窗、我的追剧、任务、播放记录、设置和退出。故障路径：Emby 502 或不可达时登录、Prowlarr 不可达时搜索、OpenList 返回空正文、Sonarr 队列结构异常，都返回明确提示，没有断开连接。
+- **静态检查**：Ruff E9/F（源码与测试）通过；mypy 按门户和 uploader 镜像两种模块布局检查 11 个文件，无问题；Bandit 中高置信度 2 高 10 中，与上一轮相同，逐项确认为 OpenList SHA1 文件校验协议、固定列名的 SQL、本地服务 XML 和容器内监听。
+- **relay**：按 `relay/Dockerfile` 的顺序在固定上游 `9b049b8` 上重放四个补丁。Go 1.27.4 下 14 项 TestStrict、四个包的 `go vet`、`go mod verify` 和 Linux amd64 构建均通过；govulncheck 可达漏洞为 0（另有 2 项导入包级、1 项模块级未调用提示）。本机 Go 1.27.3 会报告 GO-2026-6859，该问题在 Dockerfile 固定的 1.27.4 中已修复。
+- **未在本机运行**：Docker Compose 配置、镜像构建、容器启动和 `caddy validate` 由 GitHub Actions 执行；没有接触任何 VPS、PT 站点、阿里云盘或真实 Emby。
+
+## 接手当天
+
+1. **取得源码。** 从 GitHub 克隆 `WenLiCG/movie` 的 `main`，构建安装包前记录 `git rev-parse HEAD`。打包范围见 [scripts/build_all_in_one.py](scripts/build_all_in_one.py)。
+2. **跑本地回归。** 从项目根目录运行下一节的命令。做 UI 改动可先用模拟 API 跑页面，验证真实下载或播放再使用隔离测试环境。
+3. **需要接管现有部署时，先取得权限。** 请项目所有者单独交接 VPS 的 SSH/sudo、域名和 Cloudflare DNS 管理、Emby 管理员、各原生应用的管理入口，以及阿里云盘和 PT 的授权途径。先在 VPS 核对当前服务和配置，再参照有日期的 [部署记录](docs/DEPLOYMENT.md)。
+
+## 业务链路与代码入口
+
+```text
+手动电影或剧集   Portal / Prowlarr → qB 完成下载 ──────────────┐
+自动追剧         Sonarr ← Prowlarr → qB 下载 → Sonarr 导入 ────┤
+                                                              ↓
+                              uploader → OpenList 暂存 → 校验发布到 Movies / TV
+                                                              ↓
+                              relay 生成虚拟索引 → Emby 扫描并展示
+播放             Emby 客户端 → relay 逐资源授权 → 跳转阿里云盘/CDN 取视频
+```
+
+| 改动范围 | 入口与需要一起看的代码 |
+| --- | --- |
+| 找片、任务、登录、设置 | [portal/server.py](portal/server.py) 的 `Handler` 和 `App` 提供 `/discover/api/*`。界面在 [portal/app.js](portal/app.js)、[portal/index.html](portal/index.html)、[portal/style.css](portal/style.css)。主题和 Emby 搜索入口另看 [portal/theme.js](portal/theme.js) 与 [relay/custom-js](relay/custom-js)。 |
+| 站点结果、中文名、按版追更 | [portal/server.py](portal/server.py) 编排 Prowlarr、Sonarr 和 Emby 调用。[portal/metadata.py](portal/metadata.py) 解析站点名称元数据，[portal/versions.py](portal/versions.py) 处理版本条件和原生 Profile 校验，[archive.py](archive.py) 共享追更范围、归档记录和锁。 |
+| 上传、删除、保留期 | [uploader/uploader.py](uploader/uploader.py) 的 `Sources` 决定来源，`Uploader` 处理暂存、校验、发布和持久化任务操作。[uploader/cleanup.py](uploader/cleanup.py) 处理到期的本地清理。改任务状态时一并检查 `App.task_action`、`Uploader.process_actions` 和 [archive.py](archive.py)。 |
+| 直连、虚拟索引和播放记录 | [relay/Dockerfile](relay/Dockerfile) 拉取固定的 `go-emby2openlist` 提交，依次应用 `strict-direct.patch`、`managed-token.patch` 和 `playback.patch`，编入 `playback.go` 并运行 `TestStrict`。记录由 [portal/playback.py](portal/playback.py) 读取。修改以 `relay/` 为准，本机 `.upstream/` 是开发缓存。 |
+| 安装、接线和路由 | [install.sh](install.sh) 提供 `install`、`setup`、`public`、`status`、`stop`。[configure.py](configure.py) 初始化目录与私有配置，[integration.py](integration.py) 调用原生 API。[update_portal.sh](scripts/update_portal.sh) 负责升级，[update_files.py](scripts/update_files.py) 管理发行文件和恢复。[compose.yaml](compose.yaml) 定义挂载，[gateway/Caddyfile](gateway/Caddyfile) 定义公网路由。 |
+
+### 改动时需要守住的边界
+
+- **下载来源分开。** `cinema-movies` 使用 `/media/downloads/movies`，独立剧集或综艺 `cinema-tv` 使用 `/media/downloads/tv-manual`。自动追剧 `sonarr-tv` 先下载到 `/media/downloads/tv`，上传器只收 Sonarr 已导入 `/media/library/tv` 的文件。按版追更必须通过 Sonarr 原生规则，找不到同版就等待。版本状态和原生 Sonarr Profile 需要配套保留。
+- **发布以持久凭证为准。** 上传先进入 `/aliyun/.cinema-upload`，经 OpenList 任务成功、远端大小和可用 SHA1 校验，完成移动和回读才记为 `published`。回执丢失先查任务和强哈希证据，保留 SQLite 状态供恢复。`Movies`、`TV` 和暂存区只能由同一个 uploader 写入。匹配的 `srt`、`ass`、`ssa` 字幕先于视频发布。[找片与归档说明](docs/DISCOVER.md)
+- **删除范围和保留期按实例校验。** 自动清理默认从当前种子完成算 7 天，`0` 关闭。手动删除默认保留 VPS 文件；选择“删除所有”后，由确认清单确定云端原件、字幕、Emby 索引和本地文件。换单个版本时使用资源级操作。验收删除时使用自建测试媒体。[删除流程](docs/DISCOVER.md#删除所有与重新下载)
+- **索引和播放授权独立验证。** Emby 的 `/library` 只挂载 `state/library` 虚拟索引。relay 逐资源校验 Emby 授权和云端路径，取链失败直接拒绝。检查播放时同时看视频或分片的云盘/CDN 响应及客户端进度。自动移除索引关闭，外部手动删片留下旧版本时，先确认云盘目录健康、旧对象确实消失，再备份移出对应索引并扫描 Emby。见 [播放记录与直连证据](docs/DISCOVER.md#播放记录与直连证据) 和 [旧索引处理](docs/DISCOVER.md#删除后换版与旧索引)。
+
+## 本地验证与打包
+
+从项目根目录运行。Windows 可用 `python`，Debian 通常用 `python3`。Node 仅用于开发检查。
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py'
+node tests/search-entry.test.cjs
+node tests/watch-handoff.test.cjs
+node tests/task-controls.test.cjs
+node tests/portal-resilience.test.cjs
+bash -n install.sh
+bash -n scripts/update_portal.sh
+bash -n scripts/openlist-start.sh
+```
+
+- 浏览器回归 `node tests/check_ui.cjs` 与 `node tests/independent-ui-flows.cjs` 使用本机 Chrome 和可被 Node 解析的 Playwright（可设 `NODE_PATH`），数据由测试中的本地 HTTP 服务模拟。界面规范见 [DESIGN.md](DESIGN.md)。
+- Linux/Docker 环境下，设置 `export MOVIE_DOMAIN=cinema.example.invalid` 后，可用 `docker compose --profile '*' config --quiet` 检查 Compose，用 `docker compose --profile connected build relay` 重放 Go 补丁、执行 Go 回归并构建。源码许可及固定版本见 [SOURCES.md](SOURCES.md)。
+- 发布新安装包时执行 `python scripts/build_all_in_one.py`，生成 `dist/cinema-all-in-one.sh` 与 `.sha256`，在 Debian 上用 `sha256sum -c cinema-all-in-one.sh.sha256` 校验。每个包使用同次构建生成的校验文件。GitHub Actions 在推送后构建并解包回归，源码交接由仓库提供。[打包清单](scripts/build_all_in_one.py) · [回归工作流](.github/workflows/regression.yml)
+- 没有 Docker 时，可按 `relay/Dockerfile` 的顺序在固定上游提交上 `git apply` 四个补丁并复制 `playback.go`、`playback_test.go`，再用与 Dockerfile 相同版本的 Go 运行 `go test ./internal/web ./internal/service/emby ./internal/service/m3u8 ./internal/service/openlist -run TestStrict` 和 govulncheck。本机 Go 较旧时出现的标准库漏洞提示，以 Dockerfile 固定的版本复扫为准。
+
+## 部署、备份与排查
+
+新机按新 VPS 流程安装。已有部署先核对实际目录，随后从独立的新源码目录执行 `sudo bash /新源码目录/scripts/update_portal.sh /opt/cinema`。此处以 `/opt/cinema` 为例。首次升级旧安装时，缺少发行记录的原有文件会保留；后续升级按发行清单管理。单文件安装器用于新装，同一包可以重新运行以继续安装。[新 VPS 流程](docs/NEW-VPS.md) · [现有部署升级](docs/DISCOVER.md#更新已有部署)
+
+**备份优先级。** 保留源码、`.env`、全部 `state/`、存在时的 `compose.override.yaml` 或 `.yml`，以及仍需保留的 `media/`。`state/uploader/data/uploads.sqlite3` 是上传、归档、任务动作和本地清理凭证，`state/uploader/versions.json` 与 `state/sonarr/` 一起备份。`state/library/` 是虚拟索引，`state/relay/lib/playback/` 是滚动播放日志。升级脚本在 `backups/` 生成私有备份和 SQLite 在线快照，失败时尝试恢复旧源码及镜像，数据库仍是当前状态。需要手工恢复时按同一备份点核对原生服务数据库和上传状态。凭据通过私密渠道移交，源码包、日志和公开记录里只保留必要的状态信息。
+
+在 VPS 部署目录先执行只读检查。
+
+```bash
+cd /opt/cinema
+sudo bash install.sh status
+sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
+```
+
+| 现象 | 优先核对 |
+| --- | --- |
+| 无法登录或原生后台打不开 | Caddy 路由和 portal 管理员鉴权，再查原生应用认证。公网 `/search/`、`/sonarr/`、`/qb/`、`/openlist/` 有影院管理员前置检查，应用自身认证也保留。隧道可分别访问各回环端口，portal 为 `8097`，relay 为 `8095`。 |
+| 下载 100% 但 Emby 没有影片 | qB 分类 → Sonarr 导入（自动追剧）→ `uploads.sqlite3` 状态和 uploader 错误 → OpenList 任务及发布目录 → relay 索引 → Emby 扫描。OpenList 会先在 VPS 缓存文件，遇到大文件要同时检查下载和上传缓存空间。 |
+| 列表有片但打不开 | 核对选中的 Emby 媒体版本、对应云端对象和授权，再看 `/discover/` 播放记录及客户端网络。relay 的容器日志禁用，排查时避免记录完整签名 URL。 |
+| 页面提示“本地应用 X 暂时无法连接或响应超时” | 用 `sudo docker compose ps` 确认该服务在运行，再看 `sudo docker compose logs --tail=100 <服务名>`。服务重启期间短暂出现属正常。 |
+| 页面提示“服务处理请求时出错” | 多为上游返回了意外格式。`sudo docker compose logs --tail=100 portal` 中会有一行 `portal <方法> <接口> <异常类型>`，据此确定接口，再检查对应的上游服务。 |
+
+---
+
+以下为历次交付记录，按时间从新到旧排列，保留当时的证据和结论；与文首“当前状态”不一致时以文首和代码为准。
+
+## 2026-11-25 下载恢复、上传队列与网关交付复审（PR #12）
 
 本轮本地 `main` 为 `e204041`，工作区干净。获取远端后，`origin/main` 领先一个提交 `1f5f17c`（PR #11，16 个文件有差异）。本地 PR #10 分支与其合并提交的文件树相同，更早的审查分支已包含于主线。本轮以 `1f5f17c` 建立审查分支。另一工作树、历史 PR 和本机已有安装包保留。
 
@@ -77,6 +215,91 @@
 安装与已有部署更新见 [README](README.md) 和 [更新已有部署](docs/DISCOVER.md#更新已有部署)。本轮不需要数据库迁移；源码回退可还原本轮合并提交。SQLite 快照人工恢复前须停止对应服务，保留当前状态备份，再在空目录验库。部署前先确认能为当前镜像建立回滚标签。
 
 本轮没有更新 VPS。实际 PT 下发、阿里云盘上传、Emby 客户端长时间播放、物理手机及全新 Debian 的整机重装仍需现场验证。Movies/TV 需要单个写入者，OpenList 移动结果不明时继续保留源文件。下面各节保留当时的证据与结论，PR #9 的最终合并状态以本节基线为准。
+
+## 2026-11-23 独立导入与复核（Cursor 云端）
+
+本节由 Cursor 云端代理在作者记录之后追加。上面的「2026-11-23 全面复审与修复」仍是 Claude CLI 作者记录，不是本节的复测结论。本节不改产品代码。
+
+### 源、导入与当前 main
+
+| 角色 | SHA |
+| --- | --- |
+| 源 main / 当前 `origin/main` | `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e` |
+| 本地候选（5 个源提交的合并结果，未在本仓库重放成 5 个提交） | `d93f6cd6232526b4cb79b74174ca68f8642e67aa` |
+| 补丁 SHA256 | `192c9e48a0317dccd285c6e8c1b15bff2f01249a73613e7b9b023a08db986377` |
+| 导入后的 git tree | `1d28e35916c3620d192f5d9e35e19e2c83ad1680` |
+| 导入提交（作者 Cursor Agent，只应用该 diff） | `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1` |
+| 独立测试提交 | `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` |
+
+`git fetch origin main` 后 `origin/main` 仍是 `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e`。没有新的 main 提交，没有冲突，也没有丢弃任一侧的改动。补丁是普通 git diff，不是 mbox。在该基线上 `git apply --index` 后、提交前，`git write-tree` 等于 `1d28e35916c3620d192f5d9e35e19e2c83ad1680`。导入提交的 tree 与此相同。5 个本地源提交没有被重造成新的作者身份。发布环境可能在提交说明末尾追加 `Co-authored-by`；以提交说明正文中的 SHA 为准。包含本节的提交是独立测试提交的子提交，分支头用 `git rev-parse HEAD` 核对。
+
+导入的产品与作者测试文件：`HANDOFF.md`、`README.md`、`compose.yaml`、`docs/DISCOVER.md`、`gateway/Caddyfile`、`portal/app.js`、`portal/index.html`、`portal/playback.py`、`portal/server.py`、`relay/playback.go`、`relay/playback_test.go`、`tests/portal-resilience.test.cjs`、`tests/test_cleanup.py`、`tests/test_gateway.py`、`tests/test_playback.py`、`tests/test_portal.py`、`tests/test_reliability.py`、`tests/test_versions.py`、`uploader/cleanup.py`、`uploader/uploader.py`。
+
+独立追加：`tests/test_independent_boundaries.py`、`tests/independent-ui-flows.cjs`，以及本节。
+
+### 环境
+
+2026-11-22T23:43:35Z 记录：Linux 6.12.113+ x86_64，Python 3.12.3，Node v22.23.4，Google Chrome 157.0.8103.50，Playwright 1.49.1，Docker 29.1.3，Compose 2.40.3，宿主机 Go 1.22.2（未用于 TestStrict）。relay 测试在镜像构建里的 `golang:1.27-alpine` 中运行。没有真实 Emby、OpenList、PT、阿里云或生产流量。
+
+### 命令与退出码（独立执行）
+
+| 命令 | 退出码 | 结果 |
+| --- | --- | --- |
+| `sha256sum` 附件补丁 | 0 | 与上表 SHA256 一致 |
+| `git apply --check` 后 `git apply --index`，再 `git write-tree` | 0 | tree 完全匹配 |
+| `git fetch origin main` | 0 | 与源基线相同 |
+| 源基线上只换入候选新增测试后，逐项运行清理/播放记录/退出/密码/超时/退避/网关/重复下载与 `node tests/portal-resilience.test.cjs` | 全部 1 | 修复前失败：sidecar 会删正片、大 sample 被删、401 会话挤成 100 条、退出 503、密码文案是通用错误、`Handler.timeout` 为 None、退避 10 次而不是 4、Caddy 没有 HSTS、重复下载报「结果已过期」、旧前端不处理断网 |
+| `python3 -m unittest discover -s tests -p 'test_*.py'` | 0 | 184 项，1 项跳过。其中 13 项是本节新增，其余对应该候选在 171 项基础上的作者测试 |
+| `python3 -m unittest discover -s tests -p 'test_independent_boundaries.py'` | 0 | 13 项 OK |
+| `node --test tests/*.test.cjs` | 0 | 4 项通过 |
+| `bash -n install.sh` 与 `bash -n scripts/*.sh`，`node --check portal/app.js` | 0 | 通过 |
+| `NODE_PATH=/tmp/pw/node_modules node tests/check_ui.cjs` | 0 | 本机 Chrome 跑完五个视图 |
+| `NODE_PATH=/tmp/pw/node_modules node tests/independent-ui-flows.cjs` | 0 | 启动 503 显示登录、退出清空旧结果、保留天数编辑不被焦点刷新覆盖、重试按钮在 `tasks()` 后保持焦点、追更范围没有第 0 季 |
+| `python3 scripts/build_all_in_one.py --output /tmp/cinema-independent.sh` 后 `sha256sum -c` | 0 | OK。未在解包目录再跑测试 |
+| `sudo -E docker compose --profile '*' config --quiet` | 0 | 真实 Compose 解析。relay 为 `cinema-relay:9b049b8-strict5`，`cap_drop: [ALL]`，`no-new-privileges:true`，只绑定 `127.0.0.1:8095` |
+| `sudo -E docker compose --profile connected build relay` | 0 | 镜像构建成功。Dockerfile 内 `go test -run TestStrict` 四个包均为 `ok`，随后 release 构建成功。日志没有 `-v`，本节不把作者的「18 项」写成独立计数 |
+| 固定摘要 `caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e` 对仓库 Caddyfile `validate` | 0 | `Valid configuration`。有格式警告，不是配置错误 |
+| 同一 Caddy 镜像加本机 echo，请求 `https://localhost/` | 0 | `cinema=SECRET` 到上游为空；`cinema=SECRET; emby=1` 变为 `emby=1`；`a=1; cinema=SECRET; b=2` 变为 `a=1;b=2`；`notcinema` 与 `x=notcinema=1` 不变。响应含 `strict-transport-security: max-age=31536000`（无 includeSubDomains/preload）和 `x-frame-options: SAMEORIGIN` |
+| `docker run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true` 挂示例配置 | 进程保持运行，手动停止 | 监听 8095。访问返回 500，日志是 `lookup emby ... no such host`。没有连上真实 Emby |
+
+`.github/workflows/regression.yml` 只在 `push` 和 `pull_request` 上跑测试、安装包和解包、Compose 配置与 relay 镜像构建。没有部署、发布或预览工作流。打开 PR 会启动这条回归，不会部署。
+
+### 独立结论与未改的产品边界
+
+作者声称的清理保留、未授权播放记录、退出、超时、错误密码、退避、前端焦点和网关头，在本机用上述失败对照和通过测试复现。产品代码没有被改写。
+
+仍保留、需要所有者知道的行为：
+
+- 含未归档媒体的种子不再自动清理，磁盘可能持续增长；任务页仍可手动删除。
+- HSTS 一年，且不含子域。浏览器记住后不能靠回滚服务端马上撤销。
+- OpenList 返回 500 后停在 `moving` 的任务仍不自动重试。本节没有改这条策略，也没有连真实 OpenList。
+- 按任务名恢复且云端没有 SHA1 时，仍可能只按大小发布。本节没有改，也没有用真实云盘验证。
+- 管理入口和 Emby 仍在同一主机。发往 Emby 的 `cinema` cookie 已在真实 Caddy 上剥掉，但同源 XSS 仍能碰到管理路径。`X-Frame-Options` 加在 Emby 那条 handle 上，不是整个 `/discover/`。
+- 名称像 sample、qB 报告大小小于或等于 1 GiB 的视频仍会随已归档正片删除。大于 1 GiB 才要求先归档。缺 `size` 时在删除前的字段比较抛错，状态留在 `pending` / `cleanup_check_failed`，本轮不删文件；这是失败关闭，不是明确的保留原因。
+- `.mks` 和 `.ttml` 不在未归档媒体名单里，也不属于会归档的 srt/ass/ssa。正片已发布时，自动清理仍会删除它们。`test_sidecar_extensions_outside_the_allow_list_are_still_deleted` 记录了这个现状。本节没有扩大名单。
+- 门户会隐藏非 2xx 的会话上报。历史媒体行只要 `kind=media` 且状态为 401，仍会占满最近 100 条。新的未授权请求由 relay 不再写入；旧媒体失败行与真实播放失败在日志里没有单独的授权标记。
+- 退避只在内存里，重启即清零，单次等待最长 5 分钟。等待期间动作保持 `pending`，不会被标成完成。另一个 id 的动作不会被第一条的退避挡住。
+
+### 未测
+
+真实 Emby、qB、OpenList、PT、阿里云和公网客户端。安装包只做了校验和，没有在解包目录重跑 184 项。没有 `docker compose up` 整套影院。relay 的 Go 测试没有在宿主机 Go 1.22 上重跑。网关容器自身的 `cap_drop` 仍按作者延后项未改。
+
+### 回滚与继续
+
+未部署，没有数据库迁移。回滚这个分支不会改变已经下发的 HSTS，因为本节没有发布。代码回滚是revert导入提交 `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1`、独立测试提交 `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` 和包含本节的提交，或直接关闭 PR。不要 force-push，不要改已经推送的提交。
+
+### GitHub 回归终态
+
+核对时间 2026-11-22T23:50Z。head `b134f6712e193880bc71946d5cd099a802b41065` 上有两次同名 `regression`，都是 Checks API 的 `completed` / `success`。工作流同时监听 `push` 和 `pull_request`，所以一次推送会跑两遍；两边都只构建并测试，没有部署。
+
+| 触发 | 运行 | 作业 | 开始 / 结束 (UTC) | 结论 |
+| --- | --- | --- | --- | --- |
+| push | [45085166225](https://github.com/WenLiCG/movie/actions/runs/45085166225) | [137402009591](https://github.com/WenLiCG/movie/actions/runs/45085166225/job/137402009591) | 23:47:55 / 23:49:46 | success |
+| pull_request | [45085182699](https://github.com/WenLiCG/movie/actions/runs/45085182699) | [137402061701](https://github.com/WenLiCG/movie/actions/runs/45085182699/job/137402061701) | 23:48:06 / 23:49:57 | success |
+
+旧的 combined commit status 没有状态项，`state` 仍显示 `pending`。以 Checks API 的这两次 success 为终态。没有合并，没有部署。
+
+继续由所有者决定 `.mks`/`.ttml`、`moving` 重试、无 SHA1 发布，以及是否把管理入口拆到独立子域。本节不合并、不部署。
 
 ## 2026-11-23 全面复审与修复（分支 `movie-cli-review-20261122`）
 
@@ -182,78 +405,6 @@
 | 门户 | Emby 临时故障使当次校验返回 503，后续可继续用原会话。确认管理员权限失效时要求重新登录。文本预览未命中后仍可按 TVDB ID 查中文名。任务页保留键盘焦点并标记刷新失败。 |
 | 升级和交付 | 更新器先核对 Compose 容器归属，然后按发行文件清单更新和回滚。升级会将旧 OpenList 播放令牌复制到 relay 专用目录，门户轮换时仍以原子替换写入。安装包包含两份 Emby 4.10.2 测试夹具。 |
 
-## 接手当天
-
-1. **取得源码。** 从 GitHub 克隆 `WenLiCG/movie` 的 `main`，构建安装包前记录 `git rev-parse HEAD`。打包范围见 [scripts/build_all_in_one.py](scripts/build_all_in_one.py)。
-2. **跑本地回归。** 从项目根目录运行下一节的命令。做 UI 改动可先用模拟 API 跑页面，验证真实下载或播放再使用隔离测试环境。
-3. **需要接管现有部署时，先取得权限。** 请项目所有者单独交接 VPS 的 SSH/sudo、域名和 Cloudflare DNS 管理、Emby 管理员、各原生应用的管理入口，以及阿里云盘和 PT 的授权途径。先在 VPS 核对当前服务和配置，再参照有日期的 [部署记录](docs/DEPLOYMENT.md)。
-
-## 业务链路与代码入口
-
-```text
-手动电影或剧集   Portal / Prowlarr → qB 完成下载 ──────────────┐
-自动追剧         Sonarr ← Prowlarr → qB 下载 → Sonarr 导入 ────┤
-                                                              ↓
-                              uploader → OpenList 暂存 → 校验发布到 Movies / TV
-                                                              ↓
-                              relay 生成虚拟索引 → Emby 扫描并展示
-播放             Emby 客户端 → relay 逐资源授权 → 跳转阿里云盘/CDN 取视频
-```
-
-| 改动范围 | 入口与需要一起看的代码 |
-| --- | --- |
-| 找片、任务、登录、设置 | [portal/server.py](portal/server.py) 的 `Handler` 和 `App` 提供 `/discover/api/*`。界面在 [portal/app.js](portal/app.js)、[portal/index.html](portal/index.html)、[portal/style.css](portal/style.css)。主题和 Emby 搜索入口另看 [portal/theme.js](portal/theme.js) 与 [relay/custom-js](relay/custom-js)。 |
-| 站点结果、中文名、按版追更 | [portal/server.py](portal/server.py) 编排 Prowlarr、Sonarr 和 Emby 调用。[portal/metadata.py](portal/metadata.py) 解析站点名称元数据，[portal/versions.py](portal/versions.py) 处理版本条件和原生 Profile 校验，[archive.py](archive.py) 共享追更范围、归档记录和锁。 |
-| 上传、删除、保留期 | [uploader/uploader.py](uploader/uploader.py) 的 `Sources` 决定来源，`Uploader` 处理暂存、校验、发布和持久化任务操作。[uploader/cleanup.py](uploader/cleanup.py) 处理到期的本地清理。改任务状态时一并检查 `App.task_action`、`Uploader.process_actions` 和 [archive.py](archive.py)。 |
-| 直连、虚拟索引和播放记录 | [relay/Dockerfile](relay/Dockerfile) 拉取固定的 `go-emby2openlist` 提交，依次应用 `strict-direct.patch`、`managed-token.patch` 和 `playback.patch`，编入 `playback.go` 并运行 `TestStrict`。记录由 [portal/playback.py](portal/playback.py) 读取。修改以 `relay/` 为准，本机 `.upstream/` 是开发缓存。 |
-| 安装、接线和路由 | [install.sh](install.sh) 提供 `install`、`setup`、`public`、`status`、`stop`。[configure.py](configure.py) 初始化目录与私有配置，[integration.py](integration.py) 调用原生 API。[update_portal.sh](scripts/update_portal.sh) 负责升级，[update_files.py](scripts/update_files.py) 管理发行文件和恢复。[compose.yaml](compose.yaml) 定义挂载，[gateway/Caddyfile](gateway/Caddyfile) 定义公网路由。 |
-
-### 改动时需要守住的边界
-
-- **下载来源分开。** `cinema-movies` 使用 `/media/downloads/movies`，独立剧集或综艺 `cinema-tv` 使用 `/media/downloads/tv-manual`。自动追剧 `sonarr-tv` 先下载到 `/media/downloads/tv`，上传器只收 Sonarr 已导入 `/media/library/tv` 的文件。按版追更必须通过 Sonarr 原生规则，找不到同版就等待。版本状态和原生 Sonarr Profile 需要配套保留。
-- **发布以持久凭证为准。** 上传先进入 `/aliyun/.cinema-upload`，经 OpenList 任务成功、远端大小和可用 SHA1 校验，完成移动和回读才记为 `published`。回执丢失先查任务和强哈希证据，保留 SQLite 状态供恢复。`Movies`、`TV` 和暂存区只能由同一个 uploader 写入。匹配的 `srt`、`ass`、`ssa` 字幕先于视频发布。[找片与归档说明](docs/DISCOVER.md)
-- **删除范围和保留期按实例校验。** 自动清理默认从当前种子完成算 7 天，`0` 关闭。手动删除默认保留 VPS 文件；选择“删除所有”后，由确认清单确定云端原件、字幕、Emby 索引和本地文件。换单个版本时使用资源级操作。验收删除时使用自建测试媒体。[删除流程](docs/DISCOVER.md#删除所有与重新下载)
-- **索引和播放授权独立验证。** Emby 的 `/library` 只挂载 `state/library` 虚拟索引。relay 逐资源校验 Emby 授权和云端路径，取链失败直接拒绝。检查播放时同时看视频或分片的云盘/CDN 响应及客户端进度。自动移除索引关闭，外部手动删片留下旧版本时，先确认云盘目录健康、旧对象确实消失，再备份移出对应索引并扫描 Emby。见 [播放记录与直连证据](docs/DISCOVER.md#播放记录与直连证据) 和 [旧索引处理](docs/DISCOVER.md#删除后换版与旧索引)。
-
-## 本地验证与打包
-
-从项目根目录运行。Windows 可用 `python`，Debian 通常用 `python3`。Node 仅用于开发检查。
-
-```bash
-python -m unittest discover -s tests -p 'test_*.py'
-node tests/search-entry.test.cjs
-node tests/watch-handoff.test.cjs
-node tests/task-controls.test.cjs
-node tests/portal-resilience.test.cjs
-bash -n install.sh
-bash -n scripts/update_portal.sh
-bash -n scripts/openlist-start.sh
-```
-
-- 浏览器回归 `node tests/check_ui.cjs` 使用本机 Chrome 和可被 Node 解析的 Playwright（可设 `NODE_PATH`），数据由测试中的本地 HTTP 服务模拟。界面规范见 [DESIGN.md](DESIGN.md)。
-- Linux/Docker 环境下，设置 `export MOVIE_DOMAIN=cinema.example.invalid` 后，可用 `docker compose --profile '*' config --quiet` 检查 Compose，用 `docker compose --profile connected build relay` 重放 Go 补丁、执行 Go 回归并构建。源码许可及固定版本见 [SOURCES.md](SOURCES.md)。
-- 发布新安装包时执行 `python scripts/build_all_in_one.py`，生成 `dist/cinema-all-in-one.sh` 与 `.sha256`，在 Debian 上用 `sha256sum -c cinema-all-in-one.sh.sha256` 校验。每个包使用同次构建生成的校验文件。GitHub Actions 在推送后构建并解包回归，源码交接由仓库提供。[打包清单](scripts/build_all_in_one.py) · [回归工作流](.github/workflows/regression.yml)
-
-## 部署、备份与排查
-
-新机按新 VPS 流程安装。已有部署先核对实际目录，随后从独立的新源码目录执行 `sudo bash /新源码目录/scripts/update_portal.sh /opt/cinema`。此处以 `/opt/cinema` 为例。首次升级旧安装时，缺少发行记录的原有文件会保留；后续升级按发行清单管理。单文件安装器用于新装，同一包可以重新运行以继续安装。[新 VPS 流程](docs/NEW-VPS.md) · [现有部署升级](docs/DISCOVER.md#更新已有部署)
-
-**备份优先级。** 保留源码、`.env`、全部 `state/`、存在时的 `compose.override.yaml` 或 `.yml`，以及仍需保留的 `media/`。`state/uploader/data/uploads.sqlite3` 是上传、归档、任务动作和本地清理凭证，`state/uploader/versions.json` 与 `state/sonarr/` 一起备份。`state/library/` 是虚拟索引，`state/relay/lib/playback/` 是滚动播放日志。升级脚本在 `backups/` 生成私有备份和 SQLite 在线快照，失败时尝试恢复旧源码及镜像，数据库仍是当前状态。需要手工恢复时按同一备份点核对原生服务数据库和上传状态。凭据通过私密渠道移交，源码包、日志和公开记录里只保留必要的状态信息。
-
-在 VPS 部署目录先执行只读检查。
-
-```bash
-cd /opt/cinema
-sudo bash install.sh status
-sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
-```
-
-| 现象 | 优先核对 |
-| --- | --- |
-| 无法登录或原生后台打不开 | Caddy 路由和 portal 管理员鉴权，再查原生应用认证。公网 `/search/`、`/sonarr/`、`/qb/`、`/openlist/` 有影院管理员前置检查，应用自身认证也保留。隧道可分别访问各回环端口，portal 为 `8097`，relay 为 `8095`。 |
-| 下载 100% 但 Emby 没有影片 | qB 分类 → Sonarr 导入（自动追剧）→ `uploads.sqlite3` 状态和 uploader 错误 → OpenList 任务及发布目录 → relay 索引 → Emby 扫描。OpenList 会先在 VPS 缓存文件，遇到大文件要同时检查下载和上传缓存空间。 |
-| 列表有片但打不开 | 核对选中的 Emby 媒体版本、对应云端对象和授权，再看 `/discover/` 播放记录及客户端网络。relay 的容器日志禁用，排查时避免记录完整签名 URL。 |
-
 ## 2026-11-22 验证结果与现场验收
 
 - **源码与安装包。** Windows Python 共发现 162 项，158 项通过、4 项跳过。WSL Linux 源码和解包目录各发现 162 项，均通过 161 项、跳过 Windows 专用项。Windows 首轮一次上传回归失败，单项重复 6 次与最终全量复跑通过。三组 Node 检查及 Chrome 五视图回归在源码和解包目录通过。安装包校验和匹配，解包内容含 72 个文件。
@@ -270,88 +421,3 @@ sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
 - **no-go。** 冻结候选仍是 Draft PR #7 head `0aabaaede8ba37b70607416a6fde53a4c2992ce1` / tree `f1617efc5a0645fdd1a9791024c565950e880ad9`，base `c792c3fe3312f77c7022aa7f5fcd30f419dbab44`。独立 QA 第二轮 fail/no-go。第一轮 head `9d6c23fd733b447ff708fcf974cf3687cbb19b62` / tree `566ba6edc24ee1631fd35f84e9fc18418dc0cd86` 亦 no-go。两轮结论都保留。2026-11-19 16:08 PST 只读核对时，远程 head 仍是这组 SHA；SHA 未变不是当前 QA 通过。
 - **未测。** A 现场 blocked。真实签名 Range 206、WebSocket 101、官方 App、Infuse、滑条、公网层 unrun。残留验证脚本误判是离线桩证据，不能写成 A 现场泄漏。作者 07:16 PT 修复交接是停止前的唯一作者交付，其中“继续修复 / 应用 / 在 A 复验”已被停止指令取代。作者停止后工作区状态未知。
 - **未合并、未部署。** PR #7 仍是 Draft。本次只加文档，不合并，不部署，不恢复开发。禁止把本段或归档提交当成功能验收。
-
-## 2026-11-23 独立导入与复核（Cursor 云端）
-
-本节由 Cursor 云端代理在作者记录之后追加。上面的「2026-11-23 全面复审与修复」仍是 Claude CLI 作者记录，不是本节的复测结论。本节不改产品代码。
-
-### 源、导入与当前 main
-
-| 角色 | SHA |
-| --- | --- |
-| 源 main / 当前 `origin/main` | `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e` |
-| 本地候选（5 个源提交的合并结果，未在本仓库重放成 5 个提交） | `d93f6cd6232526b4cb79b74174ca68f8642e67aa` |
-| 补丁 SHA256 | `192c9e48a0317dccd285c6e8c1b15bff2f01249a73613e7b9b023a08db986377` |
-| 导入后的 git tree | `1d28e35916c3620d192f5d9e35e19e2c83ad1680` |
-| 导入提交（作者 Cursor Agent，只应用该 diff） | `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1` |
-| 独立测试提交 | `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` |
-
-`git fetch origin main` 后 `origin/main` 仍是 `0796cfd7e816ef1878fe4d9a4a589a3ba327eb5e`。没有新的 main 提交，没有冲突，也没有丢弃任一侧的改动。补丁是普通 git diff，不是 mbox。在该基线上 `git apply --index` 后、提交前，`git write-tree` 等于 `1d28e35916c3620d192f5d9e35e19e2c83ad1680`。导入提交的 tree 与此相同。5 个本地源提交没有被重造成新的作者身份。发布环境可能在提交说明末尾追加 `Co-authored-by`；以提交说明正文中的 SHA 为准。包含本节的提交是独立测试提交的子提交，分支头用 `git rev-parse HEAD` 核对。
-
-导入的产品与作者测试文件：`HANDOFF.md`、`README.md`、`compose.yaml`、`docs/DISCOVER.md`、`gateway/Caddyfile`、`portal/app.js`、`portal/index.html`、`portal/playback.py`、`portal/server.py`、`relay/playback.go`、`relay/playback_test.go`、`tests/portal-resilience.test.cjs`、`tests/test_cleanup.py`、`tests/test_gateway.py`、`tests/test_playback.py`、`tests/test_portal.py`、`tests/test_reliability.py`、`tests/test_versions.py`、`uploader/cleanup.py`、`uploader/uploader.py`。
-
-独立追加：`tests/test_independent_boundaries.py`、`tests/independent-ui-flows.cjs`，以及本节。
-
-### 环境
-
-2026-11-22T23:43:35Z 记录：Linux 6.12.113+ x86_64，Python 3.12.3，Node v22.23.4，Google Chrome 157.0.8103.50，Playwright 1.49.1，Docker 29.1.3，Compose 2.40.3，宿主机 Go 1.22.2（未用于 TestStrict）。relay 测试在镜像构建里的 `golang:1.27-alpine` 中运行。没有真实 Emby、OpenList、PT、阿里云或生产流量。
-
-### 命令与退出码（独立执行）
-
-| 命令 | 退出码 | 结果 |
-| --- | --- | --- |
-| `sha256sum` 附件补丁 | 0 | 与上表 SHA256 一致 |
-| `git apply --check` 后 `git apply --index`，再 `git write-tree` | 0 | tree 完全匹配 |
-| `git fetch origin main` | 0 | 与源基线相同 |
-| 源基线上只换入候选新增测试后，逐项运行清理/播放记录/退出/密码/超时/退避/网关/重复下载与 `node tests/portal-resilience.test.cjs` | 全部 1 | 修复前失败：sidecar 会删正片、大 sample 被删、401 会话挤成 100 条、退出 503、密码文案是通用错误、`Handler.timeout` 为 None、退避 10 次而不是 4、Caddy 没有 HSTS、重复下载报「结果已过期」、旧前端不处理断网 |
-| `python3 -m unittest discover -s tests -p 'test_*.py'` | 0 | 184 项，1 项跳过。其中 13 项是本节新增，其余对应该候选在 171 项基础上的作者测试 |
-| `python3 -m unittest discover -s tests -p 'test_independent_boundaries.py'` | 0 | 13 项 OK |
-| `node --test tests/*.test.cjs` | 0 | 4 项通过 |
-| `bash -n install.sh` 与 `bash -n scripts/*.sh`，`node --check portal/app.js` | 0 | 通过 |
-| `NODE_PATH=/tmp/pw/node_modules node tests/check_ui.cjs` | 0 | 本机 Chrome 跑完五个视图 |
-| `NODE_PATH=/tmp/pw/node_modules node tests/independent-ui-flows.cjs` | 0 | 启动 503 显示登录、退出清空旧结果、保留天数编辑不被焦点刷新覆盖、重试按钮在 `tasks()` 后保持焦点、追更范围没有第 0 季 |
-| `python3 scripts/build_all_in_one.py --output /tmp/cinema-independent.sh` 后 `sha256sum -c` | 0 | OK。未在解包目录再跑测试 |
-| `sudo -E docker compose --profile '*' config --quiet` | 0 | 真实 Compose 解析。relay 为 `cinema-relay:9b049b8-strict5`，`cap_drop: [ALL]`，`no-new-privileges:true`，只绑定 `127.0.0.1:8095` |
-| `sudo -E docker compose --profile connected build relay` | 0 | 镜像构建成功。Dockerfile 内 `go test -run TestStrict` 四个包均为 `ok`，随后 release 构建成功。日志没有 `-v`，本节不把作者的「18 项」写成独立计数 |
-| 固定摘要 `caddy@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e` 对仓库 Caddyfile `validate` | 0 | `Valid configuration`。有格式警告，不是配置错误 |
-| 同一 Caddy 镜像加本机 echo，请求 `https://localhost/` | 0 | `cinema=SECRET` 到上游为空；`cinema=SECRET; emby=1` 变为 `emby=1`；`a=1; cinema=SECRET; b=2` 变为 `a=1;b=2`；`notcinema` 与 `x=notcinema=1` 不变。响应含 `strict-transport-security: max-age=31536000`（无 includeSubDomains/preload）和 `x-frame-options: SAMEORIGIN` |
-| `docker run --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true` 挂示例配置 | 进程保持运行，手动停止 | 监听 8095。访问返回 500，日志是 `lookup emby ... no such host`。没有连上真实 Emby |
-
-`.github/workflows/regression.yml` 只在 `push` 和 `pull_request` 上跑测试、安装包和解包、Compose 配置与 relay 镜像构建。没有部署、发布或预览工作流。打开 PR 会启动这条回归，不会部署。
-
-### 独立结论与未改的产品边界
-
-作者声称的清理保留、未授权播放记录、退出、超时、错误密码、退避、前端焦点和网关头，在本机用上述失败对照和通过测试复现。产品代码没有被改写。
-
-仍保留、需要所有者知道的行为：
-
-- 含未归档媒体的种子不再自动清理，磁盘可能持续增长；任务页仍可手动删除。
-- HSTS 一年，且不含子域。浏览器记住后不能靠回滚服务端马上撤销。
-- OpenList 返回 500 后停在 `moving` 的任务仍不自动重试。本节没有改这条策略，也没有连真实 OpenList。
-- 按任务名恢复且云端没有 SHA1 时，仍可能只按大小发布。本节没有改，也没有用真实云盘验证。
-- 管理入口和 Emby 仍在同一主机。发往 Emby 的 `cinema` cookie 已在真实 Caddy 上剥掉，但同源 XSS 仍能碰到管理路径。`X-Frame-Options` 加在 Emby 那条 handle 上，不是整个 `/discover/`。
-- 名称像 sample、qB 报告大小小于或等于 1 GiB 的视频仍会随已归档正片删除。大于 1 GiB 才要求先归档。缺 `size` 时在删除前的字段比较抛错，状态留在 `pending` / `cleanup_check_failed`，本轮不删文件；这是失败关闭，不是明确的保留原因。
-- `.mks` 和 `.ttml` 不在未归档媒体名单里，也不属于会归档的 srt/ass/ssa。正片已发布时，自动清理仍会删除它们。`test_sidecar_extensions_outside_the_allow_list_are_still_deleted` 记录了这个现状。本节没有扩大名单。
-- 门户会隐藏非 2xx 的会话上报。历史媒体行只要 `kind=media` 且状态为 401，仍会占满最近 100 条。新的未授权请求由 relay 不再写入；旧媒体失败行与真实播放失败在日志里没有单独的授权标记。
-- 退避只在内存里，重启即清零，单次等待最长 5 分钟。等待期间动作保持 `pending`，不会被标成完成。另一个 id 的动作不会被第一条的退避挡住。
-
-### 未测
-
-真实 Emby、qB、OpenList、PT、阿里云和公网客户端。安装包只做了校验和，没有在解包目录重跑 184 项。没有 `docker compose up` 整套影院。relay 的 Go 测试没有在宿主机 Go 1.22 上重跑。网关容器自身的 `cap_drop` 仍按作者延后项未改。
-
-### 回滚与继续
-
-未部署，没有数据库迁移。回滚这个分支不会改变已经下发的 HSTS，因为本节没有发布。代码回滚是revert导入提交 `21c817c0296a0b4bed9b498e5ed3c5bbc4d1b8e1`、独立测试提交 `5e4f3029f6db4d633fbe4c420f28188a8645a6e9` 和包含本节的提交，或直接关闭 PR。不要 force-push，不要改已经推送的提交。
-
-### GitHub 回归终态
-
-核对时间 2026-11-22T23:50Z。head `b134f6712e193880bc71946d5cd099a802b41065` 上有两次同名 `regression`，都是 Checks API 的 `completed` / `success`。工作流同时监听 `push` 和 `pull_request`，所以一次推送会跑两遍；两边都只构建并测试，没有部署。
-
-| 触发 | 运行 | 作业 | 开始 / 结束 (UTC) | 结论 |
-| --- | --- | --- | --- | --- |
-| push | [45085166225](https://github.com/WenLiCG/movie/actions/runs/45085166225) | [137402009591](https://github.com/WenLiCG/movie/actions/runs/45085166225/job/137402009591) | 23:47:55 / 23:49:46 | success |
-| pull_request | [45085182699](https://github.com/WenLiCG/movie/actions/runs/45085182699) | [137402061701](https://github.com/WenLiCG/movie/actions/runs/45085182699/job/137402061701) | 23:48:06 / 23:49:57 | success |
-
-旧的 combined commit status 没有状态项，`state` 仍显示 `pending`。以 Checks API 的这两次 success 为终态。没有合并，没有部署。
-
-继续由所有者决定 `.mks`/`.ttml`、`moving` 重试、无 SHA1 发布，以及是否把管理入口拆到独立子域。本节不合并、不部署。
