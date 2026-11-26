@@ -31,8 +31,8 @@ sha256sum -c cinema-all-in-one.sh.sha256
 sudo bash cinema-all-in-one.sh
 ```
 
-3. Windows 双击 `Open.cmd`，输入新的 `用户@VPS地址`；保持隧道窗口开启，完成 Emby、OpenList、Prowlarr、Sonarr 和 qB 首次账号设置。
-4. 打开 `http://127.0.0.1:8097/discover/`，使用 Emby 管理员登录，首次登录自动创建电影、电视剧媒体库并应用中文刮削默认设置；填写 Open Refresh Token，自动连接云盘和下载器，再通过“配置 Indexer”添加自己的站点。首次填写 OpenList 和 qB 各自的账号；无需与 Emby 一致，已连接后沿用服务凭据，可在设置页随时手动刷新全部服务检查状态。
+3. Windows 双击 `Open.cmd`，输入新的 `用户@VPS地址`；保持隧道窗口开启，在 Emby、OpenList、Prowlarr、Sonarr 和 qB 的原生页面分别将本地运维管理员设为 `admin`，填写同一个自选管理员密码。五个服务分别保存账号，修改一处密码后须逐个更新。普通观众使用独立 Emby 账号，PT 站点和云盘使用各自的授权。
+4. 打开 `http://127.0.0.1:8097/discover/`，使用 Emby 管理员登录，首次登录自动创建电影、电视剧媒体库并应用中文刮削默认设置；填写 Open Refresh Token，自动连接云盘和下载器，再通过“配置 Indexer”添加自己的站点。首次连接时，分别在 OpenList 和 qB 密码栏填写刚设置的管理员密码。后续连接沿用已保存的服务凭据，可在设置页刷新状态。
 5. 在 VPS 构建播放入口并开启 HTTPS：
 
 ```bash

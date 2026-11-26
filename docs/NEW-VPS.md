@@ -50,12 +50,12 @@ ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:809
 | 页面 | 首次必须完成的内容 |
 | --- | --- |
 | `http://127.0.0.1:8096` | 完成 Emby 向导，设置有密码的管理员。媒体库可跳过，首次登录找片页时自动创建并配置中文刮削。 |
-| `http://127.0.0.1:5244/openlist/` | 创建 OpenList 管理员，并禁用游客访问。账号和密码可以与 Emby 不同；此处暂不手工挂载。 |
+| `http://127.0.0.1:5244/openlist/` | 创建 OpenList 管理员，并禁用游客访问。云盘挂载在下一步完成。 |
 | `http://127.0.0.1:9696/search/` | 创建 Prowlarr 管理员，认证方式 Forms，Authentication Required=Enabled，不设置免认证 Trusted Networks。 |
 | `http://127.0.0.1:8989/sonarr/` | 创建 Sonarr 管理员，同样启用 Forms 和始终认证。 |
 | `http://127.0.0.1:8080` | 用 qB 初始 admin 和临时密码登录，设置正式用户名、密码；关闭本地地址/子网免认证。 |
 
-用户名可以使用 `cinema-admin`，密码在自己的页面输入。稍后在设置页填写 OpenList 和 qB 各自的账号。交付包不预置服务器密码或管理账号密码。
+新部署统一在上述五个原生页面设置本地运维用户名 `admin` 和同一个自选管理员密码。每个服务独立保存账号，日后改密须逐个更新，并在影院设置页更新 qB 下载器凭据。为普通观众另外创建 Emby 账号，PT 站点与云盘继续使用各自的授权。
 
 qB 临时密码在 VPS 查看：
 
@@ -71,7 +71,7 @@ docker compose logs --tail=100 qbittorrent
 打开 `http://127.0.0.1:8097/discover/`，用 **Emby 管理员**登录，进入“设置”：
 
 1. 展开 Refresh Token 引导，访问 [OpenList 授权页](https://api.oplist.org)，选择阿里云盘应用登录，勾选使用 OpenList 提供的参数，扫码并取得阿里云盘 **Open** Refresh Token。只使用该授权方式对应的令牌，详见 [OpenList 官方说明](https://doc.oplist.org/guide/drivers/aliyundrive_open)。
-2. 粘贴 Refresh Token，填写 OpenList 管理员账号和 qB 正式账号。OpenList 密码只用于本次交换管理 Token；qB 凭据供后台下载服务使用，保存于私有配置。
+2. 粘贴 Refresh Token，在 OpenList 和 qB 密码栏分别输入刚设置的管理员密码。首次连接时两个用户名留空即可沿用当前 Emby 管理员名。已有站点可填写各自的实际账号。OpenList 密码只用于本次交换管理 Token；qB 凭据供后台下载服务使用，保存于私有配置。
 3. 点击“连接云盘并自动配置下载器”。自动设置 `/aliyun`、根目录 `root`、资源库，创建 Movies/TV/隔离暂存目录，并设置三个 qB 分类、Prowlarr 下载器、Sonarr 剧库和应用同步。无需复制应用 API Key，也无需手填 OpenList 内部管理 Token。
 4. 点击“配置 Indexer”，在 Prowlarr 添加自己的 PT 站点，填写站点 Cookie 或 API Key，逐个 Test 后保存。在 Prowlarr Settings → Apps 确认 Sonarr 连接与索引器同步。
 5. 回到“设置”刷新，黄色提示会列出未完成或异常项。保留天数默认 7；0 为关闭，仅清理已经云端发布并复核成功的本地内容和对应做种任务。
