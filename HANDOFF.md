@@ -12,7 +12,7 @@
 
 ## 2026-11-26 交付复审（基线 `ee40e86`）
 
-本机原有 `main@d961963`、另一个旧版工作树均干净。获取远端后，本地主线独有 0 个提交、远端独有 1 个提交，15 个文件有差异。此次从已合并 PR #17 的 `ee40e86` 快进开分支，保留原工作树、历史分支及本机忽略的运维文件。
+本机原有 `main@d961963`、另一个旧版工作树均干净。获取远端后，本地主线独有 0 个提交、远端独有 1 个提交，15 个文件有差异。此次从已合并 PR #17 的 `ee40e86` 快进开分支，保留原工作树、历史分支及本机忽略的运维文件。应用修复提交为 `cd10d91`。[交付 PR #18](https://github.com/WenLiCG/movie/pull/18)
 
 | 范围 | 可复现问题及处理 |
 | --- | --- |
@@ -28,7 +28,8 @@
 - Windows Python 3.14.3 全量 240 项，235 通过、5 项平台跳过。WSL Linux Python 3.14.4 源码与安装器解包目录各运行 240 项，各通过 239 项，跳过 Windows 专用启动器。安装器 SHA-256、内嵌校验与 81 个发行文件通过核对。Bash、Python、JavaScript 语法、Ruff 语法和未定义名等检查、mypy 默认模式及全 profile Compose 配置均通过。mypy 使用 uploader 实际模块路径，未启用全项目严格类型模式。
 - 4 组 Node 测试和两套 Chrome 回归通过，覆盖 320–1440px。实际启动门户，用 Chrome 登录、搜索、提交测试下载、暂停和恢复、读取任务、保存保留期、退出，再验证会话返回 401。此流程使用本机 HTTP 模拟上游和临时状态。另在窄屏、深色主题下核对页面，覆盖选集及追更慢响应。
 - 固定上游与全部补丁在 Go 1.27.4 通过模块校验、五包严格测试、vet 与 Linux/amd64 构建。实际启动 relay，通过模拟 Emby 请求获得 200，监听清单仅有配置的应用端口。发布二进制 govulncheck 报告 0 项可调用漏洞，另列有 2 条包级与 1 条模块级未调用公告。CI 使用的 Playwright 1.65.1 经 npm audit 返回 0 项。
-- Bandit 中高等级扫描退出码为 1。复核 12 项告警，包括 5 个容器监听或端口检查、2 处读取服务本地 XML、3 处 SQL 构造（固定片段、内部列名或绑定占位符），以及 2 处与 OpenList 对接的 SHA1 文件校验。未发现这些调用可经门户传入任意 SQL、外部 XML 或系统命令。本机没有 Docker daemon；镜像构建、解包后容器启动及 Caddy 配置验证由 [GitHub Regression](https://github.com/WenLiCG/movie/actions/workflows/regression.yml) 执行。
+- Bandit 中高等级扫描退出码为 1。复核 12 项告警，包括 5 个容器监听或端口检查、2 处读取服务本地 XML、3 处 SQL 构造（固定片段、内部列名或绑定占位符），以及 2 处与 OpenList 对接的 SHA1 文件校验。
+- 本机没有 Docker daemon。GitHub 在 `cd10d91` 的独立 runner 上从安装包解包构建 relay、portal、uploader，启动 portal/uploader，核对匿名会话 401、等待配置状态及 Caddy 配置，推送和 PR 两次运行均通过。[推送回归](https://github.com/WenLiCG/movie/actions/runs/45844497554) · [PR 回归](https://github.com/WenLiCG/movie/actions/runs/45844533998)
 
 交付范围为仓库源码和可构建的安装包。此次未操作测试 VPS、真实 PT 站点或云盘。现场版本与上次实测记录见下节。接手后，优先用有权使用的小视频验证当前自定义挂载的下载、上传哈希、CDN 取流，再在独立 Debian 环境演练升级回滚。数据库结构和服务凭据格式沿用现有版本。
 
