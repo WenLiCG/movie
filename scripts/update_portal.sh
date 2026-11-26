@@ -77,12 +77,14 @@ if p.exists():
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
             if db.execute("SELECT 1 FROM jobs WHERE state IN ('uploading','queued','moving')").fetchone():
                 raise SystemExit('请等待正在上传或发布的任务结束后，再安装此次升级。')
-config=json.loads(Path('state/uploader/config.json').read_text(encoding='utf-8'))
-client=Client('http://127.0.0.1:5244/openlist')
-client.opener.addheaders=[('Authorization',config['openlist_token'])]
-value=client.json('GET','/api/admin/task/upload/undone')
-if value.get('code')!=200 or not isinstance(value.get('data'),list) or value['data']:
-    raise SystemExit('OpenList 仍有上传任务，请结束后再升级。')
+config_path=Path('state/uploader/config.json')
+if config_path.is_file():
+    config=json.loads(config_path.read_text(encoding='utf-8'))
+    client=Client('http://127.0.0.1:5244/openlist')
+    client.opener.addheaders=[('Authorization',config['openlist_token'])]
+    value=client.json('GET','/api/admin/task/upload/undone')
+    if not isinstance(value,dict) or value.get('code')!=200 or not isinstance(value.get('data'),list) or value['data']:
+        raise SystemExit('OpenList 仍有上传任务，请结束后再升级。')
 PY_UPLOADS
     docker compose --profile connected up -d --no-deps openlist
 fi

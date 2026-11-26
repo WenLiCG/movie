@@ -5,11 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import ipaddress
 import socket
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
@@ -25,7 +24,7 @@ from integration import APIError, Client, connect_services, read_api_key, emby_d
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring
+from archive import SUBTITLES, archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
@@ -33,10 +32,25 @@ BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
 STATIC = Path(__file__).parent
 USER_ERROR_PREFIXES = (
     "请", "已", "搜索", "结果", "下载器", "云盘", "VPS", "/aliyun", "Sonarr", "Emby",
-    "OpenList", "qB", "Prowlarr", "prowlarr", "sonarr", "登录", "会话", "追更",
+    "OpenList", "qB", "QBittorrent", "Prowlarr", "prowlarr", "sonarr", "登录", "会话", "追更",
     "季数", "所选集数", "播放记录", "影院", "同名", "重复的", "当前应用", "应用设置",
-    "本地应用", "需要", "无法",
+    "本地应用", "需要", "无法", "请求", "Cinema ", "API 响应",
 )
+
+
+def session_cookie(header):
+    """Extract the portal session cookie without letting malformed sibling cookies break parsing."""
+    value = ""
+    for part in (header or "").split(";"):
+        name, sep, raw = part.strip().partition("=")
+        if sep and name.strip() == "cinema":
+            value = raw.strip()
+    return value
+
+
+def trim_mapping(mapping, limit=500):
+    while len(mapping) > limit:
+        mapping.pop(next(iter(mapping)))
 
 
 class SessionCheckUnavailable(Exception):
@@ -205,13 +219,18 @@ class App:
             raise ValueError("登录失败：暂时无法连接 Emby，请确认 Emby 正在运行后重试。") from None
         if not isinstance(result, dict):
             raise ValueError("登录失败：Emby 未返回有效会话，请稍后重试。")
-        if not result.get("AccessToken") or result.get("User", {}).get("Policy", {}).get("IsAdministrator") is not True:
+        user = result.get("User") if isinstance(result.get("User"), dict) else {}
+        policy = user.get("Policy") if isinstance(user.get("Policy"), dict) else {}
+        if not result.get("AccessToken") or not user.get("Id") or policy.get("IsAdministrator") is not True:
             if result.get("AccessToken"):
                 client.opener.addheaders.append(("X-Emby-Token", result["AccessToken"]))
-                client.request("POST", "/Sessions/Logout")
+                try:
+                    client.request("POST", "/Sessions/Logout")
+                except (ValueError, OSError):
+                    pass
             raise ValueError("请使用 Emby 管理员账号登录。")
         sid = secrets.token_urlsafe(32)
-        session = {"token": result["AccessToken"], "user": result["User"]["Id"], "expires": now + 8 * 3600,
+        session = {"token": result["AccessToken"], "user": user["Id"], "expires": now + 8 * 3600,
                    "username": username, "csrf": secrets.token_urlsafe(24), "results": {}}
         with self.lock:
             self.sessions = {k: v for k, v in self.sessions.items() if v["expires"] > now}
@@ -275,11 +294,13 @@ class App:
         return {'server_id':info['Id'],'name':info.get('ServerName','私人影院'),
                 'user_id':session['user'],'token':session['token']}
 
-    def qb(self):
+    def qb(self, timeout=None):
         config = self.config()
         if not config.get("qb_password"):
             raise ValueError("请先在设置中自动配置下载器。")
         qb = self.client("qb")
+        if timeout is not None:
+            qb.timeout = timeout
         raw = qb.request("POST", "/api/v2/auth/login", form={"username": config["qb_username"], "password": config["qb_password"]})
         if raw.strip() not in (b"", b"Ok.") or not any(re.fullmatch(r"SID|QBT_SID_[0-9]+", c.name) and c.value for c in qb.cookies):
             raise ValueError("下载器登录失败，请更新下载器账号。")
@@ -311,7 +332,10 @@ class App:
             if not isinstance(response, dict) or response.get('code') != 200 or not (response.get('data') or {}).get('token'):
                 raise ValueError('OpenList 管理员登录失败，请检查 OpenList 用户名和密码。')
             client.opener.addheaders = [("Authorization", response["data"]["token"])]
-            token = self.ol(client, "GET", "/api/admin/setting/get?key=token")["value"]
+            setting = self.ol(client, "GET", "/api/admin/setting/get?key=token")
+            token = setting.get("value") if isinstance(setting, dict) else ""
+            if not isinstance(token, str) or not token:
+                raise ValueError("云盘操作失败，未能读取 OpenList 服务令牌。")
         client.opener.addheaders = [("Authorization", token)]
         return client, token
 
@@ -321,8 +345,10 @@ class App:
         if refresh:
             refresh = text(refresh, 4096)
             storages = self.ol(ol, "GET", "/api/admin/storage/list?page=1&per_page=1000")
-            found = [s for s in storages["content"] if s["mount_path"].rstrip("/") == "/aliyun"]
-            if len(found) > 1 or (found and found[0]["driver"] != "AliyundriveOpen"):
+            # OpenList (Go) serializes an empty slice as JSON null on fresh installations.
+            entries = (storages or {}).get("content") or [] if isinstance(storages, dict) else []
+            found = [s for s in entries if isinstance(s, dict) and str(s.get("mount_path", "")).rstrip("/") == "/aliyun"]
+            if len(found) > 1 or (found and found[0].get("driver") != "AliyundriveOpen"):
                 raise ValueError("/aliyun 已被其他挂载占用，请先在 OpenList 检查。")
             storage = dict(found[0]) if found else {"mount_path": "/aliyun", "driver": "AliyundriveOpen", "cache_expiration": 30, "order": 0}
             addition = json.loads(storage.get("addition") or "{}")
@@ -336,19 +362,22 @@ class App:
             storage.pop("mount_details", None)
             self.ol(ol, "POST", "/api/admin/storage/" + ("update" if found else "create"), storage)
         remote = self.ol(ol, "POST", "/api/fs/get", {"path": "/aliyun", "password": ""})
-        if not remote.get("is_dir") or remote.get("provider") != "AliyundriveOpen":
+        if not isinstance(remote, dict) or not remote.get("is_dir") or remote.get("provider") != "AliyundriveOpen":
             raise ValueError("请填写阿里云盘 Open Refresh Token，或检查 /aliyun 挂载。")
         config = self.config()
-        username = body.get("qb_username") or config.get("qb_username") or session["username"]
+        raw_user = body.get("qb_username")
+        username = text(raw_user) if raw_user else (config.get("qb_username") or session["username"])
         password = body.get('qb_password') or config.get('qb_password')
         if not password:
             raise ValueError('请填写 qB 正式登录密码，后台下载服务需要保存此凭据。')
+        text(password, 1024)
         prowlarr_key = read_api_key(self.services / "prowlarr/config.xml")
         sonarr_key = read_api_key(self.services / "sonarr/config.xml")
         connect_services(token, username, password, prowlarr_key, sonarr_key, self.origins)
         listing = self.ol(ol, "POST", "/api/fs/list", {"path": "/aliyun", "password": "", "page": 1, "per_page": 1000, "refresh": True})
+        items = (listing or {}).get("content") or [] if isinstance(listing, dict) else []
         for folder in ("Movies", "TV", ".cinema-upload"):
-            existing = next((i for i in listing.get("content", []) if i.get("name") == folder), None)
+            existing = next((i for i in items if isinstance(i, dict) and i.get("name") == folder), None)
             if existing and not existing.get("is_dir"):
                 raise ValueError("云盘目录名称已被文件占用，请在 OpenList 检查。")
             if not existing:
@@ -367,12 +396,16 @@ class App:
             client.opener.addheaders = [('X-Emby-Token', session['token'])]
             try:
                 ids = ','.join(dict.fromkeys(item['item_id'] for item in items))
-                for value in client.json('GET', '/Items?' + urlencode({'Ids':ids,'Fields':'SeriesName','Recursive':'true'}))['Items']:
+                response = client.json('GET', '/Items?' + urlencode({'Ids':ids,'Fields':'SeriesName','Recursive':'true'}))
+                found = response.get('Items') if isinstance(response, dict) else None
+                for value in found if isinstance(found, list) else ():
+                    if not isinstance(value, dict) or 'Id' not in value:
+                        continue
                     name = value.get('Name') or '未命名影片'
                     if value.get('Type') == 'Episode':
                         name = f"{value.get('SeriesName') or '剧集'} · S{value.get('ParentIndexNumber') or 0:02}E{value.get('IndexNumber') or 0:02} · {name}"
                     names[str(value['Id'])] = name
-            except (ValueError, OSError):
+            except (ValueError, OSError, TypeError, KeyError):
                 pass
         return {'items':[{**item,'title':names.get(item['item_id'],'媒体 #'+item['item_id'])} for item in items]}
 
@@ -519,6 +552,8 @@ class App:
         params = {'query': query, 'type': 'search'}
         if kind == 'movie': params['categories'] = '2000'
         values = self.client("prowlarr").json("GET", "/api/v1/search?" + urlencode(params))
+        if not isinstance(values, list):
+            raise ValueError('搜索服务返回了意外格式，请稍后重试。')
         supplements, warnings = {}, []
         try:
             indexers = [i for i in self.client("prowlarr").json("GET", "/api/v1/indexer")
@@ -535,13 +570,11 @@ class App:
         except (ValueError, OSError):
             if values:
                 warnings.append('站点附加资料暂时不可用。')
-        session['results'] = {k:v for k,v in session.get('results',{}).items() if v[0] > time.time()}
-        if len(session['results']) > 5000:
-            session['results'] = {}
-        items = []
+        now = time.time()
+        new_results, items = {}, []
         for value in values:
             rid = secrets.token_urlsafe(12)
-            session["results"][rid] = (time.time() + 1800, {**value, '_kind': kind, '_query': query})
+            new_results[rid] = (now + 1800, {**value, '_kind': kind, '_query': query})
             resolution, codec = tags(value["title"])
             extra = (supplements.get(value['indexerId']) or {}).get(resource_id(value), {})
             version, span = details(value['title'])
@@ -551,8 +584,13 @@ class App:
                           'group': version['group'], 'episodes': span if kind == 'tv' else '',
                           'subtitle': extra.get('subtitle', ''), 'labels': extra.get('labels', []),
                           'metadata_available': bool(extra),
-                          'categories': ', '.join(c.get('name','') for c in value.get('categories', [])),
-                          "free": "freeleech" in [f.lower() for f in value.get("indexerFlags", [])]})
+                          'categories': ', '.join(c.get('name','') for c in (value.get('categories') or [])),
+                          "free": "freeleech" in [f.lower() for f in (value.get("indexerFlags") or [])]})
+        with self.lock:
+            results = {k:v for k,v in session.get('results',{}).items() if v[0] > now}
+            results.update(new_results)
+            trim_mapping(results, 5000)
+            session['results'] = results
         for item in items:
             if re.search(r'\b(?:BDMV|BDISO|COMPLETE[. _-]BLURAY)\b', item['title'], re.I):
                 item['labels'] = [*item['labels'], '原盘']
@@ -561,7 +599,8 @@ class App:
     def stored_release(self, session, rid, kind=None):
         if not isinstance(rid, str) or not rid:
             raise ValueError('请选择有效的资源条目。')
-        stored = session.get('results', {}).get(rid)
+        with self.lock:
+            stored = session.get('results', {}).get(rid)
         if not stored or stored[0] < time.time():
             raise ValueError('结果已过期，请重新搜索。')
         if kind and stored[1].get('_kind') != kind:
@@ -589,14 +628,19 @@ class App:
             fields['group'] = ''
         if not fields['group'] and native_group and native_group.casefold() not in NOT_GROUPS:
             fields['group'] = native_group
-        session.setdefault('series', {}).update({str(v['tvdbId']): v for v in candidates})
-        session.setdefault('version_previews', {})[rid] = {'info': info, 'candidates': [v['tvdbId'] for v in candidates]}
+        with self.lock:
+            series_cache = session.setdefault('series', {})
+            series_cache.update({str(v['tvdbId']): v for v in candidates})
+            trim_mapping(series_cache, 500)
+            previews = session.setdefault('version_previews', {})
+            previews[rid] = {'info': info, 'candidates': [v['tvdbId'] for v in candidates]}
+            trim_mapping(previews, 500)
         localized = self.localize(session, candidates, release['_query'])
         records = self.version_records()
         return {'available': True, 'title': release['title'], 'fields': fields, 'episodes': span,
                 'missing': [key for key, value in fields.items() if not value],
                 'candidates': [{'id': str(v['tvdbId']), 'title': localized[v['tvdbId']]['title'], 'year': v.get('year'),
-                                'seasons': [s['seasonNumber'] for s in v.get('seasons', []) if s['seasonNumber'] > 0],
+                                'seasons': [s['seasonNumber'] for s in (v.get('seasons') or []) if s['seasonNumber'] > 0],
                                 'version': records.get(str(v['tvdbId']), {}).get('fields')} for v in candidates]}
 
     def version_records(self):
@@ -862,16 +906,20 @@ class App:
     def episodes(self, session, body):
         result = self.follow(session, {**body, 'mode': 'manual'})
         series_id = result['series_id']
-        episodes = self.client('sonarr').json('GET', '/api/v3/episode?seriesId=' + str(series_id))
+        sonarr = self.client('sonarr')
+        episodes = sonarr.json('GET', '/api/v3/episode?seriesId=' + str(series_id))
+        series = sonarr.json('GET', '/api/v3/series/' + str(series_id))
         try:
-            sonarr = self.client('sonarr')
-            series=sonarr.json('GET','/api/v3/series/'+str(series_id))
-            self.require_version(sonarr,series)
+            self.require_version(sonarr, series)
             version_ready = True
-        except ValueError:
+        except APIError:
+            raise
+        except ValueError as error:
+            if str(error).startswith('本地应用'):
+                raise
             version_ready = False
-        archived=archived_keys(self.data/'uploads.sqlite3', int(body['id']))
-        downloading=self.queue_episode_ids(sonarr)
+        archived = archived_keys(self.data/'uploads.sqlite3', series['tvdbId'])
+        downloading = self.queue_episode_ids(sonarr)
         return {'series_id':series_id,'version_ready':version_ready,'items':[
             {**{k:e.get(k) for k in ('id','seasonNumber','episodeNumber','title','airDateUtc','hasFile')},
              'archived':(e['seasonNumber'],e['episodeNumber']) in archived,'downloading':e['id'] in downloading}
@@ -990,7 +1038,9 @@ class App:
         def build(t):
             jobs = [j for j in by_hash.get(t['hash'], []) if not j.get('added_on') or j['added_on'] == t.get('added_on')]
             jobs = list({v['id']:v for j in jobs for v in [j, *children.get(j['id'], [])]}.values())
-            files=[{k:v.get(k) for k in ('index','name','progress','size','priority')} for v in qb.json('GET','/api/v2/torrents/files?'+urlencode({'hash':t['hash']}))]
+            files=[{k:v.get(k) for k in ('index','name','progress','size','priority')}
+                   | {'role': 'video' if video(v['name']) else ('subtitle' if PurePosixPath(v['name']).suffix.lower() in SUBTITLES else 'extra')}
+                   for v in qb.json('GET','/api/v2/torrents/files?'+urlencode({'hash':t['hash']}))]
             for file in files:
                 path=Path(t['save_path'])/file['name']
                 job=next((j for j in jobs if j.get('download_source')==str(path) or j['source']==str(path)),None)
@@ -1178,10 +1228,10 @@ class App:
                 create_actions(db)
                 db.execute('INSERT OR REPLACE INTO task_actions VALUES (?,?,?,?,?,?)',(key,action,json.dumps(payload),'done' if action in {'pause','resume'} else 'pending','task_control_failed' if action=='resume' else None,time.time()))
             disk_path=self.data/'disk-paused.json'
-            disk=json.loads(disk_path.read_text(encoding='utf-8')) if disk_path.exists() else {}
-            for r in resources:
-                disk.pop(r['hash'],None)
-            private_write(disk_path,json.dumps(disk))
+            if disk_path.exists():
+                disk=json.loads(disk_path.read_text(encoding='utf-8'))
+                if any(disk.pop(r['hash'], None) is not None for r in resources):
+                    private_write(disk_path,json.dumps(disk))
             try:
                 if action in {'pause','resume'}:
                     for r in resources:
@@ -1200,7 +1250,16 @@ class App:
                             db.execute("UPDATE task_actions SET state='released' WHERE id=?",(group['id'],))
                     if jobs:
                         db.executemany("UPDATE jobs SET state='pending',retry_at=0,failures=0,restart_count=0 WHERE id=? AND state='cancelled'",[(j['id'],) for j in jobs])
-            return {'message':'已提交删除所有；后台将逐项核实云端原件、清理索引并扫描 Emby，完成前保留此任务。' if payload['delete_all'] else {'pause':'已暂停本项目下载。','resume':'已恢复下载。','cancel':'已请求取消下载，文件保留；正在核对并结束相关上传。','delete':'已请求删除项目；确认上传及入库结束后处理本地文件，云端影片保留。'}[action]}
+            if payload['delete_all']:
+                message = '已提交删除所有；后台将逐项核实云端原件、清理索引并扫描 Emby，完成前保留此任务。'
+            elif action == 'delete':
+                message = ('已请求删除项目；确认上传及入库结束后删除 VPS 本地文件，云端影片保留。'
+                           if payload['delete_files'] else '已请求移除条目；VPS 本地文件和云端影片均保留。')
+            else:
+                message = {'pause': '已暂停此资源下载。' if resource else '已暂停本项目下载。',
+                           'resume': '已恢复下载。',
+                           'cancel': '已请求取消下载，文件保留；正在核对并结束相关上传。'}[action]
+            return {'message': message}
 
     def status(self):
         config = self.config()
@@ -1215,35 +1274,42 @@ class App:
                 ol = client('openlist')
                 ol.opener.addheaders = [('Authorization', config['openlist_token'])]
                 item = self.ol(ol, 'POST', '/api/fs/get', {'path': '/aliyun', 'password': ''})
-                if not item.get('is_dir') or item.get('provider') != 'AliyundriveOpen':
+                if not isinstance(item, dict) or not item.get('is_dir') or item.get('provider') != 'AliyundriveOpen':
                     return False, '/aliyun 尚未正确挂载阿里云盘 Open，请重新连接。'
                 return True, '阿里云盘连接正常。'
-            except (ValueError, OSError):
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return False, '阿里云盘连接失败，请检查授权或在 OpenList 查看挂载。'
         def downloader():
             try:
-                qb = self.qb()
+                qb = self.qb(10) if getattr(self.qb, '__func__', None) is App.qb else self.qb()
                 categories = qb.json('GET', '/api/v2/torrents/categories')
+                if not isinstance(categories, dict):
+                    return False, '下载器分类或保存目录未完成，请重新自动配置下载器。'
                 for name, path in [('cinema-movies', '/media/downloads/movies'), ('cinema-tv', '/media/downloads/tv-manual'), ('sonarr-tv', '/media/downloads/tv')]:
                     if categories.get(name, {}).get('savePath', '').rstrip('/') != path:
                         return False, '下载器分类或保存目录未完成，请重新自动配置下载器。'
                 clients = client('prowlarr').json('GET', '/api/v1/downloadclient')
+                if not isinstance(clients, list):
+                    return False, '下载器的电影或独立剧集连接未完成，请重新自动配置下载器。'
                 for name, category in [('Cinema qB', 'cinema-movies'), ('Cinema qB TV', 'cinema-tv')]:
                     if not managed_download_client(clients, name, category):
                         return False, '下载器的电影或独立剧集连接未完成，请重新自动配置下载器。'
                 return True, '下载器登录与电影、独立剧集、追更分类正常。'
-            except (ValueError, OSError, KeyError):
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return False, '下载器尚未配置或登录失败，请检查账号并重新自动配置。'
         def indexers():
             try:
                 prowlarr = client('prowlarr')
-                enabled = [i for i in prowlarr.json('GET', '/api/v1/indexer') if i.get('enable')]
+                listed = prowlarr.json('GET', '/api/v1/indexer')
                 health = prowlarr.json('GET', '/api/v1/health')
-                warnings = any('Indexer' in h.get('source', '') for h in health)
+                if not isinstance(listed, list) or not isinstance(health, list):
+                    return False, 'Prowlarr 返回了意外格式，请检查服务后重试。', 0
+                enabled = [i for i in listed if isinstance(i, dict) and i.get('enable')]
+                warnings = any('Indexer' in h.get('source', '') for h in health if isinstance(h, dict))
                 if not enabled:
                     return False, '尚未添加并启用搜索站点，请点击配置 Indexer。', 0
                 return not warnings, (f'{len(enabled)} 个站点已启用，但 Prowlarr 报告站点异常，请逐个 Test。' if warnings else f'{len(enabled)} 个搜索站点已启用。'), len(enabled)
-            except (ValueError, OSError):
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return False, 'Prowlarr 连接失败，请检查服务后配置搜索站点。', 0
         def television():
             try:
@@ -1252,13 +1318,15 @@ class App:
                 downloads = sonarr.json('GET', '/api/v3/downloadclient')
                 apps = prowlarr.json('GET', '/api/v1/applications')
                 synced = sonarr.json('GET', '/api/v3/indexer')
+                if not all(isinstance(v, list) for v in (roots, downloads, apps, synced)):
+                    return False, 'Sonarr 或同步连接返回了意外格式，请检查服务并重试。'
                 problems = []
                 if not any(r.get('path', '').rstrip('/') == '/media/library/tv' for r in roots): problems.append('电视剧目录')
                 if not any(d.get('name') == 'Cinema qB' and d.get('enable') for d in downloads): problems.append('Sonarr 下载器')
                 if not any(a.get('name') == 'Cinema Sonarr' and a.get('syncLevel') == 'fullSync' for a in apps): problems.append('Prowlarr 同步连接')
                 if not any(i.get('enableRss') or i.get('enableAutomaticSearch') or i.get('enableInteractiveSearch') for i in synced): problems.append('同步后的追剧站点')
                 return not problems, ('追剧配置未完成：' + '、'.join(problems) + '。请自动配置，并在 Prowlarr 检查同步。' if problems else '追剧目录、下载器与站点同步已配置。')
-            except (ValueError, OSError):
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return False, 'Sonarr 或同步连接不可用，请检查服务并重新自动配置。'
         checks = {}
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1381,8 +1449,7 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 sid, session = app.login(body, peer)
                 return self.reply({"csrf": session["csrf"], "username": session["username"]}, cookie="cinema=" + sid)
-            cookies = SimpleCookie(self.headers.get("Cookie", ""))
-            sid = cookies["cinema"].value if "cinema" in cookies else ""
+            sid = session_cookie(self.headers.get("Cookie", ""))
             if path == "/api/logout" and self.command == "POST":
                 # Logout must work while Emby is down, so it skips the remote admin check.
                 if not app.logout(sid, self.headers.get("X-CSRF-Token", "")):
@@ -1410,7 +1477,10 @@ class Handler(BaseHTTPRequestHandler):
                     values = sonarr.json("GET", "/api/v3/series")
                     removed_tags = {t['id'] for t in sonarr.json('GET', '/api/v3/tag') if t['label'] == 'cinema-unfollowed'}
                     values = [v for v in values if not removed_tags.intersection(v.get('tags', []))]
-                    session.setdefault('series', {}).update({str(v['tvdbId']): v for v in values})
+                    with app.lock:
+                        series_cache = session.setdefault('series', {})
+                        series_cache.update({str(v['tvdbId']): v for v in values})
+                        trim_mapping(series_cache, 500)
                     localized = app.localize(session, values)
                     profiles = sonarr.json('GET', '/api/v3/releaseprofile')
                     records = app.version_records()

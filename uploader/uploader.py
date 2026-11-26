@@ -421,6 +421,8 @@ class Sources:
         return result
 
     def tv(self):
+        if not self.qb.headers.get('Cookie'):
+            self.login_qb()
         result, originals = [], {}
         torrents = self.qb.json('GET', '/api/v2/torrents/info', query={'filter': 'completed', 'category': 'sonarr-tv'})
         for torrent in torrents:
@@ -808,6 +810,8 @@ class Uploader:
                     if not (self.instance() and job.get('instance_id') and self.instance()!=job['instance_id']):
                         raise Failure('upload_unconfirmed') from None
                 else:
+                    if not isinstance(task, dict):
+                        raise Failure('invalid_upload_task')
                     if task.get('state') not in {2,4,7}:
                         if task.get('state') not in {3,6}:
                             self.remote.result(self.remote.http.json('POST','/api/admin/task/upload/cancel?'+urlencode({'tid':job['task_id']})))
@@ -1286,6 +1290,16 @@ def monitor(uploader, config_dir, stop):
         stop.wait(10)
 
 
+def load_config(path):
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise Failure("invalid_configuration")
+    for key in ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key"):
+        if not isinstance(config.get(key), str) or not config[key] or any(ord(c) < 32 for c in config[key]):
+            raise Failure("invalid_configuration")
+    return config
+
+
 def main():
     os.umask(0o077)
     state, media = Path("/state"), Path("/media")
@@ -1294,10 +1308,7 @@ def main():
         while not Path("/config/config.json").is_file():
             log("uploader", "waiting_for_setup")
             time.sleep(30)
-        config = json.loads(Path("/config/config.json").read_text(encoding="utf-8"))
-        for key in ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key"):
-            if not isinstance(config.get(key), str) or not config[key] or any(ord(c) < 32 for c in config[key]):
-                raise Failure("invalid_configuration")
+        config = load_config("/config/config.json")
         uploader = Uploader(OpenList(config["openlist_url"], config["openlist_token"]), state, media)
         sys.modules.setdefault("uploader", sys.modules[__name__])
         from cleanup import Cleaner
@@ -1308,8 +1319,12 @@ def main():
         active_config, next_discovery = None, 0
         try:
             while True:
-                config = json.loads(Path("/config/config.json").read_text(encoding="utf-8"))
-                if config != active_config:
+                try:
+                    config = load_config("/config/config.json")
+                except (Failure, OSError, ValueError):
+                    log("uploader", "config_reload_deferred")
+                    config = active_config
+                if config and config != active_config:
                     uploader.remote = OpenList(config["openlist_url"], config["openlist_token"])
                     sources = Sources(config, media)
                     active_config, next_discovery = config, 0
@@ -1325,7 +1340,7 @@ def main():
                     for name, collect in (("downloads", sources.downloads), ("tv", sources.tv)):
                         try:
                             candidates.extend(collect())
-                        except (Failure, KeyError, TypeError, ValueError):
+                        except (Failure, OSError, KeyError, TypeError, ValueError):
                             log(name, "discovery_failed")
                 uploader.run(candidates,sources)
                 if discover:

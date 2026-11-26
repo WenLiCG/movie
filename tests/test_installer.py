@@ -84,7 +84,10 @@ class InstallerTests(unittest.TestCase):
             (source/'relay/added.js').chmod(0o600)
             (source/'relay/custom-js').mkdir()
             (source/'relay/custom-js/search.js').write_text('new')
+            (source/'scripts/openlist-start.sh').write_text('#!/bin/sh\nexit 0\n', encoding='utf-8', newline='\n')
+            (target/'relay').chmod(0o700)
             (target/'relay/custom-js').mkdir(mode=0o700)
+            (target/'scripts').mkdir(mode=0o700)
             old_manifest = json.dumps(['compose.yaml', 'relay/removed.js'])
             (target/update_files.MANIFEST).write_text(old_manifest)
             with patch('os.chown', create=True):
@@ -99,7 +102,9 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((target/'relay/added.js').read_text(), 'new')
             if os.name == 'posix':
                 self.assertEqual((target/'relay/added.js').stat().st_mode & 0o777, 0o644)
+                self.assertEqual((target/'relay').stat().st_mode & 0o777, 0o755)
                 self.assertEqual((target/'relay/custom-js').stat().st_mode & 0o777, 0o755)
+                self.assertEqual((target/'scripts').stat().st_mode & 0o777, 0o755)
             self.assertFalse((target/'relay/removed.js').exists())
             backups = list((target / 'backups').glob('*.tar.gz'))
             self.assertEqual(len(backups), 1)
@@ -188,6 +193,17 @@ esac
                     else:
                         self.assertEqual(len(events), 4)
                         self.assertIn('caddy:new', (target/'compose.yaml').read_text())
+            # Upgrading before cloud setup (no config.json and no openlist instance-id) must not crash.
+            unconfigured = base / 'target-unconfigured'
+            for folder in ('media', 'state/relay', 'state/openlist-runtime'):
+                (unconfigured / folder).mkdir(parents=True)
+            (unconfigured / '.env').touch()
+            (unconfigured / 'state/relay/config.yml').touch()
+            (unconfigured / 'compose.yaml').write_text('services: {gateway: {image: "caddy:old"}}\n')
+            docker.write_text(docker.read_text().replace("echo gateway", "true").replace("*'up -d --build '*)", "*'up -d --build '*|*'up -d --no-deps openlist')"))
+            res = subprocess.run(['bash', script, unconfigured], capture_output=True, text=True, timeout=30,
+                                 env={**os.environ, 'PATH': str(base) + os.pathsep + os.environ['PATH']})
+            self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_safe_unpack_and_resume_preserve_configuration(self):
         data = archive()

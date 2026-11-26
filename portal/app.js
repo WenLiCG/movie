@@ -1,5 +1,45 @@
 const $ = id => document.getElementById(id);
-let csrf = '', items = [], kind = 'movie', following = '', currentView = 'search', metricsBusy = false;
+let csrf = '', items = [], kind = 'movie', following = '', currentView = 'search', metricsBusy = false, missingConfigCount = 0;
+function syncConfigWarning() {
+  $('config-warning').hidden = !missingConfigCount || currentView === 'settings';
+}
+function loadingNode(label) {
+  const box = node('div', undefined, 'loading-state');
+  box.setAttribute('role', 'status');
+  const spin = node('span', undefined, 'spinner');
+  spin.setAttribute('aria-hidden', 'true');
+  box.append(spin, label);
+  return box;
+}
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+  const hours = Math.floor(seconds / 3600), mins = Math.floor((seconds % 3600) / 60), secs = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${mins}:${String(secs).padStart(2, '0')}`;
+}
+function confirmAction(title, message, confirmLabel = '确认') {
+  return new Promise(resolve => {
+    const dialog = $('confirm-dialog');
+    $('confirm-title').textContent = title;
+    $('confirm-message').textContent = message;
+    $('accept-confirm').textContent = confirmLabel;
+    let decided = false;
+    const done = value => {
+      if (decided) return;
+      decided = true;
+      $('confirm-form').onsubmit = null;
+      $('cancel-confirm').onclick = null;
+      dialog.onclose = null;
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    $('confirm-form').onsubmit = event => { event.preventDefault(); done(true); };
+    $('cancel-confirm').onclick = () => done(false);
+    dialog.onclose = () => done(false);
+    dialog.showModal();
+  });
+}
 let episodeTarget = null, episodeSeries = null, episodeItems = [], selectedEpisodes = new Set();
 let episodeGeneration = 0, episodeTimer = null, episodeDeadline = 0, episodeVersionReady = false, episodeInitialSeason = false;
 let selectedRelease = null, versionPreview = null, versionGeneration = 0, noticeTimer = null;
@@ -63,11 +103,14 @@ async function action(button, work) { if (button) button.disabled = true; try { 
 function signedIn(value, username = '') {
   const leavingAccount = !value && Boolean(csrf);
   hideNotice();
+  $('login-error').hidden = true;
+  $('login-error').textContent = '';
   if (value) {
     $('logout').title = username ? `退出登录（当前账号：${username}）` : '退出登录';
     loadRecommendations();
   } else {
     recommendationGeneration++;
+    missingConfigCount = 0;
     csrf = '';
     $('logout').title = '';
     $('cloud-form').reset();
@@ -78,9 +121,9 @@ function signedIn(value, username = '') {
     $('recommendation-groups').replaceChildren();
     resetSearch();
     ['series-list', 'task-list', 'playback-list'].forEach(id => $(id).replaceChildren());
-    $('task-refresh-status').textContent = $('playback-refresh-status').textContent = '';
+    $('series-refresh-status').textContent = $('task-refresh-status').textContent = $('playback-refresh-status').textContent = '';
     show('search');
-    ['follow-dialog', 'episodes-dialog', 'task-dialog'].forEach(id => $(id).close());
+    ['follow-dialog', 'episodes-dialog', 'task-dialog', 'confirm-dialog'].forEach(id => $(id).close());
   }
   $('login').hidden = value || leavingAccount;
   for (const id of ['workspace', 'metrics', 'logout', 'watch']) $(id).hidden = !value;
@@ -112,7 +155,7 @@ async function loadRecommendations(){
     $('welcome').hidden=values.length>0||$('search').classList.contains('has-results');
   }catch(error){if(generation===recommendationGeneration)$('recommendation-status').textContent='站点近期列表暂时不可用；仍可直接搜索。';}
 }
-const metaTones = {'免费':'success','追更中':'success','已发布':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','归档中':'info','同步集数中':'info','等待导入':'info','等待上传':'info','已暂停':'warning','下载已暂停':'warning','操作待核对':'warning','等待归档复核':'warning','待选版本':'warning','未发现可归档视频':'warning','下载异常':'danger','归档失败':'danger','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
+const metaTones = {'免费':'success','追更中':'success','已发布':'success','已发布 · 约 10 分钟后可在影院看到':'success','播放中':'success','网盘直连跳转':'success','下载中':'info','下载已完成':'info','等待连接':'info','获取资源信息':'info','排队下载':'info','下载校验中':'info','归档中':'info','提交上传中':'info','上传中':'info','校验完成，等待发布':'info','发布确认中':'info','部分已发布':'info','同步集数中':'info','等待导入':'info','等待上传':'info','已暂停':'warning','下载已暂停':'warning','已取消':'warning','已取消，文件保留':'warning','取消处理中':'warning','删除处理中':'warning','操作待核对':'warning','等待归档复核':'warning','待选版本':'warning','未发现可归档视频':'warning','直连尚未确认':'warning','下载异常':'danger','下载出错':'danger','源文件缺失':'danger','归档失败':'danger','上传未完成':'danger','规则异常':'danger','VPS 中转':'danger','请求失败':'danger'};
 function row(title, meta, cls = 'result-row') {
   const el = node('article', undefined, cls), body = node('div', undefined, 'row-body');
   body.append(node('h3', title, 'row-title', cls === 'series-row' ? 'tv' : cls === 'task-row' ? 'download' : cls === 'playback-row' ? 'play' : cls === 'upload-row' ? undefined : kind === 'tv' ? 'tv' : 'film'));
@@ -120,9 +163,28 @@ function row(title, meta, cls = 'result-row') {
   meta.filter(v => v !== undefined && v !== null && v !== '').forEach(v => details.append(node('span', String(v), Object.hasOwn(metaTones,v) ? 'status-label ' + metaTones[v] : undefined)));
   body.append(details); el.append(body); return el;
 }
-async function show(view) { currentView = view; document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== view); document.querySelectorAll('[data-view]').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); }); try { if (view === 'settings') await status(); if (view === 'series') await series(); if (view === 'tasks') await tasks(); if(view==='playbacks')await playbacks(); } catch (e) { notice(e.message, true); } }
+async function show(view) { currentView = view; syncConfigWarning(); document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== view); document.querySelectorAll('[data-view]').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); }); try { if (view === 'settings') await status(); if (view === 'series') await series(); if (view === 'tasks') await tasks(); if(view==='playbacks')await playbacks(); } catch (e) { notice(e.message, true); } }
 document.querySelectorAll('[data-view]').forEach(el => el.onclick = () => show(el.dataset.view));
-$('login-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('login-form').querySelector('button'), async () => { const result = await api('login', {username: $('username').value, password: $('password').value}); csrf = result.csrf; $('password').value = ''; signedIn(true, result.username); await status(); await metrics(); }); };
+['username', 'password'].forEach(id => $(id).addEventListener('input', () => { $('login-error').hidden = true; }));
+$('login-form').onsubmit = async event => {
+  event.preventDefault();
+  const button = event.submitter || $('login-form').querySelector('button');
+  button.disabled = true;
+  $('login-error').hidden = true;
+  try {
+    const result = await api('login', {username: $('username').value, password: $('password').value});
+    csrf = result.csrf;
+    $('password').value = '';
+    signedIn(true, result.username);
+    metrics();
+    await status();
+  } catch (error) {
+    if ($('login').hidden) notice(error.message, true);
+    else { $('login-error').textContent = error.message; $('login-error').hidden = false; }
+  } finally {
+    button.disabled = false;
+  }
+};
 $('logout').onclick = () => action($('logout'), async () => { await api('logout', {}); signedIn(false); });
 let searchGeneration=0, searchWarnings=[];
 function resetFilters() {
@@ -146,9 +208,11 @@ $('query').addEventListener('input', () => {
   if (!$('query').value.trim()) resetSearch();
 });
 async function search() {
+  const query = $('query').value.trim();
+  if (!query) { resetSearch(); $('query').focus(); return; }
   const generation=++searchGeneration;
   kind=document.querySelector('[name=kind]:checked').value;
-  const requestedKind=kind, query=$('query').value;
+  const requestedKind=kind;
   const spinner=node('span',undefined,'spinner inline-spinner');spinner.setAttribute('aria-hidden','true');
   $('result-count').replaceChildren(spinner,'正在搜索各站点，可能需要几十秒…'); $('results').replaceChildren();
   $('filters').hidden=true; $('search-warning').hidden=true; $('welcome').hidden=true; $('search').classList.add('has-results');
@@ -199,6 +263,19 @@ Object.values(versionInputs).forEach(id=>{
   $(id).addEventListener('input',updateVersionSummary);
   $(id).addEventListener('change',updateVersionSummary);
 });
+function syncFollowMode() {
+  const manualOption = $('mode').querySelector('option[value="manual"]');
+  const seasonOption = $('mode').querySelector('option[value="season"]');
+  const hasSeasons = $('season').options.length > 0;
+  if (manualOption) { manualOption.hidden = !selectedRelease; manualOption.disabled = !selectedRelease; }
+  if (seasonOption) seasonOption.disabled = !hasSeasons;
+  if ($('mode').value === 'season' && !hasSeasons) $('mode').value = 'all';
+  if ($('mode').value === 'manual' && !selectedRelease) $('mode').value = 'all';
+  $('season-label').hidden = $('mode').value !== 'season' || !hasSeasons;
+  $('submit-version').textContent = selectedRelease
+    ? ($('mode').value === 'manual' ? '保存规则并选集' : '保存规则并追更')
+    : '保存追更范围';
+}
 function chooseSeries() {
   following=$('series-match').value;
   const candidate=versionPreview?.candidates.find(c=>c.id===following);
@@ -207,6 +284,7 @@ function chooseSeries() {
   $('existing-version').textContent=candidate?.version ? '当前版本：'+versionSummary(candidate.version)+'。换版不会删除已有内容。' : '';
   $('replace-version').checked=false;
   syncReplaceRequirement();
+  syncFollowMode();
 }
 $('series-match').onchange=chooseSeries;
 async function openResource(item) {
@@ -218,8 +296,7 @@ async function openResource(item) {
   $('submit-version').disabled=true;$('version-confirm').checked=false;$('version-confirm').required=true;
   $('version-confirm-row').hidden=false;$('series-match').disabled=false;
   $('follow-scope').hidden=false;
-  $('mode').value='all';$('season-label').hidden=true;
-  $('submit-version').textContent='保存规则并追更';
+  $('mode').value='all';syncFollowMode();
   $('follow-dialog').showModal();
   try {
     const preview=await api('preview-version',{release_id:item.id});
@@ -242,9 +319,10 @@ function openFollow(item) {
   fillVersion(item.version.fields,false);
   $('version-confirm-row').hidden=true;$('version-confirm').required=false;$('replace-version-row').hidden=true;$('existing-version').hidden=true;
   $('follow-scope').hidden=false;
-  $('mode').value='all';$('season-label').hidden=true;
+  $('mode').value='all';
   $('season').replaceChildren(...(item.seasons||[]).filter(v=>v.seasonNumber>0).map(v=>new Option(`第 ${v.seasonNumber} 季`,v.seasonNumber)));
-  $('submit-version').disabled=false;$('submit-version').textContent='保存追更范围';$('follow-dialog').showModal();
+  syncFollowMode();
+  $('submit-version').disabled=false;$('follow-dialog').showModal();
 }
 $('follow-dialog').addEventListener('close',()=>{versionGeneration++;});
 function releaseDownload(item, tv) {
@@ -362,7 +440,7 @@ $('refresh-episodes').onclick = () => { episodeDeadline = Date.now() + 120000; r
 $('cancel-episodes').onclick = () => $('episodes-dialog').close();
 $('episodes-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('download-episodes'), async () => { const result = await api('download-episodes', {series_id: episodeSeries, episode_ids: [...selectedEpisodes]}); $('episodes-dialog').close(); notice(result.message, false, '查看任务', () => show('tasks')); }); };
 ['resolution', 'codec', 'site', 'free'].forEach(id => $(id).onchange = render);
-$('mode').onchange = () => $('season-label').hidden = $('mode').value !== 'season';
+$('mode').onchange = syncFollowMode;
 $('cancel-follow').onclick = () => $('follow-dialog').close();
 $('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter||$('submit-version'),async()=>{
   const mode=$('mode').value,id=following,title=versionPreview?.candidates.find(c=>c.id===id)?.title || $('version-resource').textContent;
@@ -374,18 +452,19 @@ $('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter|
   if(currentView==='series')series().catch(e=>notice(e.message,true));
   if(mode==='manual')await openEpisodes({id,title});
 });};
-let statusBusy=false, qbCredentialsNeeded=null;
+let statusBusy=false, statusAgain=false, qbCredentialsNeeded=null;
 $('days').addEventListener('input',()=>{$('days').dataset.edited='1';});
 async function status() {
-  if(statusBusy)return;statusBusy=true;
-  try{await loadStatus();}finally{statusBusy=false;}
+  if(statusBusy){statusAgain=true;return;}statusBusy=true;statusAgain=false;
+  try{await loadStatus();}finally{statusBusy=false;if(statusAgain){statusAgain=false;status().catch(()=>{});}}
 }
 async function loadStatus() {
   const s = await api('status'); if (!$('days').dataset.edited && document.activeElement !== $('days')) $('days').value = s.settings.retention_days;
   $('openlist-credentials').hidden=!s.credentials.openlist; if (s.credentials.qb !== qbCredentialsNeeded) { $('download-credentials').open=s.credentials.qb; qbCredentialsNeeded=s.credentials.qb; }
   const names = {metadata:'Emby 刮削', uploader:'上传服务', cloud: '阿里云盘', downloader: '下载器', indexers: '搜索站点', television: '追剧连接', retention: '保留时间'};
   const missing = Object.entries(s.checks).filter(([,v]) => !v.complete);
-  $('nav-warning').hidden = !missing.length; $('config-warning').hidden = !missing.length;
+  missingConfigCount = missing.length;
+  $('nav-warning').hidden = !missing.length; syncConfigWarning();
   $('config-warning-text').textContent = `有 ${missing.length} 项配置未完成或连接异常：${missing.map(([k]) => names[k]).join('、')}。点击设置处理。`;
   document.querySelectorAll('[data-check]').forEach(el => { const check = s.checks[el.dataset.check]; el.classList.toggle('incomplete', !check.complete); el.classList.toggle('complete', check.complete); el.replaceChildren(); if (!check.complete) { const icon = $('nav-warning').cloneNode(true); icon.removeAttribute('id'); icon.hidden = false; el.append(icon); } el.append(node('span', check.message)); });
   $('cleanup-state').textContent = `已清理 ${s.cleanup.done} 个任务，${(s.cleanup.pending||0)+(s.cleanup.deferred||0)} 个等待复核。无法确认云端文件或本地关联的任务会保留。` + ((s.cleanup.reasons||[]).length?' '+s.cleanup.reasons.join('；')+'。':'') + (s.cleanup.last ? ' 上次清理：' + new Date(s.cleanup.last * 1000).toLocaleString() : '');
@@ -398,19 +477,25 @@ $('retention-form').onsubmit = event => { event.preventDefault(); action(event.s
 function chooseVersionForSeries(series){
   show('search');document.querySelector('[name=kind][value=tv]').checked=true;$('query').value=series.title;$('search-form').requestSubmit();
 }
-let seriesBusy=false, seriesPreparing=false;
+let seriesBusy=false, seriesAgain=false, seriesPreparing=false;
 async function series(){
-  if(seriesBusy)return;seriesBusy=true;
+  if(seriesBusy){seriesAgain=true;return;}seriesBusy=true;seriesAgain=false;
+  const list=$('series-list'), refresh=$('series-refresh-status');
+  const hadRows=list.querySelector('.series-row,.empty')!==null;
+  if(!hadRows)list.replaceChildren(loadingNode('正在读取追剧列表…'));
   try{
-    const r=await api('series');$('series-list').replaceChildren();
+    const r=await api('series');
+    const openMenus=new Set([...list.querySelectorAll('.more-actions[open]')].map(e=>e.dataset.seriesId));
+    list.replaceChildren();
     seriesPreparing=r.items.some(s=>s.preparing);
-    if(!r.items.length)$('series-list').append(node('p','还没有追剧。搜索剧集／综艺，选择资源版本后开始追更。','empty','tv'));
+    if(!r.items.length)list.append(node('p','还没有追剧。搜索剧集／综艺，选择资源版本后开始追更。','empty','tv'));
     r.items.forEach(s=>{
       // A series without a rule needs one chosen; a rule Sonarr no longer matches needs repair.
       const valid=s.version?.valid===true, unchosen=!valid&&s.version?.reason==='missing';
       const el=row(s.title,[s.original_title,s.year,`已归档 ${s.archived||0} 集`,!valid?(unchosen?'待选版本':'规则异常'):s.preparing?'同步集数中':s.monitored?'追更中':'已暂停',s.nextAiring?'下次更新 '+new Date(s.nextAiring).toLocaleDateString():'暂无下次播出时间'],'series-row');
       el.firstChild.append(node('p',valid?'版本条件：'+versionSummary(s.version.fields):unchosen?'尚未选择资源版本。选好版本后才能选集下载或恢复追更。':'Sonarr 中的版本规则或专属标签已变更，请重新选择版本；修复前不会发起新的下载。',valid?'row-description':'warning-text'));
-      const more=node('details',undefined,'more-actions'), summary=node('summary','更多'), menu=node('div'); more.append(summary,menu);
+      const more=node('details',undefined,'more-actions'), summary=node('summary','更多'), menu=node('div');
+      more.dataset.seriesId=String(s.id); more.open=openMenus.has(String(s.id)); more.append(summary,menu);
       // Pick the side before opening: 'toggle' fires asynchronously, after the menu could paint off-screen.
       summary.addEventListener('click',()=>{if(!more.open)menu.classList.toggle('align-left',more.getBoundingClientRect().right<210);});
       more.addEventListener('toggle',()=>{
@@ -424,11 +509,21 @@ async function series(){
       // Without a valid rule, episode download and scope are unavailable, so the fix is the visible action.
       if(valid){actions.append(select);menu.append(scope,change);}else actions.append(change);
       actions.append(more);
-      const pause=node('button',s.monitored?'暂停追更':'恢复追更',undefined,s.monitored?'pause':'play');pause.disabled=!s.monitored&&(!s.version?.valid||s.preparing);pause.onclick=()=>action(pause,async()=>{notice((await api('monitor',{id:s.id,monitored:!s.monitored})).message);await series();});actions.prepend(pause);
-      const remove=node('button','删除追剧','quiet');remove.onclick=()=>{more.open=false;if(confirm(`删除《${s.title}》的追剧？停止自动追更并从列表移除；已有文件和正在下载的任务保留。`))return action(remove,async()=>{const r=await api('remove-series',{id:s.id});await series();notice(r.message);$('refresh-series').focus();});};menu.append(remove);
-      el.append(actions);$('series-list').append(el);
+      if(valid||s.monitored){
+        const pause=node('button',s.monitored?'暂停追更':'恢复追更',undefined,s.monitored?'pause':'play');
+        pause.disabled=!s.monitored&&(!valid||s.preparing);
+        pause.onclick=()=>action(pause,async()=>{notice((await api('monitor',{id:s.id,monitored:!s.monitored})).message);await series();});
+        actions.prepend(pause);
+      }
+      const remove=node('button','删除追剧','quiet danger','trash');remove.onclick=async()=>{more.open=false;if(await confirmAction('删除追剧',`删除《${s.title}》的追剧？停止自动追更并从列表移除；已有文件和正在下载的任务保留。`,'确认删除'))return action(remove,async()=>{const res=await api('remove-series',{id:s.id});await series();notice(res.message);$('refresh-series').focus();});};menu.append(remove);
+      el.append(actions);list.append(el);
     });
-  } finally {seriesBusy=false;}
+    refresh.textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  } catch(error) {
+    if(!hadRows)list.replaceChildren();
+    refresh.textContent=hadRows?'刷新失败，仍显示上次结果。':'暂时无法读取追剧列表，请刷新重试。';
+    throw error;
+  } finally {seriesBusy=false;if(seriesAgain){seriesAgain=false;series().catch(()=>{});}}
 }
 document.addEventListener('click',event=>{document.querySelectorAll('.more-actions[open]').forEach(el=>{if(!el.contains(event.target))el.open=false;});});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')document.querySelectorAll('.more-actions[open]').forEach(el=>el.open=false);});
@@ -442,7 +537,9 @@ function awaitingArchiveCheck(u) {
 function uploadRow(u, compact=false, short=false) {
   const name=u.dest.split('/').pop();
   const check=awaitingArchiveCheck(u);
-  const el=row(short?episodeTitle(name):name,[u.dest.startsWith('/aliyun/TV/')?'剧集／综艺':'电影',check?'等待归档复核':uploadStates[u.state]||'处理中',u.state==='queued'&&!check?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message],'upload-row');
+  const retry=u.retry_at&&u.retry_at*1000>Date.now()&&!['published','cancelled','failed'].includes(u.state)
+    ?'下次重试 '+new Date(u.retry_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):'';
+  const el=row(short?episodeTitle(name):name,[u.dest.startsWith('/aliyun/TV/')?'剧集／综艺':'电影',check?'等待归档复核':uploadStates[u.state]||'处理中',u.state==='queued'&&!check?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message,retry],'upload-row');
   el.firstChild.firstChild.title=name;
   el.firstChild.firstChild.hidden=compact;
   if(check||u.state==='failed'||u.error==='upload_unconfirmed'||u.error==='move_pending'){
@@ -529,6 +626,7 @@ async function updateTaskDeleteMode(){
   $('task-dialog-cloud-note').textContent=all?'将停止做种，删除所选范围的 VPS 文件、云端原件及已归档字幕，清理 Emby 索引并扫描。云端删除无法在此撤销；未选中的项目／资源保留。':'云端已归档影片保留。合集或资源包的操作会影响包内全部文件。';
   if(request.action==='delete')confirm.textContent=all?'确认删除所有':'确认删除';
   confirm.disabled=taskSubmitting||request.delete_files;
+  $('retry-task-preview').hidden=true;
   if(!request.delete_files)return;
   $('task-preview-status').textContent='正在核对文件清单…';
   $('task-local-files').replaceChildren();
@@ -542,9 +640,13 @@ async function updateTaskDeleteMode(){
     taskScope=result.scope;
     confirm.disabled=taskSubmitting;
   } catch(error) {
-    if(generation===taskPreview)$('task-preview-status').textContent=error.message+'。可重新选择删除范围以重试。';
+    if(generation===taskPreview){
+      $('task-preview-status').textContent=error.message.replace(/[。.]$/,'')+'。';
+      $('retry-task-preview').hidden=false;
+    }
   }
 }
+$('retry-task-preview').onclick=updateTaskDeleteMode;
 document.querySelectorAll('[name=delete-files]').forEach(input=>input.onchange=updateTaskDeleteMode);
 $('close-task-dialog').onclick=()=>$('task-dialog').close();
 $('task-form').onsubmit=async event=>{
@@ -572,6 +674,8 @@ $('task-form').onsubmit=async event=>{
 async function tasks() {
   if(tasksBusy){tasksAgain=true;return;}tasksBusy=true;tasksAgain=false;
   const list=$('task-list'), refresh=$('task-refresh-status');
+  const hadRows=list.querySelector('.task-row,.empty')!==null;
+  if(!hadRows)list.replaceChildren(loadingNode('正在读取下载与归档任务…'));
   try {
     const r=await api('tasks');
     const expanded=new Set([...list.querySelectorAll('details[open]')].map(e=>e.dataset.key));
@@ -611,7 +715,10 @@ async function tasks() {
         t.files.filter(f=>f.priority).forEach(f=>{
           const job=t.uploads.find(j=>j.id===f.job_id);
           if(job){resource.append(uploadRow(job,!multiple&&!g.tvdb_id,!!g.tvdb_id));linked.add(job.id);}
-          else if(multiple||g.tvdb_id){const fileRow=row(g.tvdb_id?episodeTitle(f.name):f.name,[t.progress<1?(qbStates[t.state]||'下载中'):'等待导入或上传',`${(f.progress*100).toFixed(1)}%`,size(f.size)],'upload-row');fileRow.firstChild.firstChild.title=f.name;resource.append(fileRow);}
+          else if(multiple||g.tvdb_id){
+            const fileStatus=t.progress<1?(f.progress>=1?'下载已完成':(qbStates[t.state]||'下载中')):(f.role==='extra'?'不自动归档':(g.tvdb_id?'等待导入':'等待上传'));
+            const fileRow=row(g.tvdb_id?episodeTitle(f.name):f.name,[fileStatus,`${(f.progress*100).toFixed(1)}%`,size(f.size)],'upload-row');fileRow.firstChild.firstChild.title=f.name;resource.append(fileRow);
+          }
         });
         t.uploads.filter(j=>!linked.has(j.id)).forEach(j=>{resource.append(uploadRow(j,!multiple&&!g.tvdb_id,!!g.tvdb_id));linked.add(j.id);});
         if(g.tvdb_id){
@@ -631,7 +738,8 @@ async function tasks() {
     else if(detailKey)list.querySelector(`details[data-key="${CSS.escape(detailKey)}"] > summary`)?.focus({preventScroll:true});
     refresh.textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
   } catch(error) {
-    refresh.textContent=list.childElementCount?'刷新失败，仍显示上次结果。':'暂时无法读取任务，请刷新重试。';
+    if(!hadRows)list.replaceChildren();
+    refresh.textContent=hadRows?'刷新失败，仍显示上次结果。':'暂时无法读取任务，请刷新重试。';
     throw error;
   } finally {tasksBusy=false;if(tasksAgain){tasksAgain=false;tasks().catch(()=>{});}}
 }
@@ -644,7 +752,8 @@ $('watch').onclick=()=>{
     try {
       await new Promise((resolve,reject)=>{
         const timer=setTimeout(()=>finish(new Error('看片页面连接超时，请稍后重试。')),25000);
-        function finish(error){clearTimeout(timer);window.removeEventListener('message',receive);error?reject(error):resolve();}
+        const watcher=setInterval(()=>{if(target.closed)finish();},500);
+        function finish(error){clearTimeout(timer);clearInterval(watcher);window.removeEventListener('message',receive);error?reject(error):resolve();}
         async function receive(event){
           if(event.source!==target||event.origin!==address)return;
           if(event.data?.type==='cinema-watch-ready'){
@@ -664,22 +773,26 @@ $('refresh-tasks').onclick = () => action($('refresh-tasks'), tasks);
 let playbacksBusy=false;
 async function playbacks(){
   if(playbacksBusy)return;playbacksBusy=true;
+  const list=$('playback-list'), refresh=$('playback-refresh-status');
+  const hadRows=list.querySelector('.playback-row,.empty')!==null;
+  if(!hadRows)list.replaceChildren(loadingNode('正在读取播放记录…'));
   try{
-    const result=await api('playbacks');$('playback-list').replaceChildren();
-    if(!result.items.length)$('playback-list').append(node('p','暂无播放记录。开始播放后会自动记录；升级前的播放和绕过影院入口的播放不在此列。','empty','history'));
+    const result=await api('playbacks');list.replaceChildren();
+    if(!result.items.length)list.append(node('p','暂无播放记录。开始播放后会自动记录；升级前的播放和绕过影院入口的播放不在此列。','empty','history'));
     const routes={cloud:'网盘直连跳转',vps:'VPS 中转',unknown:'直连尚未确认'},states={playing:'播放中',paused:'已暂停',stopped:'已停止',inactive:'暂无近期上报',requested:'已发起请求',failed:'请求失败'};
     result.items.forEach(item=>{
-      const seconds=Math.floor(item.position_seconds),position=`${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+      const position=formatDuration(item.position_seconds);
       const el=row(item.title,[new Date(item.started_at*1000).toLocaleString('zh-CN'),routes[item.route],states[item.state],item.client,item.device],'playback-row');
       el.classList.toggle('playback-alert',item.route==='vps'||!!item.error_status);
       el.firstChild.append(node('p',item.route==='cloud'?`HTTP ${item.http_status} → ${item.host}。视频请求已交给网盘。`:item.route==='vps'?'已观测到影院服务器返回视频数据，请检查播放链路。':item.host?`HTTP ${item.http_status} → ${item.host}，尚未确认是网盘直连。`:'尚未观测到网盘视频跳转响应。','row-description'));
       el.firstChild.append(node('p',item.has_progress?`客户端已报告播放进度 ${position}`:'尚未收到有效播放进度；跳转成功不等于客户端已成功播放。','muted'));
       if(item.error_status)el.firstChild.append(node('p',`期间出现 HTTP ${item.error_status} 错误；请检查登录、云盘连接或更换云端播放版本。`,'warning-text'));
-      $('playback-list').append(el);
+      list.append(el);
     });
-    $('playback-refresh-status').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    refresh.textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
   } catch(error) {
-    $('playback-refresh-status').textContent=$('playback-list').childElementCount?'刷新失败，仍显示上次结果。':'暂时无法读取播放记录，请刷新重试。';
+    if(!hadRows)list.replaceChildren();
+    refresh.textContent=hadRows?'刷新失败，仍显示上次结果。':'暂时无法读取播放记录，请刷新重试。';
     throw error;
   } finally {playbacksBusy=false;}
 }
@@ -689,7 +802,7 @@ async function metrics() {
   metricsBusy = true;
   try {
     const r = await api('metrics');
-    $('metrics-time').textContent = '刚刚更新 · 每 10 秒刷新';
+    $('metrics-time').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12: false}) + ' · 每 10 秒刷新';
     for (const name of ['disk', 'memory']) {
       const value = r[name], meter = $(name + '-meter');
       $(name + '-label').textContent = value ? `${size(value.used)} / ${size(value.total)}` : '暂不可用';
@@ -719,8 +832,8 @@ window.addEventListener('focus', () => { if (csrf && currentView === 'settings')
     const r=await api('session');
     csrf=r.csrf;
     signedIn(true, r.username);
+    metrics();
     await status();
-    await metrics();
   } catch(error) {
     if(!csrf)signedIn(false);
     if(error.status!==401)notice(error.message,true);

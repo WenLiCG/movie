@@ -67,8 +67,16 @@ const {chromium} = require('playwright');
     assert.equal(await page.locator('#workspace').isHidden(), true);
 
     sessionMode = 'signed-out';
+    // Wrong-password login surfaces inline right inside the login form.
+    await page.route('**/discover/api/login', route => route.fulfill({status: 400, json: {error: '登录失败：Emby 用户名或密码不正确。'}}));
     await page.locator('#username').fill('demo');
+    await page.locator('#password').fill('wrong');
+    await page.getByRole('button', {name: '登录', exact: true}).click();
+    await page.locator('#login-error').waitFor({state: 'visible'});
+    assert.match(await page.locator('#login-error').innerText(), /用户名或密码不正确/);
+    await page.unroute('**/discover/api/login');
     await page.locator('#password').fill('synthetic-only');
+    assert.equal(await page.locator('#login-error').isHidden(), true);
     await page.getByRole('button', {name: '登录', exact: true}).click();
     await page.locator('#workspace').waitFor({state: 'visible'});
 
@@ -78,6 +86,8 @@ const {chromium} = require('playwright');
     await page.locator('.result-row').first().waitFor();
     assert.equal(await page.locator('#results .result-row').count(), 2);
     assert(await page.locator('.row-meta').first().getByText('1 KiB', {exact: true}).isVisible());
+    const selectBox = await page.locator('#resolution').boundingBox();
+    assert(selectBox.height <= 56, 'filter select keeps single-line height instead of wrapping caret: ' + selectBox.height);
     // Filtering shows filtered/total count and one-click reset.
     await page.locator('#codec').selectOption('AV1');
     assert.match(await page.locator('#result-count').innerText(), /显示 0 \/ 共 2 个结果/);
@@ -211,9 +221,27 @@ const {chromium} = require('playwright');
 
     await page.locator('nav [data-view=playbacks]').click();
     await page.getByText('暂无播放记录。', {exact: false}).waitFor();
+    state.playbacks.items = [{title: '长片测试', started_at: 1793700000, position_seconds: 5025, route: 'cloud', state: 'playing', http_status: 307, host: 'dl1.aliyundrive.cloud', has_progress: true}];
+    await page.locator('#refresh-playbacks').click();
+    await page.getByText('客户端已报告播放进度 1:23:45', {exact: true}).waitFor();
     await page.route('**/discover/api/playbacks', route => route.fulfill({status: 503, json: {error: '稍后再试'}}));
     await page.locator('#refresh-playbacks').click();
     await page.getByText('刷新失败，仍显示上次结果。', {exact: true}).waitFor();
+    await page.unroute('**/discover/api/playbacks');
+
+    // Extra torrent files (NFO/poster) show 不自动归档 and uploads with future retry_at show 下次重试.
+    state.tasks.items = [{
+      id: 'torrent:m1', name: '示例电影多文件', file_count: 2,
+      uploads: [{id: 'jm1', dest: '/aliyun/Movies/M/M.mkv', state: 'queued', progress: 25, retry_at: Math.floor(Date.now() / 1000) + 300, error: 'network_or_protocol', error_message: '传输连接中断，等待重试；不代表云盘授权失效。'}],
+      resources: [{hash: 'm1', name: '示例电影多文件', size: 2048, progress: 1, state: 'stalledUP',
+        uploads: [{id: 'jm1', dest: '/aliyun/Movies/M/M.mkv', state: 'queued', progress: 25, retry_at: Math.floor(Date.now() / 1000) + 300, error: 'network_or_protocol', error_message: '传输连接中断，等待重试；不代表云盘授权失效。'}],
+        files: [{index: 0, name: 'M.mkv', size: 2000, progress: 1, priority: 1, job_id: 'jm1', role: 'video'},
+                {index: 1, name: 'M.nfo', size: 48, progress: 1, priority: 1, role: 'extra'}]}],
+    }];
+    await page.locator('nav [data-view=tasks]').click();
+    await page.locator('[data-id="torrent:m1"] summary').first().click();
+    await page.getByText('不自动归档', {exact: true}).waitFor();
+    await page.getByText(/下次重试 \d{2}:\d{2}:\d{2}/).waitFor();
 
     await page.locator('nav [data-view=series]').click();
     await page.getByRole('button', {name: '选集下载', exact: true}).click();
@@ -248,9 +276,21 @@ const {chromium} = require('playwright');
     assert(await choose.isVisible(), 'the fix for a missing rule is not hidden in the 更多 menu');
     assert.match(await choose.getAttribute('class'), /\bprimary\b/);
     assert.equal(await unchosen.getByRole('button', {name: '选集下载'}).count(), 0);
+    assert.equal(await unchosen.getByRole('button', {name: '恢复追更'}).count(), 0);
+    // 删除追剧 uses the styled native confirm dialog instead of window.confirm.
+    await unchosen.getByText('更多', {exact: true}).click();
+    await unchosen.getByRole('button', {name: '删除追剧', exact: true}).click();
+    await page.locator('#confirm-dialog').waitFor({state: 'visible'});
+    await page.locator('#cancel-confirm').click();
+    await page.locator('#confirm-dialog').waitFor({state: 'hidden'});
 
+    // Config warning banner stays hidden while already on Settings, and reappears on other views.
+    checks.cloud = {complete: false, message: '尚未连接阿里云盘。'};
     await page.locator('nav [data-view=settings]').click();
     assert(await page.locator('#refresh-settings').isVisible());
+    assert.equal(await page.locator('#config-warning').isHidden(), true, 'warning banner is redundant on settings');
+    await page.locator('nav [data-view=search]').click();
+    await page.locator('#config-warning').waitFor({state: 'visible'});
 
     assert.deepEqual(errors, []);
     console.log('Independent UI flows passed: login and late account responses, search and submissions, settings, metrics, single-resource controls and recovery, retry focus, playback and season selection.');
