@@ -164,7 +164,7 @@ sudo bash install.sh public
 python3 scripts/check_public_login.py https://你的域名
 ```
 
-脚本匿名检查公网 HTTPS 入口能否直接到达 Emby 和影院门户登录页，并确认匿名会话和管理接口仍受保护。通过后，再用普通 Emby 账号实际登录和播放，并用管理员账号单独验证找片门户。
+脚本匿名检查公网 HTTPS 入口能否直接到达 Emby 和影院门户登录页，并确认匿名会话和管理接口仍受保护。使用 Tunnel 对外提供 HTTP 时，在该影院主机上将 HTTP 跳转到同路径的 HTTPS，并保留查询参数。用全新浏览器打开 `http://你的域名/discover/`，确认地址栏已变为 HTTPS，再输入密码。最后用普通 Emby 账号实际登录和播放，并用管理员账号单独验证找片门户。
 
 ## 10. 真实任务验收
 
