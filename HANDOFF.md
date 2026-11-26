@@ -12,6 +12,8 @@
 
 - **运行与验证。** `state/uploader/config.json` 保存当前挂载 `cloud_mount` 和历史挂载 `cloud_mounts`，旧配置缺省为 `/aliyun`。relay 在每次扫描开始时读取 `state/relay-token/cinema-mounts.json`；升级需一起重建 portal、uploader、relay，并给 portal 挂载原有的 `state/library:/library`。之后在网页选择新盘即可。回归覆盖同名路径冲突、并发页面、旧任务与字幕归属、上传回执、Emby 追加路径以及删除范围。真实阿里云盘授权、上传和播放需在具备授权的站点验证。
 
+- **本轮验收。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，均 233 项通过、1 项按平台跳过；安装包 SHA-256 校验通过。4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试通过。在隔离环境运行官方 Emby 4.10.2.0，实际追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。用发布指定的 Go 1.27.4 构建 Linux relay，govulncheck 二进制扫描命中可调用漏洞 0 项。线上站点当时仍提供旧版设置页，现场切换和真实云盘链路待部署后验收。
+
 - **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。停用的 qBittorrent 已预置相同管理凭据，并在隔离的 5.3.0 实例上验证；测试站的下载器仍未启动。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
 
 - **主线与回归。** `main` 已包含 PR #9–#14、2026-11-26 公网登录验收记录（`5cfbd8b`）以及本轮端到端复审优化。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建、portal/uploader 启动检查以及 `caddy validate`。它不部署任何环境。
