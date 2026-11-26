@@ -91,6 +91,8 @@ assert.equal(link.parentElement, null);
 assert.match(css, /\[hidden\].*display: none !important/);
 assert.match(css, /:focus-visible/);
 assert.match(css, /min-height: 44px/);
+assert.match(css, /\.cinema-theme-toggle[\s\S]*background:\s*#[0-9a-f]+/i, 'theme toggle sets explicit dark styling');
+assert.match(css, /:root\[data-cinema-theme=light\] \.cinema-theme-toggle[\s\S]*background:\s*#[0-9a-f]+/i, 'theme toggle sets explicit light styling');
 assert.doesNotMatch(css, /position:\s*(fixed|absolute)/, 'entry never overlays the player');
 for (const hostname of ['127.0.0.1', 'localhost', '[::1]']) {
   const tunnel = vm.createContext({
@@ -100,4 +102,44 @@ for (const hostname of ['127.0.0.1', 'localhost', '[::1]']) {
   vm.runInContext(script, tunnel);
   assert.equal(link.href, `http://${hostname}:8097/discover/`, 'SSH tunnel reaches the custom portal directly');
 }
-console.log('search entry: login, logout, SPA, playback, safe navigation and reinjection checks passed');
+
+(async () => {
+  let currentId = 'viewer-1', currentRole = false, roleLink;
+  const roleHeader = newHeader();
+  const roleEvents = new Map();
+  const roleDoc = {
+    body: {}, fullscreenElement: null,
+    addEventListener: (name, cb) => roleEvents.set(name, cb),
+    querySelector: () => roleHeader,
+    querySelectorAll: () => [],
+    createElement: () => (roleLink = {
+      attrs: {}, parentElement: null,
+      setAttribute(k, v) { this.attrs[k] = v; },
+      remove() {
+        if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(n => n !== this);
+        this.parentElement = null;
+      },
+    }),
+  };
+  const roleCtx = vm.createContext({
+    window: { addEventListener: (name, cb) => roleEvents.set(name, cb) },
+    document: roleDoc,
+    location: { hash: '#!/home', hostname: 'movie.example.com', protocol: 'https:' },
+    ApiClient: {
+      getCurrentUserId: () => currentId,
+      accessToken: () => currentId ? 'tok' : null,
+      getCurrentUser: () => Promise.resolve({ Id: currentId, Policy: { IsAdministrator: currentRole } }),
+    },
+    MutationObserver: class { observe() {} },
+    Promise,
+  });
+  vm.runInContext(script, roleCtx);
+  assert.equal(roleLink.hidden, true, 'entry stays hidden before admin status resolves');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(roleLink.hidden, true, 'non-admin viewer does not see admin-only search entry');
+  currentId = 'admin-1'; currentRole = true;
+  roleEvents.get('viewshow')();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(roleLink.hidden, false, 'admin user sees search entry once verified');
+  console.log('search entry: login, logout, admin-only visibility, SPA, playback, safe navigation and reinjection checks passed');
+})().catch(error => { console.error(error); process.exit(1); });

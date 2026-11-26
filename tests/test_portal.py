@@ -711,6 +711,30 @@ class PortalTests(unittest.TestCase):
             with self.assertRaises(APIError):
                 app.episodes({'series': {'42': {'tvdbId': 42}}}, {'id': '42'})
 
+    def test_search_omits_blank_categories_and_custom_mount_error_is_exposed(self):
+        from portal.server import USER_ERROR_PREFIXES
+        import integration
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            prowlarr = Mock()
+            prowlarr.json.side_effect = lambda method, path, body=None: (
+                [{'title': 'Movie.2026.1080p-GRP', 'size': 1024, 'seeders': 5, 'indexer': 'HDSky',
+                  'indexerId': 1, 'categories': [{'id': 2000, 'name': 'Movies'}, {'id': 100401, 'name': ''},
+                                                 {'id': 2001, 'name': None}, {'id': 2002, 'name': 'Movies'}],
+                  'indexerFlags': []}]
+                if path.startswith('/api/v1/search') else []
+            )
+            app.client = lambda _: prowlarr
+            items = app.search({'results': {}}, 'Movie', 'movie')['items']
+            self.assertEqual(items[0]['categories'], 'Movies')
+            ol = Mock()
+            ol.opener = Mock(addheaders=[])
+            ol.json.return_value = {'code': 200, 'data': {'is_dir': True, 'provider': 'Local'}}
+            with patch.object(integration, 'Client', return_value=ol):
+                with self.assertRaises(ValueError) as caught:
+                    integration.connect_services('tok', 'admin', 'pw', 'pk', 'sk', mount_path='/电影库')
+            self.assertTrue(str(caught.exception).startswith(USER_ERROR_PREFIXES), str(caught.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

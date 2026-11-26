@@ -699,7 +699,11 @@ class App:
                           'group': version['group'], 'episodes': span if kind == 'tv' else '',
                           'subtitle': extra.get('subtitle', ''), 'labels': extra.get('labels', []),
                           'metadata_available': bool(extra),
-                          'categories': ', '.join(c.get('name','') for c in (value.get('categories') or [])),
+                          'categories': ', '.join(dict.fromkeys(
+                              name for c in (value.get('categories') or [])
+                              if isinstance(c, dict)
+                              for name in (str(c.get('name') or '').strip(),) if name
+                          )),
                           "free": "freeleech" in [f.lower() for f in (value.get("indexerFlags") or [])]})
         with self.lock:
             results = {k:v for k,v in session.get('results',{}).items() if v[0] > now}
@@ -1188,7 +1192,8 @@ class App:
             if job['id'] in linked or job.get('parent_id') in visible_ids:
                 continue
             key='series:'+str(job['tvdb_id']) if job.get('tvdb_id') else ('torrent:'+job['torrent_hash'] if job.get('torrent_hash') else 'job:'+job['id'])
-            value=group(key,job.get('tvdb_id'),PurePosixPath(job['dest']).parts[3])
+            parts = PurePosixPath(job['dest']).parts
+            value=group(key,job.get('tvdb_id'),parts[3] if len(parts) > 3 else PurePosixPath(job['dest']).name)
             value['uploads'].extend([job, *[j for j in children[job['id']] if j['id'] not in linked]])
         for action in actions:
             if action['action']=='delete' and action['state']=='done':

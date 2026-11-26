@@ -37,7 +37,12 @@
     if (!portal) {
       applyNative();
       const button = document.getElementById('cinema-theme-toggle');
-      if (button) { button.textContent = selected === 'light' ? '深色' : '亮色'; button.title = '全局切换至' + button.textContent + '主题'; }
+      if (button) {
+        const next = selected === 'light' ? '深色' : '亮色';
+        button.textContent = '切至' + next;
+        button.title = '全局切换至' + next + '主题';
+        button.setAttribute('aria-label', button.title);
+      }
     }
   }
   function set(value) { try { localStorage.setItem(key, value); } catch {} apply(value); }

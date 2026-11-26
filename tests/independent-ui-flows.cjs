@@ -347,6 +347,18 @@ const {chromium} = require('playwright');
     await page.locator('nav [data-view=settings]').click();
     assert(await page.locator('#refresh-settings').isVisible());
     assert.equal(await page.locator('#config-warning').isHidden(), true, 'warning banner is redundant on settings');
+    // Settings columns stay balanced (2 tall cards left, 4 compact cards right) and header nav stays single-row at 1280px.
+    assert.equal(await page.locator('.settings-column').nth(0).locator('.setting-block').count(), 2);
+    assert.equal(await page.locator('.settings-column').nth(1).locator('.setting-block').count(), 4);
+    const brandBox = await page.locator('.brand').boundingBox();
+    const settingsNavBox = await page.locator('nav [data-view=settings]').boundingBox();
+    assert(Math.abs(brandBox.y - settingsNavBox.y) < 20, 'desktop header nav stays on one row at 1280px');
+    // Blocked watch popup offers direct fallback action to open Emby.
+    await page.evaluate(() => { window.open = () => null; });
+    await page.locator('#watch').click();
+    await page.locator('#notice-action').waitFor({state: 'visible'});
+    assert.equal(await page.locator('#notice-action').innerText(), '直接前往电影墙');
+    await page.locator('#dismiss-notice').click();
     await page.locator('nav [data-view=search]').click();
     await page.locator('#config-warning').waitFor({state: 'visible'});
 

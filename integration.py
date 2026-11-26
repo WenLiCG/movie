@@ -280,7 +280,7 @@ def connect_services(token, username, password, prowlarr_key, sonarr_key, origin
     if not isinstance(remote, dict) or remote.get("code") != 200 or not (remote.get("data") or {}).get("is_dir"):
         raise ValueError(f"OpenList Token 无效，或云盘路径 {mount_path} 不可用。")
     if remote["data"].get("provider") != "AliyundriveOpen":
-        raise ValueError(f"{mount_path} 必须使用阿里云盘 Open 驱动；不会向其他存储上传。")
+        raise ValueError(f"云盘挂载 {mount_path} 必须使用阿里云盘 Open 驱动；不会向其他存储上传。")
     prowlarr.json("GET", "/api/v1/system/status")
     sonarr.json("GET", "/api/v3/system/status")
     login = qb.request("POST", "/api/v2/auth/login", form={"username": username, "password": password})
