@@ -48,3 +48,47 @@
 +        t.Fatal("missing OpenList configuration must return an error")
 +    }
 +}
+--- a/internal/service/openlist/localtree/synchronizer.go
++++ b/internal/service/openlist/localtree/synchronizer.go
+@@ -21,6 +21,7 @@
+ 
+ // Synchronizer 同步远程 openlist 信息为本地磁盘目录树
+ type Synchronizer struct {
++	scanConfig config.LocalTreeGen
+ 	// snapshot 同步过程中, 实时维护快照信息
+ 	snapshot Snapshot
+ 
+@@ -73,6 +74,12 @@
+ 	}
+ 	defer s.Unlock()
+ 	s.apiRefreshFlag = apiRefreshFlag
++	s.scanConfig = *config.C.Openlist.LocalTreeGen
++	prefixes, err := cinemaScanPrefixes("/app/cinema-config/cinema-mounts.json", s.scanConfig.ScanPrefixes)
++	if err != nil {
++		return 0, 0, 0, fmt.Errorf("cannot load cinema scan paths: %w", err)
++	}
++	s.scanConfig.ScanPrefixes = prefixes
+ 
+ 	if err := s.InitSnapshot(prefix); err != nil {
+ 		return 0, 0, 0, fmt.Errorf("初始化快照异常: %w", err)
+@@ -292,7 +299,7 @@
+ 			default:
+ 				// 根据用户配置忽略特定文件和目录
+ 				cfg := config.C.Openlist.LocalTreeGen
+-				if !cfg.IsValidPrefix(task.Path) {
++				if !s.scanConfig.IsValidPrefix(task.Path) {
+ 					continue
+ 				}
+ 				if !task.IsDir && !cfg.IsAllowed(task.Container) {
+--- a/internal/config/openlist.go
++++ b/internal/config/openlist.go
+@@ -186,7 +186,8 @@
+ // IsValidPrefix 判断一个 openlist 路径是否在扫描前缀的范围中
+ func (ltg *LocalTreeGen) IsValidPrefix(path string) bool {
+ 	for _, prefix := range ltg.ScanPrefixes {
+-		if strings.HasPrefix(path, prefix) || strings.HasPrefix(prefix, path) {
++		prefix = strings.TrimSuffix(prefix, "/")
++		if path == prefix || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(prefix, strings.TrimSuffix(path, "/")+"/") {
+ 			return true
+ 		}
+ 	}

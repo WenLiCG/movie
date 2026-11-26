@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
-from integration import emby_defaults
+from integration import activate_cloud_library, emby_defaults
 from portal.server import App
 
 
@@ -45,6 +45,8 @@ class Emby:
                                    'ItemId': str(len(self.libraries)+1)})
         elif path == '/Library/VirtualFolders/LibraryOptions':
             next(lib for lib in self.libraries if lib['ItemId'] == body['Id'])['LibraryOptions'] = copy.deepcopy(body['LibraryOptions'])
+        elif path == '/Library/VirtualFolders/Paths':
+            next(lib for lib in self.libraries if lib['ItemId'] == body['Id'])['Locations'].append(body['Path'])
 
 
 class Emby4102(Emby):
@@ -65,6 +67,30 @@ class Emby4102(Emby):
 
 
 class DefaultsTests(unittest.TestCase):
+    def test_activate_cloud_keeps_ids_and_resumes_partial_addition(self):
+        api = Emby4102()
+        emby_defaults(api)
+        before = copy.deepcopy(api.libraries)
+        api.libraries[0]['Locations'].append('/library/新盘/Movies')
+        with tempfile.TemporaryDirectory() as temp:
+            for _ in range(2):
+                activate_cloud_library(api, '/新盘', Path(temp))
+            self.assertTrue((Path(temp) / '新盘/TV').is_dir())
+        self.assertEqual(sum(p == '/Library/VirtualFolders/Paths' for _, p, _ in api.calls), 1)
+        emby_defaults(api, ['/aliyun', '/新盘'])
+        for old, current, folder in zip(before, api.libraries, ['Movies', 'TV']):
+            self.assertEqual(old['ItemId'], current['ItemId'])
+            self.assertEqual(old['LibraryOptions'], current['LibraryOptions'])
+            self.assertEqual(current['Locations'], old['Locations'] + ['/library/新盘/' + folder])
+
+    def test_activate_conflicting_second_library_makes_no_change(self):
+        api = Emby()
+        emby_defaults(api)
+        api.libraries.append(dict(CollectionType='tvshows', Locations=['/library/other/TV'], ItemId='3'))
+        with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(ValueError, '其他 Emby'):
+            activate_cloud_library(api, '/other', Path(temp))
+        self.assertFalse(any(p == '/Library/VirtualFolders/Paths' for _, p, _ in api.calls))
+
     def test_4102_creates_libraries_without_optional_metadata_fields(self):
         api = Emby4102()
         emby_defaults(api)

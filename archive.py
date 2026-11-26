@@ -17,6 +17,14 @@ SUBTITLES = {'.srt', '.ass', '.ssa'}
 CLEANUP_EXTRAS = {'.nfo', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.avif', '.ttf', '.otf', '.woff', '.woff2'}
 
 
+def cloud_mount(value):
+    """One visible OpenList storage name, shared by setup and archive workers."""
+    if (not isinstance(value, str) or not re.fullmatch(r"/[^\W_][\w.-]{0,63}", value)
+            or ".balance" in value.casefold()):
+        raise ValueError("请输入单级挂载路径，例如 /aliyun-drive。名称须以字母或数字开头，最多 64 个字符。")
+    return value
+
+
 def sample(path):
     path = PurePosixPath(path)
     return any(p.casefold() in {'sample', 'samples'} for p in path.parts[:-1]) or bool(re.search(r'(?:^|[ ._-])sample(?:[ ._-]|$)', path.stem, re.I))

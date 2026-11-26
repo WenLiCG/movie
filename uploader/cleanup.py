@@ -76,6 +76,8 @@ class Cleaner:
             if len(matches) != 1:
                 raise Failure('cleanup_not_archived')
             job = matches[0]
+            if self.uploader.job_path(job).parts[2] != DOWNLOADS[category][1]:
+                raise Failure('cleanup_not_archived')
             if category == "sonarr-tv" and path.suffix.lower() in VIDEO:
                 if not re.fullmatch(r"tv:[0-9]+", job.get("identity") or ""):
                     return None
@@ -85,8 +87,6 @@ class Cleaner:
                     return None
                 local_path(current["path"], sources.media / "library/tv")
                 episodes.append({"file_id": file_id, "series_id": current["seriesId"], "path": job["source"]})
-            elif not job["dest"].startswith("/aliyun/" + DOWNLOADS[category][1] + "/"):
-                return None
             jobs.append({**job, 'cleanup_source':str(path)})
         job_ids = {j['id'] for j in jobs}
         if any(j.get('parent_id') and j['parent_id'] not in job_ids for j in jobs):
@@ -109,6 +109,9 @@ class Cleaner:
             return
         if not days or plan['completion_on'] > now-days*86400:
             return
+        for job in plan['jobs']:
+            if self.uploader.job_path(job).parts[2] != DOWNLOADS[plan['category']][1]:
+                raise Failure('cleanup_not_archived')
         if current is not None:
             files = sources.qb.json("GET", "/api/v2/torrents/files", query={"hash": plan["hash"]})
             def fields(values):
@@ -144,6 +147,8 @@ class Cleaner:
                 job = self.db.execute("""SELECT * FROM jobs WHERE source=?
                     AND state='published' AND hidden=0""", (str(extra),)).fetchone()
                 if not job or job['parent_id'] not in selected:
+                    raise Failure('cleanup_not_archived')
+                if self.uploader.job_path(dict(job)).parts[2] != 'TV':
                     raise Failure('cleanup_not_archived')
                 verify(self.uploader.remote.find(job['dest']), job)
                 if not matches_payload(extra, sources.media/'library/tv', job):

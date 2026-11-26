@@ -13,9 +13,13 @@ const {chromium} = require('playwright');
   let retentionDays = 7;
   let searchFails = false;
   let holdNextTaskPoll;
+  let cloudMount;
+  const mountRequests=[];
+  const mounts=[{path:'/aliyun',provider:'AliyundriveOpen',eligible:true},
+    {path:'/existing',provider:'AliyundriveOpen',eligible:true},{path:'/local',provider:'Local',eligible:false}];
   const state = {
     session: {csrf: 'synthetic-csrf'},
-    status: () => ({settings: {retention_days: retentionDays}, credentials: {openlist: false, qb: false}, checks, cleanup: {done: 0, pending: 0, deferred: 0, reasons: []}}),
+    status: () => ({cloud_mount:cloudMount, settings: {retention_days: retentionDays}, credentials: {openlist: false, qb: false}, checks, cleanup: {done: 0, pending: 0, deferred: 0, reasons: []}}),
     metrics: {disk: {used: 1024, total: 2048}, memory: {used: 1024, total: 2048}, cpu: 1},
     recommendations: {items: []},
     search: {items: [{id: 'tv-1', title: '示例剧.S01.1080p.WEB-DL.H.264-HHWEB', size: 1024, resolution: '1080p', codec: 'H.264', seeders: 3, site: 'local', free: true}, {id: 'tv-2', title: '示例剧.S01.2160p.WEB-DL.H.265-HHWEB', size: 4096, resolution: '4K', codec: 'H.265', seeders: 2, site: 'local', free: false}], warnings: []},
@@ -43,6 +47,22 @@ const {chromium} = require('playwright');
       if (name === 'session' && !loggedIn) {response.writeHead(401); response.end('{}'); return;}
       if (name === 'login') {loggedIn = true; response.end(JSON.stringify(state.session)); return;}
       if (name === 'logout') {loggedIn = false; response.end('{}'); return;}
+      if (['cloud-mounts','cloud-mount','configure'].includes(name)) {
+        let raw='';
+        for await (const chunk of request) raw+=chunk;
+        const body=JSON.parse(raw);
+        mountRequests.push({name,body});
+        if (name==='cloud-mounts') response.end(JSON.stringify({mounts}));
+        else if (body.expected_mount!==(cloudMount || '/aliyun')) {
+          response.writeHead(409);
+          response.end(JSON.stringify({error:'影院当前挂载已更改，请刷新设置后重试。'}));
+        } else if (name==='configure') response.end(JSON.stringify({message:'接线完成'}));
+        else {
+          cloudMount=body.mount_path;
+          response.end(JSON.stringify({path:cloudMount,provider:'AliyundriveOpen',message:'已启用 '+cloudMount}));
+        }
+        return;
+      }
       if (name === 'search' && searchFails) {response.writeHead(500); response.end('not-json'); return;}
       if (name === 'settings') {retentionDays = 14; response.end(JSON.stringify({message: '已保存'})); return;}
       const payload = state[name];
@@ -131,7 +151,44 @@ const {chromium} = require('playwright');
     searchFails = false;
 
     await page.locator('nav [data-view=settings]').click();
-    await page.locator('#refresh-token').fill('synthetic-unused-token');
+    assert.equal(await page.locator('#active-mount').innerText(),'/aliyun');
+    await page.locator('#openlist-credentials summary').click();
+    await page.locator('#openlist-user').fill('fixture-admin');
+    await page.locator('#openlist-password').fill('fixture-secret');
+    await page.locator('#mount-token').fill('fixture-new-token');
+    await page.locator('#list-mounts').click();
+    await page.locator('#mount-choice').waitFor();
+    assert.deepEqual(mountRequests.at(-1),{name:'cloud-mounts',body:{openlist_username:'fixture-admin',openlist_password:'fixture-secret'}});
+    await page.locator('#mount-choice').selectOption('/local');
+    assert(await page.locator('#save-mount').isDisabled());
+    assert.match(await page.locator('#mount-hint').innerText(),/已占用/);
+    await page.locator('#mount-choice').selectOption('/existing');
+    assert(await page.locator('#mount-token').isHidden());
+    await page.getByRole('button',{name:'核验并启用挂载'}).click();
+    await page.waitForFunction(()=>document.getElementById('active-mount').textContent==='/existing');
+    assert.equal(mountRequests.at(-1).name,'cloud-mount');
+    assert.equal(mountRequests.at(-1).body.mount_path,'/existing');
+    assert.equal(mountRequests.at(-1).body.expected_mount,'/aliyun');
+    assert(!('refresh_token' in mountRequests.at(-1).body));
+    await page.locator('#mount-choice').selectOption('');
+    await page.locator('#mount-path').fill('/new-cinema');
+    await page.locator('#mount-token').fill('fixture-new-token');
+    cloudMount='/other-tab';
+    await page.getByRole('button',{name:'新建并启用挂载'}).click();
+    await page.getByText('影院当前挂载已更改，请刷新设置后重试。',{exact:true}).waitFor();
+    await page.waitForFunction(()=>document.getElementById('active-mount').textContent==='/other-tab');
+    assert.equal(mountRequests.at(-1).body.expected_mount,'/existing');
+    await page.getByRole('button',{name:'新建并启用挂载'}).click();
+    await page.waitForFunction(()=>document.getElementById('active-mount').textContent==='/new-cinema');
+    assert.deepEqual(mountRequests.at(-1),{name:'cloud-mount',body:{openlist_username:'fixture-admin',openlist_password:'fixture-secret',expected_mount:'/other-tab',mount_path:'/new-cinema',refresh_token:'fixture-new-token'}});
+    assert(!mountRequests.some(r=>r.name==='configure'));
+    await page.locator('#mount-path').fill('/another');
+    await page.locator('#mount-token').fill('fixture-draft');
+    await page.locator('#connect-services').click();
+    await page.getByText('接线完成',{exact:true}).waitFor();
+    assert.equal(mountRequests.at(-1).body.expected_mount,'/new-cinema');
+    assert(!('refresh_token' in mountRequests.at(-1).body));
+    assert(!JSON.stringify(mountRequests.at(-1)).includes('fixture-draft'));
     await page.locator('#days').fill('123');
     const delayedPoll = new Promise(resolve => { holdNextTaskPoll = resolve; });
     await page.evaluate(() => { window.priorAccountPoll = tasks().catch(() => {}); });
@@ -141,7 +198,8 @@ const {chromium} = require('playwright');
     assert.equal(await page.locator('#results').innerText(), '');
     assert.equal(await page.locator('#workspace').isHidden(), true);
     assert.equal(await page.locator('#task-list').innerText(), '');
-    assert.equal(await page.locator('#refresh-token').inputValue(), '');
+    assert.equal(await page.locator('#mount-token').inputValue(), '');
+    assert.equal(await page.locator('#mount-choice option').count(),0);
     assert.equal(await page.locator('#query').inputValue(), '');
 
     await page.locator('#username').fill('demo');

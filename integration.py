@@ -2,11 +2,14 @@
 import copy
 import http.cookiejar
 import json
+from pathlib import Path
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+
+from archive import cloud_mount
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -118,7 +121,7 @@ def verify_emby_accounts(username, password):
         client.request("POST", "/Sessions/Logout")
 
 
-def emby_defaults(client):
+def emby_defaults(client, mounts=()):
     """Apply the cloud-library preset without replacing existing item metadata."""
     libraries = client.json('GET', '/Library/VirtualFolders/Query')['Items']
     plans = []
@@ -132,7 +135,9 @@ def emby_defaults(client):
                              SkipSubtitlesIfEmbeddedSubtitlesPresent=False, SkipSubtitlesIfAudioTrackMatches=False)
     for name, kind, path in [('电影', 'movies', '/library/aliyun/Movies'), ('电视剧', 'tvshows', '/library/aliyun/TV')]:
         matches = [lib for lib in libraries if path in [p.rstrip('/') for p in lib['Locations']]]
-        if len(matches) > 1 or (matches and (matches[0]['CollectionType'] != kind or len(matches[0]['Locations']) != 1)):
+        allowed = {path, *('/library' + cloud_mount(m) + '/' + path.rsplit('/', 1)[1] for m in mounts)}
+        if len(matches) > 1 or (matches and (matches[0]['CollectionType'] != kind or
+                any(p.rstrip('/') not in allowed for p in matches[0]['Locations']))):
             raise ValueError('影院媒体库目录或类型冲突，请先在 Emby 检查。')
         existing = matches[0] if matches else None
         if not existing and any(lib['Name'] == name for lib in libraries):
@@ -180,6 +185,37 @@ def emby_defaults(client):
         if any(library['LibraryOptions'].get(key) != value for key, value in expected.items()):
             raise ValueError('Emby 尚未确认推荐设置，请重新应用。')
         client.request('POST', '/Items/' + library['ItemId'] + '/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=FullRefresh&ReplaceAllMetadata=false&ReplaceAllImages=false')
+
+
+def activate_cloud_library(client, mount_path, library_dir=Path('/library')):
+    """Append to the two existing managed libraries. A retry resumes any partial addition."""
+    mount = cloud_mount(mount_path)
+    libraries = client.json('GET', '/Library/VirtualFolders/Query')['Items']
+    additions = []
+    for kind, folder in [('movies', 'Movies'), ('tvshows', 'TV')]:
+        target = '/library' + mount + '/' + folder
+        legacy = '/library/aliyun/' + folder
+        owners = [lib for lib in libraries if legacy in [p.rstrip('/') for p in lib['Locations']]]
+        if len(owners) != 1 or owners[0].get('CollectionType') != kind:
+            raise ValueError('请先在影院设置应用 Emby 推荐设置，确认电影和电视剧媒体库后重试。')
+        owner = owners[0]
+        if any(lib is not owner and target in [p.rstrip('/') for p in lib['Locations']] for lib in libraries):
+            raise ValueError('目标目录已用于其他 Emby 媒体库，请选择其他挂载。')
+        if target not in [p.rstrip('/') for p in owner['Locations']]:
+            additions.append((owner['ItemId'], target))
+    local_root = library_dir / mount[1:]
+    for directory in (local_root, local_root / 'Movies', local_root / 'TV'):
+        if directory.is_symlink():
+            raise ValueError('影院索引目录不可为符号链接，请检查挂载路径。')
+        directory.mkdir(exist_ok=True)
+    for item_id, target in additions:
+        client.request('POST', '/Library/VirtualFolders/Paths',
+                       {'Id': item_id, 'Path': target, 'RefreshLibrary': False})
+    if additions:
+        updated = client.json('GET', '/Library/VirtualFolders/Query')['Items']
+        if any(not any(lib.get('ItemId') == item_id and target in [p.rstrip('/') for p in lib['Locations']]
+                       for lib in updated) for item_id, target in additions):
+            raise ValueError('Emby 尚未确认新增片库路径，请重试。')
 
 
 def provider(client, api, resource, implementation, name, values, **settings):
@@ -231,7 +267,8 @@ def update_config(client, base, changes):
     return client.json("PUT", base + "/" + str(item["id"]), item)
 
 
-def connect_services(token, username, password, prowlarr_key, sonarr_key, origins=None):
+def connect_services(token, username, password, prowlarr_key, sonarr_key, origins=None, mount_path='/aliyun'):
+    mount_path = cloud_mount(mount_path)
     origins = origins or {}
     prowlarr = Client(origins.get("prowlarr", "http://127.0.0.1:9696/search"), prowlarr_key)
     sonarr = Client(origins.get("sonarr", "http://127.0.0.1:8989/sonarr"), sonarr_key)
@@ -239,11 +276,11 @@ def connect_services(token, username, password, prowlarr_key, sonarr_key, origin
     openlist = Client(origins.get("openlist", "http://127.0.0.1:5244/openlist"))
     # Keep service secrets in headers; never in URLs, command arguments or output.
     openlist.opener.addheaders = [("Authorization", token)]
-    remote = openlist.json("POST", "/api/fs/get", {"path": "/aliyun", "password": ""})
+    remote = openlist.json("POST", "/api/fs/get", {"path": mount_path, "password": ""})
     if not isinstance(remote, dict) or remote.get("code") != 200 or not (remote.get("data") or {}).get("is_dir"):
-        raise ValueError("OpenList Token 无效，或尚未将阿里云盘挂载为 /aliyun。")
+        raise ValueError(f"OpenList Token 无效，或云盘路径 {mount_path} 不可用。")
     if remote["data"].get("provider") != "AliyundriveOpen":
-        raise ValueError("/aliyun 必须使用阿里云盘 Open 驱动；不会向其他存储上传。")
+        raise ValueError(f"{mount_path} 必须使用阿里云盘 Open 驱动；不会向其他存储上传。")
     prowlarr.json("GET", "/api/v1/system/status")
     sonarr.json("GET", "/api/v3/system/status")
     login = qb.request("POST", "/api/v2/auth/login", form={"username": username, "password": password})
