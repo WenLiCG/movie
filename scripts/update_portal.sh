@@ -13,6 +13,8 @@ update_files() (
 
 TARGET="$(update_files check)"
 cd "$TARGET"
+exec 9<.
+flock -n 9 || { echo '另一项部署操作正在进行，请在结束后重试。' >&2; exit 1; }
 python3 "$SOURCE/scripts/compose_preflight.py"
 running="$(docker compose --profile '*' ps --status running --services)"
 RUNNING=()
@@ -31,14 +33,27 @@ echo "源码及配置状态已备份：$BACKUP"
 
 was_running() { grep -Fxq -- "$1" <<< "$running"; }
 
-reload_gateway() {
-    # A recreated container can start before its Caddy admin socket accepts reloads.
+retry_startup() {
     local attempt
     for attempt in {1..10}; do
-        docker compose --profile '*' exec -T gateway caddy reload --config /etc/caddy/Caddyfile && return 0
+        "$@" && return 0
         sleep 1
     done
     return 1
+}
+
+reload_gateway() {
+    retry_startup docker compose --profile '*' exec -T gateway caddy reload --config /etc/caddy/Caddyfile
+}
+
+check_portal() {
+    # Check inside this container so deployments may change or omit the host port.
+    retry_startup docker compose --profile '*' exec -T portal python -c '
+from http.client import HTTPConnection
+conn = HTTPConnection("127.0.0.1", 8097, timeout=3)
+conn.request("GET", "/discover/api/session")
+raise SystemExit(0 if conn.getresponse().status == 401 else "门户会话接口未就绪。")
+'
 }
 
 restore_on_error() {
@@ -58,6 +73,9 @@ restore_on_error() {
     fi
     if was_running gateway; then
         reload_gateway || failed=1
+    fi
+    if was_running portal; then
+        check_portal || failed=1
     fi
     if ((failed)); then echo "部分恢复失败，请使用备份检查：$BACKUP" >&2; fi
     exit "$status"
@@ -89,6 +107,7 @@ PY_UPLOADS
     docker compose --profile connected up -d --no-deps openlist
 fi
 docker compose --profile connected up -d --build --force-recreate --no-deps portal uploader relay
+check_portal
 if was_running gateway; then
     docker compose --profile '*' run --rm -T --no-deps gateway caddy validate --config /etc/caddy/Caddyfile
     docker compose --profile '*' up -d --no-deps gateway

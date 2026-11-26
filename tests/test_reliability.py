@@ -177,7 +177,10 @@ class BoundaryTests(unittest.TestCase):
             qb=Mock();qb.json.return_value=[{'category':'cinema-tv','amount_left':3*gib,'state':'downloading'}]
             app.qb=lambda:qb
             with patch('portal.server.shutil.disk_usage', return_value=Mock(total=60*gib,free=10*gib)):
-                with self.assertRaisesRegex(ValueError,'需要 12.0 GB，当前可用 10.0 GB'):
+                with self.assertRaisesRegex(ValueError,'共需 12.0 GiB，当前可用 10.0 GiB，请再释放 2,048 MiB'):
+                    app.check_space(2*gib)
+            with patch('portal.server.shutil.disk_usage', return_value=Mock(total=60*gib,free=12*gib-1)):
+                with self.assertRaisesRegex(ValueError,'请再释放 1 MiB'):
                     app.check_space(2*gib)
 
     def test_disk_guard_only_resumes_its_own_pause(self):

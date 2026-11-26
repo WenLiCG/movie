@@ -73,7 +73,7 @@ relay 保留上游源码提交，通过 `relay/dependencies.patch` 固定修订�
 - [OpenList 上传接口](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/server/handles/fsup.go)和[阿里上传实现](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/drivers/aliyundrive_open/upload.go)：当前使用原生后台上传；[后台任务实现](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/internal/fs/put.go)先缓存完整内容，[任务接口](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/server/handles/task.go)查询成功后，再刷新核对远端对象。阿里驱动仍须完成 `openFile/complete`。新挂载启用[官方秒传](https://doc.oplist.org/guide/drivers/aliyundrive_open#_3-2-3-instant-upload)，不命中则正常上传。
 - [阿里列表请求](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/drivers/aliyundrive_open/util.go)、[对象模型](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/drivers/aliyundrive_open/types.go)和[文件操作](https://github.com/OpenListTeam/OpenList/blob/v4.2.9/drivers/aliyundrive_open/driver.go)：目录可见不独立证明完成，移动也没有可依赖的原子不覆盖保证。
 - 因此本包采用隔离暂存、明确成功凭证、远端校验和发布后确认。成品目录必须由一个 uploader 独占写入；未知完成的旧尝试保留隔离，不自动发布。仍需真实中断/重试验收。
-- [中间件说明](https://github.com/AmbitiousJun/go-emby2openlist#使用说明-openlist-本地目录树生成)：虚拟媒体索引、云端转码。本包仅扫描 Movies/TV，严格直连与授权/HLS 补丁位于 `relay/strict-direct.patch`。
+- [中间件说明](https://github.com/AmbitiousJun/go-emby2openlist#使用说明-openlist-本地目录树生成)：虚拟媒体索引、云端转码。本包仅扫描 Movies/TV。`relay/strict-direct.patch` 实现严格直连、播放授权和 HLS 限制，并移除上游启动时额外开放的 Go 性能分析端口 60360。
 - [Emby 浏览器 API 客户端](https://github.com/MediaBrowser/Emby.ApiClient.Javascript/blob/master/apiclient.js)：搜索入口使用现有页面信息，不向浏览器发送服务端管理密钥。
 - [Emby 用户认证接口](https://dev.emby.media/reference/RestAPI/UserService/postUsersAuthenticatebyname.html)及上述官方客户端：`public` 用临时管理员会话读取全部用户的 `HasPassword`、`HasConfiguredPassword`，最后调用 `Sessions/Logout`；不把向导完成等同于已设置密码。
 

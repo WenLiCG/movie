@@ -23,17 +23,15 @@
       return false;
     }
     if (typeof ApiClient === 'undefined') return false;
-    if (typeof ApiClient.getCurrentUser !== 'function') {
-      const policy = ApiClient._currentUser && ApiClient._currentUser.Policy;
-      return policy && typeof policy.IsAdministrator === 'boolean' ? policy.IsAdministrator : true;
-    }
+    const cached = ApiClient._currentUser;
+    const cachedAdmin = cached?.Id === userId && cached.Policy?.IsAdministrator === true;
+    if (typeof ApiClient.getCurrentUser !== 'function') return cachedAdmin;
     if (adminUserId !== userId) {
       adminUserId = userId;
-      const cached = ApiClient._currentUser && ApiClient._currentUser.Id === userId ? ApiClient._currentUser : null;
-      isAdmin = cached && cached.Policy ? cached.Policy.IsAdministrator === true : null;
-      Promise.resolve(ApiClient.getCurrentUser()).then(user => {
+      isAdmin = cachedAdmin;
+      Promise.resolve().then(() => ApiClient.getCurrentUser()).then(user => {
         if (adminUserId === userId) {
-          isAdmin = Boolean(user && user.Policy && user.Policy.IsAdministrator === true);
+          isAdmin = user?.Id === userId && user.Policy?.IsAdministrator === true;
           update();
         }
       }).catch(() => {

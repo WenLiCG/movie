@@ -627,6 +627,38 @@ class PortalTests(unittest.TestCase):
         self.assertEqual([c.args[1].split('?')[0] for c in ol.json.call_args_list],
                          ['/api/admin/storage/list','/api/fs/list','/api/fs/list'])
 
+    def test_duplicate_native_paths_block_creation_before_any_write(self):
+        app, ol = App(), Mock()
+        storage = {'mount_path':'/other', 'driver':'Local'}
+        for pages in (([storage, storage],), ([storage], [storage])):
+            with self.subTest(pages=pages):
+                ol.json.reset_mock()
+                ol.json.side_effect = [{'code':200,'data':{'total':2,'content':page}} for page in pages]
+                with self.assertRaisesRegex(ValueError, '列表已更改'):
+                    app.prepare_cloud_mount(ol, '/new', 'test-refresh-token')
+                self.assertTrue(all(c.args[0] == 'GET' for c in ol.json.call_args_list))
+
+    def test_full_portal_rejects_login_before_contacting_emby(self):
+        app, native = App(), Mock()
+        app.client = lambda _:native
+        app.metadata_defaults = Mock()
+        app.sessions = {str(i):{'expires':float('inf')} for i in range(31)}
+        credentials = {'username':'admin', 'password':'test'}
+        def authenticate(*args):
+            with self.assertRaisesRegex(ValueError, '会话数量已满'):
+                app.login(credentials, 'other-browser')
+            return {'AccessToken':'test-token', 'User':{'Id':'1','Policy':{'IsAdministrator':True}}}
+        native.json.side_effect = APIError(401, 'denied')
+        with self.assertRaisesRegex(ValueError, '用户名或密码'):
+            app.login(credentials)
+        native.json.side_effect = authenticate
+        sid, _ = app.login(credentials)
+        self.assertIn(sid, app.sessions)
+        with self.assertRaisesRegex(ValueError, '会话数量已满'):
+            app.login(credentials)
+        self.assertEqual(native.json.call_count, 2)
+        native.request.assert_not_called()
+
     def test_cloud_wizard_handles_null_openlist_slices_on_fresh_install(self):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))

@@ -6,7 +6,7 @@
 
 电影流程：Prowlarr 手动搜索 → qB 下载并做种 → 上传协调器 → 阿里云盘 → Emby 电影墙。电视剧流程：Sonarr 监控并通过 Prowlarr 搜索 → qB 下载 → Sonarr 导入本地剧库 → 上传协调器 → 阿里云盘 → Emby。
 
-**当前代码已在 Debian 12 测试 VPS 完成 PT 搜索、原生接线、真实影片上传发布与直连取流验证。测试生成资源的上传恢复、字幕归档和保留期清理也已通过；另一台全新 VPS 与长时间播放尚未重新验收。** 具体边界见 [DISCOVER.md](DISCOVER.md)。
+Debian 12 测试 VPS 的历史验收覆盖 PT 搜索、原生接线、影片发布与直连、测试资源上传恢复、字幕归档和保留期清理。当前版本仍待用真实 PT 资源验证自定义挂载的上传与播放，并在第二台全新 VPS 上验证安装。[历次验证与当前状态](https://github.com/WenLiCG/movie/blob/main/HANDOFF.md)
 
 ## 1. 上传并运行一体安装文件
 

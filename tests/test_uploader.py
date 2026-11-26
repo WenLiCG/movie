@@ -189,6 +189,25 @@ class UploaderTests(unittest.TestCase):
         self.run_upload()
         self.assertEqual((self.service.puts, self.service.moves), (1, 1))
 
+    def test_incomplete_listing_cannot_prove_a_cloud_file_absent(self):
+        other = {'name': 'Other'}
+        for pages in (
+            [{'total': 1, 'content': [{}]}],
+            [{'total': 0}],
+            [{'total': 2, 'content': [other, other]}],
+            [{'total': 2, 'content': [other]}, {'total': 2, 'content': [other]}],
+            [{'total': 2, 'content': [other]}, {'total': 1, 'content': []}],
+        ):
+            with self.subTest(pages=pages), patch.object(self.remote, 'call', side_effect=pages):
+                with self.assertRaises(Failure):
+                    self.remote.lookup('/aliyun/Movie.mkv')
+        with patch.object(self.remote, 'call', return_value={'total': 0, 'content': None}):
+            self.assertIsNone(self.remote.lookup('/aliyun/Movie.mkv'))
+        movie = {'name': 'Movie.mkv', 'is_dir': False}
+        pages = [{'total': 2, 'content': [other]}, {'total': 2, 'content': [movie]}]
+        with patch.object(self.remote, 'call', side_effect=pages):
+            self.assertEqual(self.remote.lookup('/aliyun/Movie.mkv'), movie)
+
     def test_native_background_upload_is_not_published_until_task_succeeds(self):
         self.service.task_state = 1
         self.run_upload()
@@ -234,6 +253,16 @@ class UploaderTests(unittest.TestCase):
         self.assertEqual((self.service.puts, self.service.moves), (1, 0))
 
         listing['hash_info'] = hashes
+        self.service.move_mode = 'disconnect'
+        self.restart()
+        self.run_upload([])
+        self.assertEqual(self.row()['state'], 'moving')
+        final = self.service.objects[self.item['dest']]
+        final.pop('hash_info')
+        self.restart()
+        self.run_upload([])
+        self.assertEqual((self.row()['state'], self.row()['error']), ('moving', 'remote_hash_unavailable'))
+        final['hash_info'] = hashes
         self.restart()
         self.run_upload([])
         self.assertEqual(self.row()['state'], 'published')
