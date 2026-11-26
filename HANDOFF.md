@@ -12,13 +12,15 @@
 
 - **运行与验证。** `state/uploader/config.json` 保存当前挂载 `cloud_mount` 和历史挂载 `cloud_mounts`，旧配置缺省为 `/aliyun`。relay 在每次扫描开始时读取 `state/relay-token/cinema-mounts.json`；升级需一起重建 portal、uploader、relay，并给 portal 挂载原有的 `state/library:/library`。之后在网页选择新盘即可。回归覆盖同名路径冲突、并发页面、旧任务与字幕归属、上传回执、Emby 追加路径以及删除范围。真实阿里云盘授权、上传和播放需在具备授权的站点验证。
 
-- **测试站发布记录。** VPS 运行 [PR #16](https://github.com/WenLiCG/movie/pull/16) 的应用版本 `0a16b24`。验收结束后，提交 `b619075` 的 README 和 HANDOFF 已同步到 VPS。升级只替换 portal、uploader 和 relay，核对了另外五个容器的 ID、旧媒体索引和只读媒体挂载。八个服务运行正常，重启计数均为 0；qBittorrent 仍处于停用状态。该次升级的备份位置记录在 VPS 对应发布目录的 `backup.path`。
+- **测试站发布记录。** VPS 运行 [PR #16](https://github.com/WenLiCG/movie/pull/16) 的应用版本 `0a16b24`。验收结束后，提交 `b619075` 的 README 和 HANDOFF 已同步到 VPS。升级只替换 portal、uploader 和 relay，核对了另外五个容器的 ID、旧媒体索引和只读媒体挂载。该次升级完成时有八个服务运行，重启计数均为 0。该次升级的备份位置记录在 VPS 对应发布目录的 `backup.path`。
 
-- **公网实测。** Chrome 使用 Emby 管理员登录 `/discover/` 并读取真实 OpenList 挂载清单，两次请求均返回 HTTP 200；匿名访问会话接口返回 401。验收时唯一的 `/aliyun` 使用 Local 驱动，设置页将它标为已占用。输入空闲的顶级路径可看到新建表单，本轮未提交云盘授权或切换。
+- **挂载功能发布时的公网实测。** Chrome 使用 Emby 管理员登录 `/discover/` 并读取真实 OpenList 挂载清单，两次请求均返回 HTTP 200；匿名访问会话接口返回 401。验收时唯一的 `/aliyun` 使用 Local 驱动，设置页将它标为已占用。输入空闲的顶级路径可看到新建表单，本轮未提交云盘授权或切换。
+
+- **当前下载与追剧状态（11 月 26 日）。** 管理员启用阿里云盘 Open 挂载后，配置下载器时出现“本地应用 qBittorrent 暂时无法连接或响应超时”。现场 Compose 覆盖文件将 qB 限定在 `disabled` profile，容器未启动。移除该服务的停用配置后，公网设置页已成功接线；九个服务运行，qB WebUI 仅在容器网络内可达，公网原生管理入口经影院网关鉴权。门户成功登录 qB 并回读三个下载分类，Sonarr 已同步两个站点，设置页七项检查全部通过。验收时种子列表为空，实际下载、云端归档与播放仍待用授权测试影片验证。
 
 - **本地和 CI 验证。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，各通过 233 项、按平台跳过 1 项。安装包 SHA-256、4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试均通过。隔离的 Emby 4.10.2.0 追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。发布使用的 Go 1.27.4 relay 二进制经 govulncheck 检查，可调用漏洞为 0 项。
 
-- **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。停用的 qBittorrent 已预置相同管理凭据，并在隔离的 5.3.0 实例上验证；测试站的下载器仍未启动。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
+- **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。qBittorrent 5.3.0 已在测试站以同一管理员凭据完成原生 API 登录。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
 
 - **主线与回归。** `main` 已合并 [PR #15 的复审修复](https://github.com/WenLiCG/movie/pull/15) 和 PR #16 的自定义挂载改动。GitHub Actions 的 `Regression` 验证源码、安装包、浏览器流程、镜像构建、服务启动和 Caddy 配置；VPS 部署单独执行。[应用版本 CI](https://github.com/WenLiCG/movie/actions/runs/45822372966) · [现场验收文档 CI](https://github.com/WenLiCG/movie/actions/runs/45825759567)
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
@@ -107,7 +109,7 @@
 1. **取得源码。** 从 GitHub 克隆 `WenLiCG/movie` 的 `main`，构建安装包前记录 `git rev-parse HEAD`。打包范围见 [scripts/build_all_in_one.py](scripts/build_all_in_one.py)。
 2. **跑本地回归。** 从项目根目录运行下一节的命令。做 UI 改动可先用模拟 API 跑页面，验证真实下载或播放再使用隔离测试环境。
 3. **接管测试 VPS。** 上次使用已核对的主机指纹和项目所有者授权的 SSH 密码登录。默认密钥被拒时，核对该主机既有的登录方式。升级前确认正在使用的 Compose 项目、部署覆盖文件、隧道和已运行服务，通过私密渠道交接相应凭据。[部署记录](docs/DEPLOYMENT.md)
-4. **继续验收真实云盘。** 在“设置 → 阿里云盘”读取挂载后，选已有的阿里云盘 Open 挂载，或为独立归档空间选择空闲路径（如 `/aliyun-drive`）并在页面填写 Open Refresh Token。启用并刷新，确认当前路径和旧片库目录。待下载器和测试源就绪后，用一条有权使用的小视频验证下载、归档发布、Emby 入库和云盘直连播放。[设置与归档流程](docs/DISCOVER.md)
+4. **继续现场验收。** 在设置页刷新状态，确认当前云盘挂载、下载器和追剧连接，随后用一条有权使用的小视频验证下载、归档发布、Emby 入库和云盘直连播放。切换归档空间时保留承载旧片与旧任务的原挂载。[设置与归档流程](docs/DISCOVER.md)
 
 ## 业务链路与代码入口
 
