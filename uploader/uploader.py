@@ -242,28 +242,35 @@ class OpenList:
         return value.get("data")
 
     def entries(self, directory):
-        result = []
+        result = {}
+        total = None
         for page in range(1, 501):
             data = self.call("list", {"path": directory, "password": "", "page": page,
                                       "per_page": 200, "refresh": page == 1})
-            if not isinstance(data, dict) or type(data.get("total")) is not int:
+            if not isinstance(data, dict) or type(data.get("total")) is not int or "content" not in data:
                 raise Failure("invalid_listing")
-            items = data.get("content") or []
-            if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
+            if total is not None and data["total"] != total:
+                raise Failure("inconsistent_listing")
+            total = data["total"]
+            items = [] if data["content"] is None else data["content"]
+            if not isinstance(items, list):
                 raise Failure("invalid_listing")
-            result.extend(items)
-            if len(result) == data["total"]:
-                return result
-            if not items or len(result) > data["total"]:
+            for item in items:
+                name = item.get("name") if isinstance(item, dict) else None
+                if not isinstance(name, str) or not name:
+                    raise Failure("invalid_listing")
+                if name in result:
+                    raise Failure("duplicate_remote_names")
+                result[name] = item
+            if len(result) == total:
+                return list(result.values())
+            if not items or len(result) > total:
                 raise Failure("inconsistent_listing")
         raise Failure("directory_too_large")
 
     def find(self, path):
         p = remote_path(path, self.mounts)
-        found = [item for item in self.entries(str(p.parent)) if item.get("name") == p.name]
-        if len(found) > 1:
-            raise Failure("duplicate_remote_names")
-        return found[0] if found else None
+        return next((item for item in self.entries(str(p.parent)) if item['name'] == p.name), None)
 
     def lookup(self, path):
         """Prove absence from healthy ancestor listings, including a missing parent."""
@@ -273,15 +280,12 @@ class OpenList:
         if not parts:
             raise Failure('unsafe_remote_path')
         for index, name in enumerate(parts):
-            found = [v for v in self.entries(str(current)) if v.get('name') == name]
-            if len(found) > 1:
-                raise Failure('duplicate_remote_names')
-            if not found:
+            current /= name
+            item = self.find(str(current))
+            if item is None:
                 return None
-            item = found[0]
             if index < len(parts)-1 and item.get('is_dir') is not True:
                 raise Failure('remote_directory_conflict')
-            current /= name
         return item
 
     def mkdir(self, directory):
@@ -806,12 +810,12 @@ class Uploader:
         if job.get('task_id') and (receipt.get('task_id') != job['task_id'] or (receipt.get('native_task_state') != 2 and receipt.get('evidence') != 'remote_sha1')):
             raise Failure('missing_upload_receipt')
         sha1_receipt = receipt.get('evidence') == 'remote_sha1'
-        legacy_receipt = receipt.get('native_task_state') == 2 and not job.get('task_id_from_put') and not sha1_receipt
+        legacy_receipt = not job.get('task_id_from_put') and not sha1_receipt
         dest, stage = self.remote.find(job["dest"]), self.remote.find(job["stage"])
         if dest is not None:
             if job["state"] != "moving" or stage is not None:
                 raise Failure("destination_conflict")
-            verify(dest, job, require_sha1=legacy_receipt)
+            verify(dest, job, require_sha1=sha1_receipt or legacy_receipt)
             self.update(job, state="published", error=None, failures=0, retry_at=0)
             log(job["id"], "published")
             return

@@ -118,6 +118,19 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(show['resources']),2);self.assertEqual(show['file_count'],2)
         self.assertEqual(len(show['uploads']),2)
 
+    def test_file_links_use_either_source_and_keep_the_first_match(self):
+        torrent = self.qb.items[0]
+        folder = Path(torrent['save_path'])
+        self.qb.files[torrent['hash']].append({'index':1, 'name':'1.srt', 'size':2, 'priority':1, 'progress':1})
+        with self.uploader.db:
+            self.uploader.db.execute(
+                'INSERT INTO jobs (id,source,dest,size,download_source,torrent_hash) VALUES (?,?,?,?,?,?)',
+                ('subtitle', str(folder/'1.srt'), '/aliyun/TV/Show/1.srt', 2, str(folder/'1.mkv'), torrent['hash']))
+        show = next(g for g in self.app.tasks()['items'] if g['id'] == 'series:42')
+        resource = next(r for r in show['resources'] if r['hash'] == torrent['hash'])
+        self.assertEqual({f['name']:f['job_id'] for f in resource['files']},
+                         {'1.mkv':self.jobs[0]['id'], '1.srt':'subtitle'})
+
     def test_task_reports_finished_transfer_and_rechecks_verification_without_reupload(self):
         job = self.jobs[1]
         self.uploader.update(job, state='queued', terminal_proven=1, error='remote_hash_mismatch', retry_at=999)
@@ -202,9 +215,11 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.qb.items[2]['state'], 'uploading')
 
     def test_pause_resume_and_disk_guard_do_not_undo_user_intent(self):
-        path=self.state/'data/disk-paused.json';path.write_text(json.dumps({'2'*40:{'at':1}}))
+        path = self.state/'data/disk-paused.json'
+        path.write_text(json.dumps({torrent['hash']:{'at':1} for torrent in self.qb.items}))
         self.run_action('pause')
-        self.assertFalse(self.native.series[0]['monitored']);self.assertEqual(json.loads(path.read_text()),{})
+        self.assertFalse(self.native.series[0]['monitored'])
+        self.assertEqual(json.loads(path.read_text()), {'3'*40:{'at':1}})
         self.assertTrue(all(t['state'].startswith('stopped') for t in self.qb.items[:2]))
         self.run_action('resume')
         self.assertTrue(self.native.series[0]['monitored']);self.app.require_version.assert_called_once()
@@ -240,6 +255,19 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?',(self.jobs[1]['id'],)).fetchone()[0],'cancelled')
         self.run_action('resume')
         self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?',(self.jobs[1]['id'],)).fetchone()[0],'pending')
+
+    def test_resume_includes_cancelled_job_outside_display_history(self):
+        self.run_action('cancel')
+        self.uploader.process_actions(self.sources)
+        with self.uploader.db:
+            self.uploader.db.executemany(
+                "INSERT INTO jobs (id,source,dest,size,state,tvdb_id) VALUES (?, 'other', ?, 1, 'cancelled', 99)",
+                ((str(i), f'/aliyun/TV/Other/{i}.mkv') for i in range(1000)))
+        self.assertNotIn(self.jobs[1]['id'], {job['id'] for job in self.app.uploads()})
+        self.run_action('resume')
+        states = dict(self.uploader.db.execute('SELECT id,state FROM jobs'))
+        self.assertEqual(states[self.jobs[1]['id']], 'pending')
+        self.assertEqual(states['0'], 'cancelled')
 
     def test_remove_only_keeps_local_and_cloud_archive_evidence(self):
         reply = self.run_action('delete')

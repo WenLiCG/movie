@@ -237,6 +237,7 @@ dialog{width:min(460px,calc(100vw - 32px));max-height:90vh;overflow:auto;padding
 dialog::backdrop{background:#10241988}
 dialog select{width:100%;margin:8px 0 16px}
 dialog p{font-size:14px}
+.selection-fields{min-width:0;margin:0;padding:0;border:0}
 .dialog-actions{display:flex;justify-content:end;gap:10px;margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
 .dialog-actions button{min-width:80px}
 .episode-option{display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px}

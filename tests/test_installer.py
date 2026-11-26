@@ -152,7 +152,11 @@ class InstallerTests(unittest.TestCase):
 set -eu
 case "$*" in
   *'config --format json') echo '{"name":"cinema","services":{}}' ;;
-  *'ps --status running --services') echo gateway ;;
+  *'ps --status running --services') [ -z "${TRACE:-}" ] || { echo portal; echo gateway; } ;;
+  *'exec -T portal python '*)
+    if grep -q 'caddy:new' compose.yaml; then image=new; else image=old; fi
+    [ -z "${TRACE:-}" ] || echo "probe-$image" >> "$TRACE"
+    [ "${FAIL_NEW:-no}" != both ] && { [ "$image" = old ] || [ "${FAIL_NEW:-no}" != portal ]; } ;;
   *'caddy validate '*) grep -q 'caddy:new' compose.yaml; echo validate-new >> "$TRACE" ;;
   *' up '*' gateway')
     if grep -q 'caddy:new' compose.yaml; then image=new; else image=old; fi
@@ -162,7 +166,7 @@ case "$*" in
     image=$(cat "$TRACE.live")
     echo "reload-$image" >> "$TRACE"
     if [ ! -e "$TRACE.ready-$image" ]; then touch "$TRACE.ready-$image"; exit 1; fi
-    [ "$image" = old ] || [ "$FAIL_NEW" = no ] ;;
+    [ "$image" = old ] || [ "$FAIL_NEW" != yes ] ;;
   'ps -aq '*|*'ps -aq '*|*'config --quiet'|*'stop '*|*'up -d --build '*) ;;
   *) echo "Unexpected Docker invocation: $*" >&2; exit 1 ;;
 esac
@@ -170,7 +174,7 @@ esac
             docker.chmod(0o755)
             (base/'sleep').write_text('#!/bin/sh\nexit 0\n')
             (base/'sleep').chmod(0o755)
-            for failure in ('no', 'yes'):
+            for failure in ('no', 'yes', 'portal', 'both'):
                 with self.subTest(failure=failure):
                     target = base/('target-'+failure)
                     for folder in ('media','state/relay','state/openlist-runtime'):
@@ -186,12 +190,17 @@ esac
                                                  'TRACE':str(trace),'FAIL_NEW':failure})
                     self.assertEqual(result.returncode == 0, failure == 'no', result.stderr)
                     events = trace.read_text().splitlines()
-                    self.assertEqual(events[:4], ['validate-new','up-new','reload-new','reload-new'])
-                    if failure == 'yes':
-                        self.assertEqual(events[-3:], ['up-old','reload-old','reload-old'])
+                    if failure in ('portal', 'both'):
+                        self.assertNotIn('up-new', events)
+                        self.assertIn('probe-new', events)
+                    else:
+                        self.assertEqual(events[:5], ['probe-new','validate-new','up-new','reload-new','reload-new'])
+                    if failure != 'no':
+                        self.assertEqual(events[events.index('up-old'):][:4], ['up-old','reload-old','reload-old','probe-old'])
+                        self.assertEqual('部分恢复失败' in result.stderr, failure == 'both')
                         self.assertIn('caddy:old', (target/'compose.yaml').read_text())
                     else:
-                        self.assertEqual(len(events), 4)
+                        self.assertEqual(len(events), 5)
                         self.assertIn('caddy:new', (target/'compose.yaml').read_text())
             # Upgrading before cloud setup (no config.json and no openlist instance-id) must not crash.
             unconfigured = base / 'target-unconfigured'
@@ -200,10 +209,18 @@ esac
             (unconfigured / '.env').touch()
             (unconfigured / 'state/relay/config.yml').touch()
             (unconfigured / 'compose.yaml').write_text('services: {gateway: {image: "caddy:old"}}\n')
-            docker.write_text(docker.read_text().replace("echo gateway", "true").replace("*'up -d --build '*)", "*'up -d --build '*|*'up -d --no-deps openlist')"))
+            docker.write_text(docker.read_text().replace("*'up -d --build '*)", "*'up -d --build '*|*'up -d --no-deps openlist')"))
             res = subprocess.run(['bash', script, unconfigured], capture_output=True, text=True, timeout=30,
                                  env={**os.environ, 'PATH': str(base) + os.pathsep + os.environ['PATH']})
             self.assertEqual(res.returncode, 0, res.stderr)
+            # A second upgrade must exit before snapshotting or changing any service.
+            snapshots = set((unconfigured/'backups').iterdir())
+            locked = subprocess.run(['flock', str(unconfigured), 'bash', script, unconfigured],
+                                    capture_output=True, text=True, timeout=30,
+                                    env={**os.environ, 'PATH': str(base) + os.pathsep + os.environ['PATH']})
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn('部署操作', locked.stderr)
+            self.assertEqual(set((unconfigured/'backups').iterdir()), snapshots)
 
     def test_safe_unpack_and_resume_preserve_configuration(self):
         data = archive()

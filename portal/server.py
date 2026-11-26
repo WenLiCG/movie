@@ -4,6 +4,7 @@ from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import ipaddress
+import math
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -170,6 +171,7 @@ class App:
         self.origins = origins or BASE
         self.sessions, self.attempts = {}, {}
         self.login_total = collections.deque()
+        self.pending_logins = 0
         self.data = self.state / 'data'
         # shortcut: serialize admin writes; use per-series locks if concurrent administrators need independent downloads.
         self.lock, self.mutation = threading.Lock(), threading.Lock()
@@ -193,6 +195,7 @@ class App:
         username = text(body.get("username"))
         text(body.get("password"), 1024)
         password = body["password"]
+        sid = secrets.token_urlsafe(32)
         with self.lock:
             now = time.time()
             for key in list(self.attempts):
@@ -209,6 +212,25 @@ class App:
             if len(self.attempts)>1024:
                 self.attempts.pop(next(iter(self.attempts)))
             attempts.append(now);self.login_total.append(now)
+            self.sessions = {k: v for k, v in self.sessions.items() if v["expires"] > now}
+            if len(self.sessions) + self.pending_logins >= 32:
+                raise ValueError("会话数量已满，请注销其他会话。")
+            self.pending_logins += 1
+        session = None
+        try:
+            session = self.emby_session(username, password, now)
+        finally:
+            with self.lock:
+                self.pending_logins -= 1
+                if session is not None:
+                    self.sessions[sid] = session
+        try:
+            self.metadata_defaults(session, only_once=True)
+        except (ValueError, OSError):
+            pass  # The settings check exposes incomplete initialization without blocking login.
+        return sid, session
+
+    def emby_session(self, username, password, now):
         client = self.client("emby")
         client.timeout = 15
         client.opener.addheaders = [("X-Emby-Authorization", 'Emby Client="Cinema", Device="Web", DeviceId="cinema-discover", Version="1"')]
@@ -233,19 +255,8 @@ class App:
                 except (ValueError, OSError):
                     pass
             raise ValueError("请使用 Emby 管理员账号登录。")
-        sid = secrets.token_urlsafe(32)
-        session = {"token": result["AccessToken"], "user": user["Id"], "expires": now + 8 * 3600,
-                   "username": username, "csrf": secrets.token_urlsafe(24), "results": {}}
-        with self.lock:
-            self.sessions = {k: v for k, v in self.sessions.items() if v["expires"] > now}
-            if len(self.sessions) >= 32:
-                raise ValueError("会话数量已满，请注销其他会话。")
-            self.sessions[sid] = session
-        try:
-            self.metadata_defaults(session, only_once=True)
-        except (ValueError, OSError):
-            pass  # The settings check exposes incomplete initialization without blocking login.
-        return sid, session
+        return {"token": result["AccessToken"], "user": user["Id"], "expires": now + 8 * 3600,
+                "username": username, "csrf": secrets.token_urlsafe(24), "results": {}}
 
     def authenticate(self, sid):
         with self.lock:
@@ -361,10 +372,11 @@ class App:
                     or seen + len(items) > count or (not items and seen < count)):
                 raise ValueError("OpenList 目录列表不完整，请刷新后重试。")
             key = "mount_path" if directory is None else "name"
-            names = [item.get(key) for item in items]
-            if any(not isinstance(name, str) or name in previous for name in names):
-                raise ValueError("OpenList 目录列表已更改，请刷新后重试。")
-            previous.update(names)
+            for item in items:
+                name = item.get(key)
+                if not isinstance(name, str) or name in previous:
+                    raise ValueError("OpenList 目录列表已更改，请刷新后重试。")
+                previous.add(name)
             yield from items
             total, seen = count, seen + len(items)
             if seen == total:
@@ -892,7 +904,9 @@ class App:
                     backlog = db.execute("SELECT COALESCE(max(size),0) FROM jobs WHERE state IN ('pending','uploading')").fetchone()[0]
         required = space_required(size, remaining, backlog, disk.total)
         if required > disk.free:
-            raise ValueError(f'VPS 空间不足：需要 {required/1024**3:.1f} GB，当前可用 {disk.free/1024**3:.1f} GB（含上传暂存和安全余量）。')
+            missing_mib = math.ceil((required - disk.free) / 1024**2)
+            raise ValueError(f'VPS 空间不足：含上传暂存和安全余量共需 {required/1024**3:.1f} GiB，'
+                             f'当前可用 {disk.free/1024**3:.1f} GiB，请再释放 {missing_mib:,} MiB 后重试。')
 
     def download_release(self, session, body, kind='tv'):
         release = self.stored_release(session, body.get('release_id'), kind)
@@ -1160,10 +1174,16 @@ class App:
             files=[{k:v.get(k) for k in ('index','name','progress','size','priority')}
                    | {'role': 'video' if video(v['name']) else ('subtitle' if PurePosixPath(v['name']).suffix.lower() in SUBTITLES else 'extra')}
                    for v in qb.json('GET','/api/v2/torrents/files?'+urlencode({'hash':t['hash']}))]
+            job_for_path = {}
+            for job in jobs:
+                job_for_path.setdefault(job['source'], job['id'])
+                if job.get('download_source'):
+                    job_for_path.setdefault(job['download_source'], job['id'])
+            folder = Path(t['save_path'])
             for file in files:
-                path=Path(t['save_path'])/file['name']
-                job=next((j for j in jobs if j.get('download_source')==str(path) or j['source']==str(path)),None)
-                if job:file['job_id']=job['id']
+                path = str(folder / file['name'])
+                if path in job_for_path:
+                    file['job_id'] = job_for_path[path]
             tvdbs={j['tvdb_id'] for j in jobs if j.get('tvdb_id')}
             tvdbs.update(native_hash.get(t['hash'].lower(), ()))
             tvdb=next(iter(tvdbs)) if len(tvdbs)==1 and t['category']=='sonarr-tv' else None
@@ -1260,7 +1280,7 @@ class App:
                 with closing(sqlite3.connect(self.data/'uploads.sqlite3')) as db, db:
                     db.execute("UPDATE task_actions SET state=?,error=NULL WHERE id=?", (state,key))
                 return {'message': '已结束请求，保留现有文件与当前任务状态。'}
-            groups=self.tasks(all_jobs=action=='delete')['items']
+            groups=self.tasks(all_jobs=True)['items']
             group=next((g for g in groups if g['id']==key),None)
             resource=None
             if not group:
@@ -1350,7 +1370,10 @@ class App:
             disk_path=self.data/'disk-paused.json'
             if disk_path.exists():
                 disk=json.loads(disk_path.read_text(encoding='utf-8'))
-                if any(disk.pop(r['hash'], None) is not None for r in resources):
+                managed = disk.keys() & {r['hash'] for r in resources}
+                if managed:
+                    for digest in managed:
+                        del disk[digest]
                     private_write(disk_path,json.dumps(disk))
             try:
                 if action in {'pause','resume'}:

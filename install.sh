@@ -77,6 +77,10 @@ preflight() {
 case "$MODE" in help|--help|-h) help; exit 0 ;; install|setup|public|status|stop) ;; *) help; die "未知命令：$MODE" ;; esac
 [[ $# -le 1 ]] || die '参数过多。'
 check_host
+if [[ $MODE != status ]]; then
+    exec 9<.
+    flock -n 9 || die '另一项部署操作正在进行，请在结束后重试。'
+fi
 if [[ $MODE == install ]]; then
     ensure_docker
     if [[ ! -f .env ]]; then python3 configure.py; fi

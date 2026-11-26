@@ -318,6 +318,8 @@ async function openResource(item) {
     $('series-match').replaceChildren(...options);chooseSeries();
     $('version-content').hidden=false;$('submit-version').disabled=false;
     $('series-match').focus({preventScroll:true});$('follow-dialog').scrollTop=0;
+  } catch (error) {
+    if (generation === versionGeneration && $('follow-dialog').open) throw error;
   } finally {if(generation===versionGeneration)$('version-loading').hidden=true;}
 }
 function openFollow(item) {
@@ -424,7 +426,8 @@ async function loadEpisodes(generation = episodeGeneration) {
       $('episode-loading').hidden = true; $('episode-list').setAttribute('aria-busy', 'false');
     }
   } catch (error) {
-    if (generation === episodeGeneration) { $('episode-loading').hidden = true; $('episode-list').setAttribute('aria-busy', 'false'); }
+    if (generation !== episodeGeneration || !$('episodes-dialog').open) return;
+    $('episode-loading').hidden = true; $('episode-list').setAttribute('aria-busy', 'false');
     throw error;
   }
 }
@@ -443,24 +446,61 @@ function renderSeasonToggle(values) {
   $('select-season').disabled = !selectable.length;
   $('select-season').textContent = allSelected ? '取消本季全选' : '全选本季';
 }
-function updateEpisodeButton() { $('download-episodes').disabled = !selectedEpisodes.size || !episodeVersionReady; $('download-episodes').textContent = selectedEpisodes.size ? `下载所选 ${selectedEpisodes.size} 集` : '下载所选集数'; }
+function updateEpisodeButton() { $('download-episodes').disabled = $('episode-fields').disabled || !selectedEpisodes.size || !episodeVersionReady; $('download-episodes').textContent = selectedEpisodes.size ? `下载所选 ${selectedEpisodes.size} 集` : '下载所选集数'; }
 $('episode-season').onchange = renderEpisodes;
 $('refresh-episodes').onclick = () => { episodeDeadline = Date.now() + 120000; return action($('refresh-episodes'), () => loadEpisodes()); };
 $('cancel-episodes').onclick = () => $('episodes-dialog').close();
-$('episodes-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('download-episodes'), async () => { const result = await api('download-episodes', {series_id: episodeSeries, episode_ids: [...selectedEpisodes]}); $('episodes-dialog').close(); notice(result.message, false, '查看任务', () => show('tasks')); }); };
+async function submitSelection(form, path, body, current) {
+  const dialog = form.closest('dialog'), fields = form.querySelector('.selection-fields');
+  const submit = form.querySelector('.dialog-actions .primary'), back = form.querySelector('.dialog-actions [type=button]');
+  if (fields.disabled || submit.disabled) return;
+  fields.disabled = submit.disabled = true;
+  back.textContent = '关闭';
+  const status = form.querySelector('[role=alert]');
+  status.textContent = path === 'follow' ? '正在保存。关闭后可到“我的追剧”查看。' : '正在提交所选集数。关闭后可到“下载任务”查看。';
+  status.hidden = false;
+  const reset = () => { fields.disabled = false; back.textContent = '取消'; };
+  dialog.addEventListener('close', reset, {once:true});
+  try {
+    const result = await api(path, body);
+    if (dialog.open && current()) return result;
+  } catch (error) {
+    if (dialog.open && current()) notice(error.message, true);
+  } finally {
+    if (dialog.open && current()) {
+      dialog.removeEventListener('close', reset);
+      reset();
+      if (path === 'follow') submit.disabled = false;
+      else updateEpisodeButton();
+    }
+  }
+}
+$('episodes-form').onsubmit = async event => {
+  event.preventDefault();
+  const generation = episodeGeneration;
+  const body = {series_id: episodeSeries, episode_ids: [...selectedEpisodes]};
+  const result = await submitSelection(event.currentTarget, 'download-episodes', body, () => generation === episodeGeneration);
+  if (result) {
+    $('episodes-dialog').close();
+    notice(result.message, false, '查看任务', () => show('tasks'));
+  }
+};
 ['resolution', 'codec', 'site', 'free'].forEach(id => $(id).onchange = render);
 $('mode').onchange = syncFollowMode;
 $('cancel-follow').onclick = () => $('follow-dialog').close();
-$('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter||$('submit-version'),async()=>{
+$('follow-form').onsubmit=async event=>{
+  event.preventDefault();
+  const generation=versionGeneration;
   const mode=$('mode').value,id=following,title=versionPreview?.candidates.find(c=>c.id===id)?.title || $('version-resource').textContent;
   const body={id,mode,season:Number($('season').value)};
   if(selectedRelease)Object.assign(body,{release_id:selectedRelease.id,fields:Object.fromEntries(Object.entries(versionInputs).map(([key,input])=>[key,$(input).value.trim()])),confirmed:$('version-confirm').checked,replace:$('replace-version').checked});
-  const result=await api('follow',body);
+  const result=await submitSelection(event.currentTarget,'follow',body,()=>generation===versionGeneration);
+  if(!result)return;
   $('follow-dialog').close();notice(result.message||'版本规则已保存。');
   // The list only auto-polls while episodes sync, so show the new rule and monitoring state now.
   if(currentView==='series')series().catch(e=>notice(e.message,true));
-  if(mode==='manual')await openEpisodes({id,title});
-});};
+  if(mode==='manual')await action(null,()=>openEpisodes({id,title}));
+};
 let statusBusy=false, statusAgain=false, qbCredentialsNeeded=null, openlistCredentialsNeeded=null;
 $('days').addEventListener('input',()=>{$('days').dataset.edited='1';});
 async function status() {

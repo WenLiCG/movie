@@ -57,6 +57,7 @@ sudo bash install.sh status
 - 删除追剧：停止监控并从列表移除，保留文件及正在进行的下载。
 - 自动追剧：在 Sonarr 添加、监控并搜索，剧库 `/media/library/tv`；qB 分类 `sonarr-tv`，保留 `/media/downloads/tv` 做种副本。
 - 操作一条追剧下载时，打开「下载与归档」中的「资源详情与操作」，即使项目只有一个种子也可单独处理。项目按钮会作用于整个追剧。单资源取消后再继续，只恢复该操作实际关闭过的剧集监控。旧任务缺少记录时只恢复下载。
+- 手动暂停整个项目后，磁盘释放空间也不会自动恢复其中的种子。列表只展示最近 1000 条归档记录，项目操作会核对完整历史。下载因空间不足被拒绝时，提示会列出还需释放的 MiB。
 - 上传程序处理上述已完成视频及可关联的 `.srt`、`.ass`、`.ssa` 字幕。NFO、海报和蓝光目录不进入上传队列；多文件任务详情中将其标记为“不自动归档”。
 - 上传先进入所选挂载下的 `.cinema-upload`，校验后移到同一挂载的 `Movies` 或 `TV`。切换路径只影响随后登记的归档任务；旧任务、Emby 已有影片和本地下载继续使用原路径。保留仍有影片或任务的旧挂载。默认 7 天后只清理已归档且复核通过的本地源及做种任务；云端成品和失败暂存不自动删除。
 - Sonarr 可把文件名不同或位于子目录的字幕关联到剧集。程序删除导入副本前会检查整部剧的目录，有无法核实的附件时保留本地资源。
@@ -71,9 +72,9 @@ sudo docker compose logs --tail=100 uploader sonarr prowlarr
 sudo bash install.sh stop
 ```
 
-页面提示“本地应用 Sonarr（或 Emby、Prowlarr、qBittorrent、OpenList）暂时无法连接”时，用 `sudo docker compose ps` 确认该服务在运行，再看 `sudo docker compose logs --tail=100 <服务名>`。其他现象的排查顺序见[开发交接](HANDOFF.md#部署备份与排查)。
+页面提示“本地应用 Sonarr（或 Emby、Prowlarr、qBittorrent、OpenList）暂时无法连接”时，用 `sudo docker compose ps` 确认该服务在运行，再看 `sudo docker compose logs --tail=100 <服务名>`。其他现象见[开发交接中的排查表](https://github.com/WenLiCG/movie/blob/main/HANDOFF.md#部署备份与排查)。
 
-`stop` 保留所有数据，不执行删除或 `down -v`。重新运行 `install` 启动基础服务，`setup` 启动已配置的播放和上传，`public` 恢复公网入口。`install.sh` 本身不升级或覆盖旧部署；已有部署从独立的新源码目录运行 `sudo bash scripts/update_portal.sh /opt/cinema` 升级，脚本先备份源码、配置状态和 SQLite 快照，失败时恢复旧源码与镜像。仍建议事先另行备份 `.env`、整个 `state/`（包括上传数据库）和媒体，详见 [现有部署升级](docs/DISCOVER.md#更新已有部署)。
+`stop` 保留所有数据。重新运行 `install` 启动基础服务，`setup` 启动已配置的播放和上传，`public` 恢复公网入口。已有部署从独立的新源码目录运行 `sudo bash scripts/update_portal.sh /opt/cinema` 升级。安装与升级脚本会避免对同一目录并发修改。升级前会备份源码、配置状态和 SQLite 快照；新门户必须能响应匿名会话检查，持续失败会触发旧源码和镜像的回滚。备份和恢复步骤见[现有部署升级](docs/DISCOVER.md#更新已有部署)。
 
 ## 源码与验证
 
