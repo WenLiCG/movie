@@ -147,7 +147,8 @@ sudo bash install.sh public
 
 按提示输入 Emby 管理员用户名和密码。此步骤临时登录、读取全部用户（包括隐藏用户），拒绝存在无密码或允许免密的启用账号，然后注销检查会话；不保存本次 Emby 密码。只完成首次向导不能证明每个账号都有密码，因此需要此检查。
 
-- `https://movie.example.com`：Emby 登录、电影墙和播放，经过严格直连 relay。
+- `https://movie.example.com`：普通观众用影院分配的 Emby 用户名和密码登录、进入电影墙并播放。Emby 客户端可直接填写这个服务器地址。
+- `https://movie.example.com/discover/`：找片与追剧门户，使用 Emby 管理员账号登录。
 - `https://movie.example.com/search/`：Prowlarr 站点管理和手动搜索，**仅管理员使用**。
 - `https://movie.example.com/sonarr/`：追剧管理。
 - `https://movie.example.com/qb/`：下载与做种管理。
@@ -155,7 +156,15 @@ sudo bash install.sh public
 
 域名以安装时填写值为准。`public` 还会检查 Sonarr 登录、OpenList 初始化及游客禁用、qB 匿名 API 被拒绝。原始服务端口继续只绑定回环地址；Emby 管理也可从根路径进入。普通观看用户不应获得管理账号或 PT Cookie。
 
-电影墙“找片 / 追剧”进入 `/discover/`，使用 Emby 管理员登录；Prowlarr 保留为站点和高级搜索管理入口，各应用分别认证。
+公网原生后台先检查门户的管理员会话，再验证各自的应用账号。SSH 隧道可直达回环端口，供首次设置或维护使用。
+
+从能访问公网的机器运行以下检查，把示例替换为实际影院域名。
+
+```bash
+python3 scripts/check_public_login.py https://你的域名
+```
+
+脚本匿名检查公网 HTTPS 入口能否直接到达 Emby 和影院门户登录页，并确认匿名会话和管理接口仍受保护。通过后，再用普通 Emby 账号实际登录和播放，并用管理员账号单独验证找片门户。
 
 ## 10. 真实任务验收
 
