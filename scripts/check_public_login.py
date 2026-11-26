@@ -44,8 +44,10 @@ def check_public_login(address):
             print(f'失败 {path} · 连接、TLS 或 HTTP 响应异常')
             return False
         if path == '/web/index.html':
+            # Emby uses the operator's server name as the page title.
             ok = (status == 200 and mime == 'text/html' and
-                  re.search(rb'<title\b[^>]*>\s*Emby(?:\s+(?:Web|Server))?\s*</title\s*>', body, re.I))
+                  re.search(rb'<html\b[^>]*\bdata-appversion=', body, re.I) and
+                  re.search(rb'<script\b[^>]*\bsrc=["\'](?:\./)?apploader\.js(?:\?[^"\']*)?["\']', body, re.I))
             expected = 'Emby 页面'
         elif path == '/discover/':
             ok = status == 200 and mime == 'text/html' and all(marker in body for marker in (

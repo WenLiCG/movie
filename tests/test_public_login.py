@@ -14,7 +14,7 @@ class PublicLoginTests(unittest.TestCase):
     def test_public_login_and_redacted_failures_over_http(self):
         portal = (Path(__file__).resolve().parents[1]/'portal/index.html').read_bytes()
         pages = {
-            '/web/index.html': (200, 'text/html', b'<html><title>Emby</title></html>', ''),
+            '/web/index.html': (200, 'text/html', b'<html data-appversion="4.10.2.0"><title>Private Cinema</title><script src="apploader.js?v=4.10.2.0"></script></html>', ''),
             '/discover/': (200, 'text/html', portal, ''),
             '/discover/api/session': (401, 'application/json', b'{"error":"login required"}', ''),
         }
