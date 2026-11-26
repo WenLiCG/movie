@@ -28,10 +28,11 @@
 
 - **管理员登录验收（11 月 26 日）。** 测试站已在原用户 ID 上统一 Emby、OpenList、Prowlarr 和 Sonarr 的管理员登录；qBittorrent 5.3.0 也已使用同一套凭据完成原生 API 登录。普通观众可登录电影墙，管理门户仅允许 Emby 管理员访问。
 
-- **主线与回归。** `main` 已合并 [PR #15 的复审修复](https://github.com/WenLiCG/movie/pull/15) 和 PR #16 的自定义挂载改动。GitHub Actions 的 `Regression` 验证源码、安装包、浏览器流程、镜像构建、服务启动和 Caddy 配置；VPS 部署单独执行。[应用版本 CI](https://github.com/WenLiCG/movie/actions/runs/45822372966) · [现场验收文档 CI](https://github.com/WenLiCG/movie/actions/runs/45825759567)
+- **主线与回归。** `main` 已合并 [PR #15 的复审修复](https://github.com/WenLiCG/movie/pull/15)、PR #16 的自定义挂载改动以及 2026-11-26 公网双账号实测后的体验修复。GitHub Actions 的 `Regression` 验证源码、安装包、浏览器流程、镜像构建、服务启动和 Caddy 配置；VPS 部署单独执行。[应用版本 CI](https://github.com/WenLiCG/movie/actions/runs/45822372966) · [现场验收文档 CI](https://github.com/WenLiCG/movie/actions/runs/45825759567)
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
-- **观影入口。** 普通观众通过域名根路径使用自己的 Emby 用户名和密码。验收时用无痕浏览器或全新客户端访问该地址，应直接到达 Emby 登录界面。若先进入 Cloudflare Access 的邮箱或身份提供方登录页，应核对覆盖观影主机的 Access 应用。管理员仍须在 `/discover/` 使用 Emby 管理员账号。SSH 隧道用于首次配置、维护及回环端口访问。
-- **尚未现场验收。** 全新 Debian VPS 重装、本次升级备份的实际回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放、真实观影账号登录后播放。
+- **观影入口。** 普通观众通过域名根路径使用自己的 Emby 用户名和密码，登录后不显示管理员专用的“找片 / 追剧”入口。验收时用无痕浏览器或全新客户端访问该地址，应直接到达 Emby 登录界面。若先进入 Cloudflare Access 的邮箱或身份提供方登录页，应核对覆盖观影主机的 Access 应用。管理员仍须在 `/discover/` 使用 Emby 管理员账号。SSH 隧道用于首次配置、维护及回环端口访问。
+- **公网双账号实测与待决项（11 月 26 日）。** 使用普通观众账号与管理员账号在测试站完成了非破坏性全流程实测：普通观众在 `/discover/` 被正确拦截（HTTP 400 内联提示），Emby 电影墙登录正常，`/search/`、`/sonarr/`、`/qb/`、`/openlist/` 全部受管理员鉴权拦截。测试站既有 `/aliyun` 上的占位片（`MV4-Test-Short`/`MV4-Test-Long`）因对应 Local 驱动返回 `HTTP 307 → 主站点` 而无法播放，播放记录准确归类为“直连尚未确认”。管理员端热种推荐、电影/剧集搜索、筛选器、追更弹窗、设置页 7 项检查、VPS 指标与亮/深色及 390px 布局均通过；实测暴露的 Emby 主题按钮无底色边框、非管理员可见“找片 / 追剧”、Emby 改写 hash 导致“看片”交接超时、搜索分类尾随逗号、自定义挂载错误前缀和设置页列失衡均已在本轮源码修复（待按常规 `update_portal.sh` 发布到 VPS）。
+- **尚未现场验收。** 全新 Debian VPS 重装、本次升级备份的实际回滚、真实 PT 下载并归档至 `/aliyun2` 后的阿里云盘 CDN 直连播放、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放。
 
 需要所有者决定或现场数据才能处理的事项（均未改变现有行为）：
 
@@ -47,6 +48,21 @@
 已在后续提交中解决、旧记录里仍列为待办的两项：按任务名找回的上传现在要求云端 SHA1 与源文件一致才发布（`uploader.py` 的 `poll_upload`）；自动清理改为白名单，只有 NFO、常见图片和字体可不经归档随种子删除，`.mks`、`.ttml`、样片等未归档文件会保留整个种子（`cleanup.py` 的 `needs_archive`）。
 
 行为提示：HSTS 一年（不含子域，回滚服务端无法立即撤销）；含未归档文件的种子不自动清理，磁盘可能增长；取消/删除的退避只保存在内存中，重启后清零。
+
+## 2026-11-26 公网双账号实测与体验修复
+
+**测试基线。** 以 `main@d961963`（含 PR #16 自定义云盘挂载与统一管理员账号）为基线，对已部署测试站执行非破坏性真机端到端实测（桌面 1280×900 与移动 390×844、亮/深色主题、普通观众与管理员双账号，不触发任何下载、修改或删除）。
+
+| 严重度 | 实测 / 复审发现 | 修复方案 | 回归证据 |
+| --- | --- | --- | --- |
+| 高 | 点击门户顶部“看片”时，Emby 4.10.2.0 的 SPA 路由在 `custom.js` 加载前即将 `location.hash` 改写为 `#!/startup/manuallogin.html`，导致 `search.js` 仅检查 `location.hash` 时漏掉 `cinemaHandoff` 并让按钮挂起 25 秒超时；浏览器拦截弹窗时亦无直接跳转兜底 | `relay/custom-js/search.js` 同时检查 `location.search` 与 `location.hash`；`portal/app.js` 在弹窗被拦截或交接失败时提供“直接前往电影墙”按钮 | `tests/watch-handoff.test.cjs`、`tests/independent-ui-flows.cjs` |
+| 高 | PR #16 切换自定义挂载（非 `/aliyun`）后，`integration.py` 抛出的“必须使用阿里云盘 Open 驱动”错误以挂载路径开头，未命中 `portal/server.py` 的 `USER_ERROR_PREFIXES` 而被吞成泛化提示 | 错误文案统一加上“云盘挂载 ”前缀，稳定命中白名单 | `tests/test_portal.py` |
+| 中 | 普通观影账号登录 Emby 电影墙后，顶栏仍显示管理员专用的“找片 / 追剧”入口，点击进入 `/discover/` 会被 400 拒绝 | `relay/custom-js/search.js` 调用 `ApiClient.getCurrentUser()` 校验 `Policy.IsAdministrator === true`，非管理员隐藏该入口 | `tests/search-entry.test.cjs` |
+| 中 | Emby 顶栏注入的主题切换按钮缺少背景/文字/边框样式，在深色/亮色顶栏上均呈原生 3D 灰白按钮，且“深色/亮色”文案易与当前状态混淆 | `relay/custom-css/search.css` 补齐暗/亮两套配色、边框与悬停态；`portal/theme.js` 文案改为“切至深色 / 切至亮色”并设置 `aria-label` | `tests/search-entry.test.cjs`、`tests/check_ui.cjs` |
+| 低-中 | 搜索结果卡片中 Prowlarr 返回空名子分类导致 `HDSky · Movies,` 尾随逗号；PR #16 新增挂载表单后设置页左列明显高于右列；`1280px` 含滚动条时顶栏偶发折行；孤立上传任务 `dest` 路径段不足时 `parts[3]` 潜在越界 | `portal/server.py` 过滤空名并去重分类、为 `parts[3]` 增加安全回退；`portal/index.html` 将“高级管理”迁回右列平衡为左 2 右 4；`portal/style.css` 微调顶栏间距保持单行 | `tests/test_portal.py`、`tests/independent-ui-flows.cjs` |
+
+- **验证**：Windows（`compileall`、`node --check`、4 组 Node 测试、2 套 Chrome Playwright、235 项 Python 测试：230 通过 / 5 跳过）与 WSL Linux（81 个发行文件解包后 235 项 Python 测试：234 通过 / 1 跳过）全部通过；Docker / Compose / `caddy validate` 由 GitHub Actions `Regression` 执行。
+- **现网说明**：测试站旧占位片（`/aliyun` 下 Local 驱动）播放返回 `307 → 主站点` 属于存储驱动非阿里云盘 Open 导致，待归档一部测试影片到当前 `/aliyun2` 挂载后可完成真实 CDN 直连播放验收；此外 Cloudflare Web Analytics 注入的 `beacon.min.js` 被严格 CSP 拦截属于预期保护（需在 Cloudflare 后台按需关闭统计，不放宽 `script-src 'self'`）。
 
 ## 2026-11-26 端到端复审与体验优化
 

@@ -3,16 +3,20 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const code=fs.readFileSync(require('node:path').join(__dirname,'../relay/custom-js/search.js'),'utf8');
-function page(origin,portal){
+function page(origin,portal,hash='#!/login?cinemaHandoff=1',search=''){
   const values=new Map(),messages=[],handlers={},opener={postMessage:(data,to)=>messages.push({data,to})};
   let redirect='';
   const window={opener,__cinemaSearchInstalled:true,addEventListener:(name,fn)=>handlers[name]=fn};
-  const location={origin,hostname:new URL(origin).hostname,protocol:new URL(origin).protocol,hash:'#!/login?cinemaHandoff=1',replace:path=>redirect=path};
+  const location={origin,hostname:new URL(origin).hostname,protocol:new URL(origin).protocol,search,hash,replace:path=>redirect=path};
   vm.runInNewContext(code,{window,location,localStorage:{getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v)},Date});
   return {values,messages,receive:data=>handlers.message(data),opener,redirect:()=>redirect,portal};
 }
-for(const [origin,portal] of [['https://movie.example.com','https://movie.example.com'],['http://127.0.0.1:8095','http://127.0.0.1:8097']]){
-  const p=page(origin,portal),auth={server_id:'server',user_id:'admin',token:'user-session-only',name:'影院'};
+for(const [origin,portal,hash,search] of [
+  ['https://movie.example.com','https://movie.example.com','#!/login?cinemaHandoff=1',''],
+  ['https://movie.example.com','https://movie.example.com','#!/startup/manuallogin.html','?cinemaHandoff=1793700000'],
+  ['http://127.0.0.1:8095','http://127.0.0.1:8097','#!/login?cinemaHandoff=1',''],
+]){
+  const p=page(origin,portal,hash,search),auth={server_id:'server',user_id:'admin',token:'user-session-only',name:'影院'};
   assert.deepEqual(JSON.parse(JSON.stringify(p.messages[0].data)),{type:'cinema-watch-ready'});assert.equal(p.messages[0].to,portal);
   p.receive({origin:'https://evil.example',source:p.opener,data:{type:'cinema-watch-login',auth}});
   p.receive({origin:portal,source:{},data:{type:'cinema-watch-login',auth}});

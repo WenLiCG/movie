@@ -51,17 +51,17 @@ const {chromium} = require('playwright');
       response.end(JSON.stringify(sample[name] || {}));return;
     }
     if (url.pathname === '/fake-emby') {
-      response.setHeader('Content-Type','text/html');
-      response.end('<!doctype html><html class="theme-dark"><head><link rel="stylesheet" href="/web/modules/themes/dark/theme.css"><script src="/discover/theme.js" defer></script></head><body><div class="headerRight"></div></body></html>');return;
+      response.setHeader('Content-Type','text/html; charset=utf-8');
+      response.end('<!doctype html><html class="theme-dark"><head><meta charset="utf-8"><link rel="stylesheet" href="/web/modules/themes/dark/theme.css"><script src="/discover/theme.js" defer></script></head><body><div class="headerRight"></div></body></html>');return;
     }
     if (url.pathname.startsWith('/web/modules/themes/')) {
       nativeThemeRequests.set(url.pathname,(nativeThemeRequests.get(url.pathname)||0)+1);
-      response.setHeader('Content-Type','text/css');response.setHeader('Cache-Control','no-store');
+      response.setHeader('Content-Type','text/css; charset=utf-8');response.setHeader('Cache-Control','no-store');
       response.end(url.pathname.endsWith('/theme.css') ? 'body{color:'+(url.pathname.includes('/light/')?'rgb(20,40,20)':'rgb(230,240,230)')+'}' : '');return;
     }
     const file = url.pathname === '/discover/' ? 'index.html' : url.pathname.split('/').pop();
     if (!['index.html','style.css','app.js','paint.js','theme.js'].includes(file)) {response.writeHead(404);response.end();return;}
-    response.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html');
+    response.setHeader('Content-Type',(file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html')+'; charset=utf-8');
     response.end(await readFile(path.join(__dirname,'../portal',file)));
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
@@ -155,8 +155,10 @@ const {chromium} = require('playwright');
     assert.equal(nativeThemeRequests.get('/web/modules/themes/light/theme.css'),lightRequests,'late native components must preserve loaded theme stylesheets');
     await emby.evaluate(() => document.documentElement.className='theme-dark');
     await emby.waitForFunction(() => document.documentElement.classList.contains('theme-light'));
+    assert.equal(await emby.locator('#cinema-theme-toggle').innerText(), '切至深色');
     await emby.locator('#cinema-theme-toggle').click();
     await page.waitForFunction(() => document.getElementById('theme-select').value==='dark');
+    assert.equal(await emby.locator('#cinema-theme-toggle').innerText(), '切至亮色');
     for (const theme of ['light','dark']) {
       await page.locator('#theme-select').selectOption(theme);
       const colors=await page.evaluate(() => Object.fromEntries(['bg','surface','text','muted','accent','accent-soft','ink','warning','warning-soft','info','info-soft','error','error-soft','control-line'].map(key => [key,getComputedStyle(document.documentElement).getPropertyValue('--'+key).trim()])));

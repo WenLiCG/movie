@@ -869,13 +869,14 @@ async function tasks() {
 }
 $('watch').onclick=()=>{
   const address=['127.0.0.1','localhost','[::1]'].includes(location.hostname)?location.protocol+'//'+location.hostname+':8095':location.origin;
+  const openDirect=()=>{location.href=address+'/';};
   const target=window.open('about:blank','_blank');
-  if(!target){notice('浏览器阻止了看片窗口，请允许本站弹出窗口后重试。',true);return;}
+  if(!target){notice('浏览器阻止了看片窗口，请允许本站弹出窗口，或直接前往电影墙。',true,'直接前往电影墙',openDirect);return;}
   action($('watch'),async()=>{
     const auth=api('watch-session',{});
     try {
       await new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>finish(new Error('看片页面连接超时，请稍后重试。')),25000);
+        const timer=setTimeout(()=>finish(new Error('看片页面连接超时，请重试或直接前往电影墙。')),25000);
         const watcher=setInterval(()=>{if(target.closed)finish();},500);
         function finish(error){clearTimeout(timer);clearInterval(watcher);window.removeEventListener('message',receive);error?reject(error):resolve();}
         async function receive(event){
@@ -889,7 +890,7 @@ $('watch').onclick=()=>{
         target.location=address+'/web/index.html?cinemaHandoff='+Date.now()+'#!/login?cinemaHandoff=1';
         auth.catch(finish);
       });
-    }catch(e){notice(e.message,true);}
+    }catch(e){notice(e.message,true,'直接前往电影墙',openDirect);}
   });
 };
 $('refresh-series').onclick = () => action($('refresh-series'), series);
