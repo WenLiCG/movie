@@ -2,7 +2,13 @@
 
 更新于 2026-11-26（北京时间）。项目把 PT 搜索、下载做种、云盘归档和 Emby 播放串在一起。`/discover/` 是管理员操作台，域名根路径是 Emby 电影墙。Python 服务使用标准库，前端直接提供静态文件，relay 通过固定版本的 Go 上游和本仓库补丁构建。
 
-本文按以下顺序组织：当前状态与待决事项、本轮复审、接手指南（取得源码、代码入口、验证、部署与排查），最后是历次交付记录（新→旧）。
+## 唯一管理员账号
+
+**整套影院只使用一套管理员账号和密码。用户名统一为 `admin`，所有管理入口使用同一个管理员密码。** `/discover/` 通过 Emby 验证身份。直接登录 Emby、OpenList、Indexer 管理后台（Prowlarr）、Sonarr 或 qBittorrent 时，都使用这套凭据。首次部署、重装和交接时沿用这项约定。
+
+五个原生服务各自保存凭据。改密时，在五处把原有 `admin` 更新为同一个新密码，然后到 `/discover/` 的设置页用新密码重新配置下载器与追剧。交接时通过私密渠道传递密码。
+
+普通观众使用独立的 Emby 观影账号。VPS 的 SSH 登录、第三方 PT 站点凭据、云盘授权和服务间 API 令牌各有用途，分别管理。
 
 ## 当前状态与待决事项（2026-11-26 汇总）
 
@@ -20,7 +26,7 @@
 
 - **本地和 CI 验证。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，各通过 233 项、按平台跳过 1 项。安装包 SHA-256、4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试均通过。隔离的 Emby 4.10.2.0 追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。发布使用的 Go 1.27.4 relay 二进制经 govulncheck 检查，可调用漏洞为 0 项。
 
-- **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。qBittorrent 5.3.0 已在测试站以同一管理员凭据完成原生 API 登录。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
+- **管理员登录验收（11 月 26 日）。** 测试站已在原用户 ID 上统一 Emby、OpenList、Prowlarr 和 Sonarr 的管理员登录；qBittorrent 5.3.0 也已使用同一套凭据完成原生 API 登录。普通观众可登录电影墙，管理门户仅允许 Emby 管理员访问。
 
 - **主线与回归。** `main` 已合并 [PR #15 的复审修复](https://github.com/WenLiCG/movie/pull/15) 和 PR #16 的自定义挂载改动。GitHub Actions 的 `Regression` 验证源码、安装包、浏览器流程、镜像构建、服务启动和 Caddy 配置；VPS 部署单独执行。[应用版本 CI](https://github.com/WenLiCG/movie/actions/runs/45822372966) · [现场验收文档 CI](https://github.com/WenLiCG/movie/actions/runs/45825759567)
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
@@ -223,7 +229,7 @@ sudo docker compose logs --tail=100 portal uploader sonarr prowlarr
 | 中 | 浏览器切换或取消请求导致 `Handler.reply()` 写入中断（`ConnectionAbortedError` / `BrokenPipeError`）时，外层 `except OSError` 再次向已关闭连接写 400 响应头并抛出未捕获异常 | 在 `Handler.reply()` 及 `/api/admin-check` 跳转中安全吸收客户端断连异常，避免二次写响应报错。 |
 | 中 | `versions.json`、`watch-requests.json` 等文件以 UTF-8（`ensure_ascii=False`）写入，但多处 `.read_text()` 未指定 `encoding='utf-8'`，在 Windows 等非 UTF-8 默认编码环境读写中文版本标记（如`中字`）会乱码或解码失败 | 统一 `portal/server.py`、`archive.py`、`uploader/uploader.py`、`uploader/cleanup.py` 与 `scripts/update_portal.sh` 的 UTF-8 读取编码。 |
 | 中 | `App.localize()` 丢失 `None` 与空列表区分，导致确认无中文名的剧集仅缓存 5 分钟（与文档 24 小时不符），且未加锁、无容量上限；`/api/tasks` 每 10 秒轮询会对全部 Sonarr 剧集发起本地化查询；`/api/series` 按剧逐次重开 SQLite 和重读配置 | 区分暂态失败（5 分钟重试）与确认无中文元数据（24 小时缓存），全程加锁并限制缓存上限；`tasks()` 仅查询当前活动任务关联的剧集；`/api/series` 合并配置读取与单次 SQLite 归档计数查询；回环地址 `X-Forwarded-For` 短路跳过 `gateway` DNS 解析。 |
-| 低-中 | `_disk_guard` 每 10 秒读取 SQLite 未使用 `closing()` 关闭连接且未检查 `jobs` 表是否存在；`retry_upload` 与 `update_portal.sh` 缺少库文件或 `jobs` 表前置判断；`configure.py` `check_public` 默认管理员名硬编码个人账号 | 补齐 `closing()` 与 `sqlite_master` 表存在检查，避免空库误建或升级前缺表报错；默认管理员提示统一为文档约定的 `cinema-admin`。 |
+| 低-中 | `_disk_guard` 每 10 秒读取 SQLite 未使用 `closing()` 关闭连接且未检查 `jobs` 表是否存在；`retry_upload` 与 `update_portal.sh` 缺少库文件或 `jobs` 表前置判断；`configure.py` `check_public` 默认管理员名硬编码个人账号 | 补齐 `closing()` 与 `sqlite_master` 表存在检查，避免空库误建或升级前缺表报错；当时的默认提示为 `cinema-admin`；现行用户名见文首“唯一管理员账号”。 |
 | 中（UI/UX） | 320px 手机宽度下“我的追剧 → 更多”菜单向左溢出视口外（实测 `x = -79px`），且点击外部/按 Esc/点击菜单项不自动收起；“看片”复用固定命名窗口会覆盖正在播放的标签页 | “更多”菜单增加边框与视口自适应左右对齐（320px 实测 `x = 31px` 完全在视口内），支持单开互斥、点击外部与 Esc 关闭；“看片”改为每次打开新标签页交接会话。 |
 | 低-中（UI/UX） | 追更弹窗切换候选剧集时清空用户刚填写的版本条件，未识别提示不随输入更新，条件未变仍显示换版勾选；选集弹窗按钮 0px 贴合且默认停在无可选集的第 1 季；搜索被默认 1080p 过滤后不显示总数且缺少一键重置；任务总览缺少体积与实时下载速度；设置页缺少手动刷新按钮 | 追更弹窗保留用户输入、实时更新提示且仅在条件实际改变时显示并要求勾选换版；选集弹窗增加按钮间距、默认选中首个有可下载集数的季并联动“全选/取消本季全选”；搜索显示“显示 X / 共 Y 个结果”与一键重置筛选；任务行展示总大小与实时速度，下载提示支持一键跳转任务页且常规提示 8 秒自动收起；追剧 `同步集数中` 自动轮询；设置页补齐顶部“刷新”按钮。 |
 
