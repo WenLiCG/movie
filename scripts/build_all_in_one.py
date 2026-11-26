@@ -82,7 +82,7 @@ def extract_payload(data, target, expected):
     marker = target / '.cinema-package.json'
     required = {'install.sh', 'compose.yaml', 'configure.py', 'integration.py'}
     if target.exists() and any(target.iterdir()):
-        if marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text()) == {'sha256': expected}:
+        if marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text(encoding='utf-8')) == {'sha256': expected}:
             if any(not (target / name).is_file() or (target / name).is_symlink() for name in required):
                 raise ValueError('已有安装缺少关键文件或包含符号链接，请从备份恢复。')
             return target
@@ -111,7 +111,7 @@ def extract_payload(data, target, expected):
                 with archive.extractfile(entry) as source, destination.open('xb') as output:
                     shutil.copyfileobj(source, output)
                 destination.chmod(0o755 if destination.suffix == '.sh' else 0o644)
-            (staging / '.cinema-package.json').write_text(json.dumps({'sha256': expected}) + '\n')
+            (staging / '.cinema-package.json').write_text(json.dumps({'sha256': expected}) + '\n', encoding='utf-8')
             (staging / '.cinema-source-files.json').write_text(json.dumps(sorted(seen)) + '\n', encoding='utf-8')
             for directory in staging.rglob('*'):
                 if directory.is_dir():

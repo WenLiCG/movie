@@ -117,7 +117,7 @@ def apply(source, target, backup):
     directories = {parent for name in incoming for parent in Path(name).parents if parent != Path('.')}
     for directory in sorted(directories):
         path = target / directory
-        if not path.exists() or directory.as_posix() in {'portal', 'relay/custom-js', 'relay/custom-css'}:
+        if not path.exists() or directory.as_posix() in {'portal', 'relay', 'relay/custom-js', 'relay/custom-css', 'scripts', 'gateway'}:
             path.mkdir(exist_ok=True)
             path.chmod(0o755)
     for name, path in touched.items():

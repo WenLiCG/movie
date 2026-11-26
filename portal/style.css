@@ -28,7 +28,7 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .danger{color:var(--error)}
 .danger:hover{background:var(--error-soft);border-color:transparent}
 .danger-button{background:var(--error);color:var(--bg);border-color:transparent}
-.danger-button:hover{background:var(--error);border-color:var(--text)}
+.danger-button:hover{background:var(--error);border-color:var(--text);filter:brightness(.92)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:4px}
 input,select{min-height:46px;max-width:100%;padding:10px 13px;border:1px solid var(--control-line);border-radius:8px;background:var(--surface);color:var(--text);caret-color:var(--accent)}
 input::placeholder{color:var(--muted);opacity:1}
@@ -120,8 +120,8 @@ p{margin:8px 0 22px}
 .has-results .search-form{max-width:none}
 .has-results .kind{justify-content:flex-start;padding:14px 0 0}
 .filters{display:flex;align-items:end;flex-wrap:wrap;gap:16px;margin:22px 0 16px;padding:20px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
-.filters label{color:var(--muted);font-size:12px}
-.filters select{display:block;min-width:145px;margin-top:6px;font-size:14px}
+.filters label:not(.check){display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:12px}
+.filters select{min-width:145px;font-size:14px}
 .filters .check{display:flex;align-items:center;gap:8px;min-height:46px;font-size:14px}
 #reset-filters{min-height:46px;padding:9px 12px;color:var(--accent)}
 .filters small{flex-basis:100%;font-size:12px}
@@ -141,7 +141,7 @@ p{margin:8px 0 22px}
 .warning{background:var(--warning-soft);color:var(--warning)}
 .danger.status-label{background:var(--error-soft);color:var(--error)}
 .row-description{max-width:72ch;margin:10px 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
-.row-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;flex-shrink:0;max-width:310px}
+.row-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;flex-shrink:0;max-width:380px}
 .result-row>.row-actions{flex-direction:column;align-items:stretch}
 .result-row>button{flex-shrink:0}
 .release-labels{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0}
@@ -194,6 +194,7 @@ ol{padding-left:23px;color:var(--muted)}
 .login-mark{width:44px;height:44px;margin-bottom:22px;color:var(--accent)}
 .login h1{font-size:28px}
 .login p,.login label{font-size:13px}
+.login-error{margin:0 0 14px;padding:10px 14px;border:1px solid var(--error);border-radius:8px;background:var(--error-soft);color:var(--error);font-size:13px}
 .login .primary{width:100%;justify-content:space-between;margin-top:12px}
 .warning-icon{display:inline-flex;width:18px;height:18px;color:var(--warning);flex-shrink:0;vertical-align:middle}
 .warning-icon svg{width:100%;height:100%;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
@@ -238,17 +239,26 @@ dialog p{font-size:14px}
 #episodes-dialog{width:min(610px,calc(100vw - 32px))}
 #episode-list{max-height:38vh;margin-top:16px;overflow:auto}
 .episode-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
-#follow-dialog{width:min(720px,calc(100vw - 32px))}
+#follow-dialog{width:min(740px,calc(100vw - 32px));padding:24px 28px}
+#follow-dialog p{margin:6px 0 12px}
+#follow-dialog details{margin:8px 0}
+#follow-dialog select{margin:6px 0 12px}
+#follow-dialog .episode-option{padding:8px 0}
+#follow-dialog .dialog-actions{margin-top:16px;padding-top:14px}
 #version-resource{overflow-wrap:anywhere;font-size:14px}
-.version-fields{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}
+.version-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 16px}
+#version-extra .version-fields{grid-template-columns:1fr 1fr}
 .version-fields label{min-width:0;font-size:13px}
-.version-fields input{display:block;width:100%;margin:8px 0 16px}
+.version-fields input{display:block;width:100%;margin:6px 0 12px}
 #version-missing{font-size:13px}
 #follow-dialog h2{overflow-wrap:anywhere}
 #task-dialog{width:min(560px,calc(100vw - 32px))}
 #task-dialog fieldset{padding:0;border:0;margin:20px 0}
 #task-dialog p{overflow-wrap:anywhere}
 #task-dialog-error{color:var(--error)}
+.task-preview-bar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.task-preview-bar p{margin:0}
+#retry-task-preview{padding:6px 12px;color:var(--error);flex-shrink:0}
 .loading-state{display:flex;align-items:center;gap:12px;padding:20px 0;color:var(--muted)}
 .spinner{width:20px;height:20px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;flex-shrink:0;animation:cinema-spin .8s linear infinite}
 @keyframes cinema-spin{to{transform:rotate(360deg)}}
@@ -328,8 +338,8 @@ dialog p{font-size:14px}
   .metrics-heading{width:100%}
   footer>div{flex:1 1 100%;max-width:none}
   footer small{margin-left:0}
-  dialog{padding:24px}
-  .version-fields{grid-template-columns:1fr}
+  dialog,#follow-dialog{padding:24px}
+  .version-fields,#version-extra .version-fields{grid-template-columns:1fr}
   .dialog-actions{flex-wrap:wrap}
   .dialog-actions button{flex:1}
   #notice{bottom:16px;flex-wrap:wrap;gap:10px;padding:12px 16px;font-size:13px}

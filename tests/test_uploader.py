@@ -584,6 +584,21 @@ class UploaderTests(unittest.TestCase):
                 with single_process(self.state):
                     self.fail("second uploader acquired lock")
 
+    def test_tv_discovery_authenticates_qb_independently_and_load_config_validates(self):
+        from uploader import load_config
+        config = {"qb_url": self.service.url, "qb_username": "test-user", "qb_password": "password",
+                  "sonarr_url": self.service.url, "sonarr_api_key": "test-key",
+                  "openlist_url": self.service.url, "openlist_token": "tok"}
+        sources = Sources(config, self.media)
+        self.assertEqual(sources.tv(), [])
+        self.assertIn("SID=test-session", sources.qb.headers.get("Cookie", ""))
+        cfg = self.base / "config.json"
+        cfg.write_text(json.dumps(config), encoding="utf-8")
+        self.assertEqual(load_config(cfg)["qb_username"], "test-user")
+        cfg.write_text(json.dumps({**config, "openlist_token": "bad\ntoken"}), encoding="utf-8")
+        with self.assertRaisesRegex(Failure, "invalid_configuration"):
+            load_config(cfg)
+
 
 if __name__ == "__main__":
     unittest.main()

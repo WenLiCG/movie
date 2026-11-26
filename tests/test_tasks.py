@@ -143,6 +143,9 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(group['waiting_video'])
         self.assertTrue(group['resources'][0]['waiting_video'])
         self.assertEqual(group['file_count'], 4)
+        roles = {f['name']: f['role'] for f in group['resources'][0]['files']}
+        self.assertEqual(roles['new.mkv'], 'video')
+        self.assertEqual(roles['Film.sample.mkv'], 'extra')
 
     def test_queue_shared_by_two_series_stays_out_of_project_actions(self):
         digest = self.qb.items[0]['hash']
@@ -239,7 +242,9 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?',(self.jobs[1]['id'],)).fetchone()[0],'pending')
 
     def test_remove_only_keeps_local_and_cloud_archive_evidence(self):
-        self.run_action('delete');self.uploader.process_actions(self.sources)
+        reply = self.run_action('delete')
+        self.assertIn('本地文件和云端影片均保留', reply['message'])
+        self.uploader.process_actions(self.sources)
         self.assertEqual([t['hash'] for t in self.qb.items],['3'*40])
         self.assertTrue(all(Path(j['source']).exists() for j in self.jobs))
         self.assertEqual(len(self.native.files),2)

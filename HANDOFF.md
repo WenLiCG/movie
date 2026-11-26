@@ -8,11 +8,11 @@
 
 本节汇总当前代码的实际状态，后面的历次记录保留当时的证据。两者不一致时以本节和代码为准。
 
-- **主线与回归。** `main` 已包含 PR #9–#13（[PR #13](https://github.com/WenLiCG/movie/pull/13) 为本轮复审）。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建以及 portal/uploader 启动检查。它不部署任何环境。
+- **主线与回归。** `main` 已包含 PR #9–#14、2026-11-26 公网登录验收记录（`5cfbd8b`）以及本轮端到端复审优化。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建、portal/uploader 启动检查以及 `caddy validate`。它不部署任何环境。
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
 - **观影入口。** 普通观众通过域名根路径使用自己的 Emby 用户名和密码。验收时用无痕浏览器或全新客户端访问该地址，应直接到达 Emby 登录界面。若先进入 Cloudflare Access 的邮箱或身份提供方登录页，应核对覆盖观影主机的 Access 应用。管理员仍须在 `/discover/` 使用 Emby 管理员账号。SSH 隧道用于首次配置、维护及回环端口访问。
-- **11 月 26 日公网登录验收。** [PR #14](https://github.com/WenLiCG/movie/pull/14) 的应用提交 `2916078` 已部署到现有测试 VPS。公网 HTTP 请求按主机跳转到同路径的 HTTPS；全新 Chrome 会话从门户进入电影墙后可直接看到 Emby 用户名和密码框。本机和 VPS 分别通过 7 个匿名入口检查。线上 79 个发布文件与提交一致，仅重建门户，8 个容器运行正常。切换时就绪探测曾收到一次 502，随后恢复 200。此次未使用真实观影账号提交密码或验证登录后播放。
-- **尚未现场验收。** 全新 Debian VPS 重装、本次升级备份的实际回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放。
+- **11 月 26 日公网登录验收与本轮代码状态。** [PR #14](https://github.com/WenLiCG/movie/pull/14) 的应用提交 `2916078` 已部署到现有测试 VPS（公网 HTTP 跳转 HTTPS、全新 Chrome 会话直达 Emby 用户名密码框、本机与 VPS 均通过 7 项匿名入口检查，但尚未使用真实观影账号提交密码或验证登录后播放）。本轮复审改动已合并进 GitHub `main`，尚未部署到测试 VPS，升级时按常规运行 `update_portal.sh`。
+- **尚未现场验收。** 全新 Debian VPS 重装、本次升级备份的实际回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放、真实观影账号登录后播放。
 
 需要所有者决定或现场数据才能处理的事项（均未改变现有行为）：
 
@@ -28,6 +28,34 @@
 已在后续提交中解决、旧记录里仍列为待办的两项：按任务名找回的上传现在要求云端 SHA1 与源文件一致才发布（`uploader.py` 的 `poll_upload`）；自动清理改为白名单，只有 NFO、常见图片和字体可不经归档随种子删除，`.mks`、`.ttml`、样片等未归档文件会保留整个种子（`cleanup.py` 的 `needs_archive`）。
 
 行为提示：HSTS 一年（不含子域，回滚服务端无法立即撤销）；含未归档文件的种子不自动清理，磁盘可能增长；取消/删除的退避只保存在内存中，重启后清零。
+
+## 2026-11-26 端到端复审与体验优化
+
+**版本对比。** 本地工作区 `main` 停在 `1f5f17c`（干净，无未提交修改），`origin/main` 领先 4 个提交（`b73a226`、`f3c45dc`、`2916078`、`5cfbd8b`）；所有近期远程分支均已合并进 `origin/main`。经 `git merge --ff-only origin/main` 以 `5cfbd8b` 为基线展开审查与修改。
+
+**审查方式。** 通读全部文档、配置、脚本、源码与 22 份测试；启动真实 `portal/server.py` 连接本地模拟上游服务，在 Chrome 1280×900（亮/深色）与 390×844 下以真实用户视角走完登录、找片筛选、按版追更、我的追剧、下载与归档、播放记录、设置及退出，并做前后视觉截图对照。
+
+| 严重度 | 发现的问题 | 本轮修复 | 回归证据 |
+| --- | --- | --- | --- |
+| 高 | 全新部署连接阿里云盘时，OpenList（Go）在空列表时返回 `"content": null`，`App.configure()` 直接迭代导致 `TypeError` 崩溃 | `storage/list` 与 `/api/fs/list` 兼容 `null` 切片并校验字典结构；校验 `qb_password` 控制字符且保留原始密码 | `test_portal.py` 新增回归 |
+| 高 | 门户使用 `http.cookies.SimpleCookie` 解析 `Cookie` 请求头，同域下其他服务（Emby/qB/Sonarr/Prowlarr/Cloudflare）任一非标准 Cookie 即可导致 `CookieError` 并使管理员会话失效 | 改为安全提取 `cinema` Cookie 的 `session_cookie()`，容忍同域畸形兄弟 Cookie | `test_portal.py` 新增回归 |
+| 高 | `scripts/update_files.py` 在 `umask 077` 下仅对 `portal`、`relay/custom-js`、`relay/custom-css` 修正目录 `0o755`，遗漏父目录 `relay`、`scripts`、`gateway`，可能导致非 root 容器（UID 1000）无法穿透挂载目录 | 扩展目录权限修正至 `relay`、`scripts`、`gateway` | `test_installer.py` 断言 |
+| 高 | `scripts/update_portal.sh` 在 `instance-id` 缺失且尚未完成首次云盘接线（无 `state/uploader/config.json`）时直接读取配置抛出 `FileNotFoundError` | 升级检查先判断 `state/uploader/config.json` 是否存在，并校验 OpenList 响应结构 | `test_installer.py` 新增回归 |
+| 中 | qBittorrent 不可达时 `/api/status` 复用默认长超时，导致设置页和登录后检查卡顿约 90 秒；任一上游返回畸形类型可拖垮整接口 | `App.qb(timeout=None)` 在 `status()` 中使用 10 秒短超时；4 项探针统一校验返回类型并隔离异常 | `test_portal.py` 新增回归 |
+| 中 | `uploader/uploader.py` 中 `Sources.tv()` 依赖 `downloads()` 顺带登录 qB，`downloads()` 失败时追剧发现会连锁失败；热重载配置未做字段校验且主发现循环未捕获 `OSError` | `Sources.tv()` 按需独立登录 qB；抽出 `load_config()` 供启动与热重载共用并在异常时安全延后；发现循环补齐 `OSError` 及任务结构校验 | `test_uploader.py` 新增回归 |
+| 中 | 门户边界健壮性：`App.login` 非管理员登出清理失败会掩盖真实提示；`App.playbacks` 在 Emby 返回异常结构时 400 崩溃；`App.episodes` 将 Sonarr 故障吞掉误判为 `version_ready=False`；`session['results'/'series'/'version_previews']` 缺并发锁或大小上限 | 分别做容错降级、透传 Sonarr 故障、使用 `series['tvdbId']`、加锁并用 `trim_mapping` 按最旧淘汰；补全 `USER_ERROR_PREFIXES`；`delete_files=False` 返回准确提示 | `test_portal.py`、`test_tasks.py` |
+| 中（UI/UX） | 搜索筛选条 `.filters select { display: block }` 导致 Chrome 下拉箭头换行、高度翻倍；按此版本追更弹窗在 900px 桌面视口超出首屏需滚动；“我的追剧”3 个操作按钮折行且待选版本行出现无用的禁用“恢复追更”；“删除追剧”使用浏览器原生 `window.confirm()` | 改为 flex 列布局使筛选下拉框恢复单行（实测 46px）；主版本字段 3 列紧凑排版使弹窗确认按钮完全落入 900px 首屏（bottom 822px）；操作区加宽至 380px 单行对齐并隐藏无效禁用按钮，接入统一风格 `<dialog id="confirm-dialog">` | `independent-ui-flows.cjs` + 实机 Chrome 截图验证 |
+| 低-中（UI/UX） | 登录失败仅显示底部 toast；下载任务多文件详情中 `.nfo`/图片等附件显示“等待导入或上传”，已完成文件显示“下载中 100.0%”，且未展示 `retry_at` 重试时间；超过 1 小时的播放记录显示 `83:45`；设置页仍显示冗余“点击设置处理”黄条且左右列卡片不均衡；删除清单预览失败无重试按钮且出现双句号 | 登录表单新增就近内联 `#login-error`；后端补充文件 `role` 字段，前端区分“不自动归档 / 下载已完成 / 等待导入 / 等待上传”并显示“下次重试 HH:MM:SS”；播放时长支持 `H:MM:SS`；设置页隐藏自身冗余提示并平衡为 3+3 列；新增预览“重新核对”按钮与各视图加载状态、`series` 更新时间及菜单状态保持；`watch` 弹窗关闭即释放按钮 | `test_tasks.py`、`independent-ui-flows.cjs` + 实机 Chrome 验证 |
+
+### 本轮验证
+
+环境：Windows 11（Python 3.14.3、Node 24.14.0、Google Chrome + 独立 scratch 目录 Playwright 1.65.1）与 WSL Linux（Python 3.14.4、bash）。本机无 Docker、Caddy、Ruff、mypy、Bandit；Docker Compose、容器镜像构建、容器启动与 `caddy validate` 由 GitHub Actions `Regression` 工作流执行。
+
+- **语法与静态检查**：`python -m compileall -q .`、`node --check`（全部 5 个前端/注入 JS 文件）、WSL `bash -n install.sh scripts/*.sh` 以及 `.sh`/`.py` 纯 LF 换行校验全部通过。
+- **Windows 自动化测试**：Python `unittest` **223 项**（218 通过、5 项 POSIX 权限测试跳过）；`node --test tests/*.test.cjs` **4/4 通过**；Chrome Playwright `tests/check_ui.cjs` 与 `tests/independent-ui-flows.cjs` **全部通过**。
+- **WSL Linux 与安装包验证**：源码目录 Python `unittest` **223 项**（222 通过、1 项 Windows 启动器测试跳过）；`python3 scripts/build_all_in_one.py` 生成单文件安装器并通过 `sha256sum -c`，按 CI 方式解包得到 **79 个发行文件**，解包目录内 Python `unittest` **223 项**（222 通过、1 跳过）。
+- **真实门户实机验证**：以真实 `portal/server.py` + 本地模拟上游启动服务，Chrome 1280×900（亮色）与 390×844（深色）端到端验证内联登录报错、单行筛选下拉框（46px）、追更弹窗首屏完整展示（bottom 822px）、追剧单行按钮对齐、播放时长 `1:23:45`、设置页 3+3 布局及零控制台/页面异常，并逐张核对截图。
+- **未在本机执行**：未直接接触真实 VPS、PT 站点、阿里云盘或真实 Emby；本轮未改动 `relay/` Go 源码与补丁（仍为 `5cfbd8b` 既有版本）。
 
 ## 2026-11-25 第三轮复审（PR #13，分支 `review/2026-11-25-round3`）
 

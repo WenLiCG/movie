@@ -521,6 +521,90 @@ class PortalTests(unittest.TestCase):
             dummy.wfile.write.side_effect = ConnectionAbortedError('client gone')
             Handler.reply(dummy, {'ok': True})  # Must swallow mid-write client abort cleanly.
 
+    def test_cloud_wizard_handles_null_openlist_slices_on_fresh_install(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            native = Mock()
+            calls = []
+            def call(method, path, body=None):
+                calls.append((method, path, body))
+                if '/storage/list?' in path: data = {'content': None, 'total': 0}
+                elif path == '/api/fs/get': data = {'is_dir': True, 'provider': 'AliyundriveOpen'}
+                elif path == '/api/fs/list': data = {'content': None, 'total': 0}
+                else: data = {}
+                return {'code': 200, 'data': data}
+            native.json.side_effect = call
+            app.openlist = lambda session, body: (native, 'private-service-token')
+            with patch('portal.server.read_api_key', return_value='a' * 32), patch('portal.server.connect_services'):
+                result = app.configure({'username': 'admin'}, {'refresh_token': 'ref-tok', 'qb_username': ' admin ', 'qb_password': 'pw'})
+            self.assertIn('已连接', result['message'])
+            self.assertEqual([c[2]['path'] for c in calls if c[1] == '/api/fs/mkdir'],
+                             ['/aliyun/Movies', '/aliyun/TV', '/aliyun/.cinema-upload'])
+            self.assertEqual(app.config()['qb_username'], 'admin')
+
+    def test_malformed_sibling_cookie_does_not_break_portal_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            _, call, _ = self._admin(app)
+            sid = next(iter(app.sessions))
+            server, _ = self._serve(app)
+            req = Request(f'http://127.0.0.1:{server.server_port}/discover/api/session',
+                          headers={'Cookie': f'bad key=1; other=[x]; cinema={sid}'})
+            with build_opener().open(req) as resp:
+                data = json.loads(resp.read())
+            self.assertEqual(data['username'], 'admin')
+
+    def test_status_applies_short_timeout_to_qb_and_isolates_malformed_upstreams(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            (Path(temp) / 'config.json').write_text(json.dumps({
+                'openlist_token': 'tok', 'qb_username': 'admin', 'qb_password': 'pw'
+            }), encoding='utf-8')
+            seen_qb_timeout = []
+            def make_client(service):
+                c = Mock()
+                c.timeout = 90
+                c.cookies = []
+                def req(*args, **kwargs):
+                    if service == 'qb':
+                        seen_qb_timeout.append(c.timeout)
+                    raise ValueError('timeout')
+                c.request.side_effect = req
+                c.json.return_value = None  # malformed upstream body for openlist/prowlarr/sonarr
+                return c
+            app.client = make_client
+            result = app.status()
+            self.assertEqual(seen_qb_timeout, [10])
+            for key in ('cloud', 'downloader', 'indexers', 'television'):
+                self.assertFalse(result['checks'][key]['complete'], key)
+
+    def test_playbacks_degrades_on_malformed_emby_and_episodes_surfaces_sonarr_outage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            client = Mock()
+            client.json.return_value = None
+            app.client = lambda _: client
+            with patch('portal.server.playback_records', return_value=[{'item_id': '9'}]):
+                self.assertEqual(app.playbacks({'token': 'tok'})['items'][0]['title'], '媒体 #9')
+            # Non-admin logout failure must still tell the user to use an admin account.
+            client.json.return_value = {'AccessToken': 't', 'User': {'Id': 'u1', 'Policy': {'IsAdministrator': False}}}
+            client.request.side_effect = OSError('emby reset')
+            with self.assertRaisesRegex(ValueError, '管理员账号'):
+                app.login({'username': 'viewer', 'password': 'pw'})
+            # Sonarr outage during episodes version check must propagate, not claim invalid rule.
+            sonarr = Mock()
+            def sonarr_call(method, path, body=None):
+                if path == '/api/v3/series': return [{'id': 9, 'tvdbId': 42}]
+                if path == '/api/v3/tag': return []
+                if path == '/api/v3/episode?seriesId=9': return []
+                if path == '/api/v3/series/9': return {'id': 9, 'tvdbId': 42}
+                raise APIError(502, 'sonarr down')
+            sonarr.json.side_effect = sonarr_call
+            app.client = lambda _: sonarr
+            (Path(temp) / 'versions.json').write_text(json.dumps({'42': {'fields': {'group': 'G'}, 'pattern': '/G/i', 'profile_id': 1, 'tag_id': 1}}))
+            with self.assertRaises(APIError):
+                app.episodes({'series': {'42': {'tvdbId': 42}}}, {'id': '42'})
+
 
 if __name__ == '__main__':
     unittest.main()
