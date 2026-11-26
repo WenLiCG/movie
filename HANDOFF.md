@@ -12,14 +12,14 @@
 
 - **运行与验证。** `state/uploader/config.json` 保存当前挂载 `cloud_mount` 和历史挂载 `cloud_mounts`，旧配置缺省为 `/aliyun`。relay 在每次扫描开始时读取 `state/relay-token/cinema-mounts.json`；升级需一起重建 portal、uploader、relay，并给 portal 挂载原有的 `state/library:/library`。之后在网页选择新盘即可。回归覆盖同名路径冲突、并发页面、旧任务与字幕归属、上传回执、Emby 追加路径以及删除范围。真实阿里云盘授权、上传和播放需在具备授权的站点验证。
 
-- **本轮验收。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，均 233 项通过、1 项按平台跳过；安装包 SHA-256 校验通过。4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试通过。在隔离环境运行官方 Emby 4.10.2.0，实际追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。用发布指定的 Go 1.27.4 构建 Linux relay，govulncheck 二进制扫描命中可调用漏洞 0 项。线上站点当时仍提供旧版设置页，现场切换和真实云盘链路待部署后验收。
+- **本轮验收。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，均 233 项通过、1 项按平台跳过；安装包 SHA-256 校验通过。4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试通过。在隔离环境运行官方 Emby 4.10.2.0，实际追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。用发布指定的 Go 1.27.4 构建 Linux relay，govulncheck 二进制扫描命中可调用漏洞 0 项。应用版本 `0a16b24` 已部署到现有测试 VPS。公网 Chrome 以影院管理员登录并读取真实 OpenList 清单，两个请求均返回 HTTP 200；唯一的 `/aliyun` 是 Local 驱动，页面禁用该选项，输入新顶级路径后显示新建表单。匿名会话检查返回 401。原有 8 个服务运行，重启计数均为 0；升级仅替换 portal、uploader 与 relay。旧索引及测试媒体只读挂载已复核。现场没有已授权的阿里云盘 Open 挂载，本轮未提交创建或切换，实际云端上传和播放仍待验收。
 
 - **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。停用的 qBittorrent 已预置相同管理凭据，并在隔离的 5.3.0 实例上验证；测试站的下载器仍未启动。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
 
 - **主线与回归。** `main` 已包含 PR #9–#14、2026-11-26 公网登录验收记录（`5cfbd8b`）以及本轮端到端复审优化。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建、portal/uploader 启动检查以及 `caddy validate`。它不部署任何环境。
 - **适用范围。** 面向个人或小规模使用。安全措施按此规模设计：管理员会话、CSRF、严格直连、上传凭证和删除确认清单。
 - **观影入口。** 普通观众通过域名根路径使用自己的 Emby 用户名和密码。验收时用无痕浏览器或全新客户端访问该地址，应直接到达 Emby 登录界面。若先进入 Cloudflare Access 的邮箱或身份提供方登录页，应核对覆盖观影主机的 Access 应用。管理员仍须在 `/discover/` 使用 Emby 管理员账号。SSH 隧道用于首次配置、维护及回环端口访问。
-- **11 月 26 日公网登录验收与本轮代码状态。** [PR #14](https://github.com/WenLiCG/movie/pull/14) 的应用提交 `2916078` 已部署到现有测试 VPS（公网 HTTP 跳转 HTTPS、全新 Chrome 会话直达 Emby 用户名密码框、本机与 VPS 均通过 7 项匿名入口检查，但尚未使用真实观影账号提交密码或验证登录后播放）。本轮复审改动已合并进 GitHub `main`，尚未部署到测试 VPS，升级时按常规运行 `update_portal.sh`。
+- **11 月 26 日公网登录验收与本轮代码状态。** [PR #14](https://github.com/WenLiCG/movie/pull/14) 的应用提交 `2916078` 已部署到现有测试 VPS（公网 HTTP 跳转 HTTPS、全新 Chrome 会话直达 Emby 用户名密码框、本机与 VPS 均通过 7 项匿名入口检查，但尚未使用真实观影账号提交密码或验证登录后播放）。该版后续的复审与自定义挂载改动已随 `0a16b24` 部署，现场验收见上文。
 - **尚未现场验收。** 全新 Debian VPS 重装、本次升级备份的实际回滚、真实 PT 追更、大文件上传、阿里云盘真实删除、物理客户端长时间播放、真实观影账号登录后播放。
 
 需要所有者决定或现场数据才能处理的事项（均未改变现有行为）：
