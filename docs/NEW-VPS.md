@@ -70,9 +70,9 @@ docker compose logs --tail=100 qbittorrent
 
 打开 `http://127.0.0.1:8097/discover/`，用 **Emby 管理员**登录，进入“设置”：
 
-1. 展开 Refresh Token 引导，访问 [OpenList 授权页](https://api.oplist.org)，选择阿里云盘应用登录，勾选使用 OpenList 提供的参数，扫码并取得阿里云盘 **Open** Refresh Token。只使用该授权方式对应的令牌，详见 [OpenList 官方说明](https://doc.oplist.org/guide/drivers/aliyundrive_open)。
-2. 粘贴 Refresh Token，在 OpenList 和 qB 密码栏分别输入刚设置的管理员密码。首次连接时两个用户名留空即可沿用当前 Emby 管理员名。已有站点可填写各自的实际账号。OpenList 密码只用于本次交换管理 Token；qB 凭据供后台下载服务使用，保存于私有配置。
-3. 点击“连接云盘并自动配置下载器”。自动设置 `/aliyun`、根目录 `root`、资源库，创建 Movies/TV/隔离暂存目录，并设置三个 qB 分类、Prowlarr 下载器、Sonarr 剧库和应用同步。无需复制应用 API Key，也无需手填 OpenList 内部管理 Token。
+1. 已有正常的阿里云盘 Open 挂载时可直接选用。创建新挂载时，展开 Refresh Token 引导，访问 [OpenList 授权页](https://api.oplist.org)，选择阿里云盘应用登录，勾选使用 OpenList 提供的参数，扫码并取得阿里云盘 **Open** Refresh Token。只使用该授权方式对应的令牌，详见 [OpenList 官方说明](https://doc.oplist.org/guide/drivers/aliyundrive_open)。
+2. 在设置页读取现有挂载，或填入新的顶级路径和 Refresh Token。首次验证 OpenList 和随后配置 qB 时，分别输入刚设置的管理员密码。首次连接时两个用户名留空即可沿用当前 Emby 管理员名。已有站点可填写各自的实际账号。OpenList 密码只用于本次交换管理 Token；qB 凭据供后台下载服务使用，保存于私有配置。
+3. 核验已有挂载或新建并启用。默认路径 `/aliyun` 被占用时可用 `/aliyun-drive`。门户准备 Movies、TV、隔离暂存目录并将前两者加入片库。随后配置下载器与追剧，接通三个 qB 分类、Prowlarr 下载器、Sonarr 剧库和应用同步。无需复制应用 API Key，也无需手填 OpenList 内部管理 Token。
 4. 点击“配置 Indexer”，在 Prowlarr 添加自己的 PT 站点，填写站点 Cookie 或 API Key，逐个 Test 后保存。在 Prowlarr Settings → Apps 确认 Sonarr 连接与索引器同步。
 5. 回到“设置”刷新，黄色提示会列出未完成或异常项。保留天数默认 7；0 为关闭，仅清理已经云端发布并复核成功的本地内容和对应做种任务。
 

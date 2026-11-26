@@ -94,6 +94,26 @@ class CleanupTests(unittest.TestCase):
         self.sources.sonarr.request.assert_not_called()
         self.remote.call.assert_not_called()
 
+    def test_retention_validates_archived_mount_again_when_resuming(self):
+        mount = '/新盘'
+        self.uploader.mounts = ('/aliyun', mount)
+        with self.uploader.db:
+            self.uploader.db.execute('DELETE FROM jobs WHERE id=?', (self.job['id'],))
+        job = candidate(self.job['identity'], self.path, mount + '/Movies/Film/film.mkv', self.job['size'], mount=mount)
+        self.uploader.add(job)
+        self.uploader.update(job, state='published', sha1=hashlib.sha1(self.path.read_bytes()).hexdigest())
+        now = 1000 + 8 * 86400
+        plan = self.cleaner.plan(self.sources, self.torrent, 7, now)
+        self.uploader.mounts = ('/aliyun',)
+        with self.assertRaisesRegex(Failure, 'unsafe_remote_path'):
+            self.cleaner.execute(self.sources, plan, 7, now)
+        self.sources.qb.request.assert_not_called()
+        self.assertTrue(self.path.exists())
+        self.uploader.mounts = ('/aliyun', mount)
+        self.run_cleanup()
+        self.assertFalse(self.path.exists())
+        self.remote.find.assert_called_with(job['dest'])
+
     def test_unarchived_media_in_the_torrent_blocks_automatic_deletion(self):
         # film.mkv is published, but the torrent also carries files the uploader never archives.
         for name in ('film.sup', 'film.mka', 'extras/film.rmvb'):

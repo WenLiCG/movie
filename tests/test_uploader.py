@@ -562,6 +562,73 @@ class UploaderTests(unittest.TestCase):
         self.service.torrents[0]['save_path']=str(self.movie_root)
         self.assertEqual(sources.downloads(),[])
 
+    def test_mount_switch_keeps_published_and_partial_families_on_original_storage(self):
+        config = {'qb_url': self.service.url, 'qb_username': 'test-user', 'qb_password': 'password',
+                  'sonarr_url': self.service.url, 'sonarr_api_key': 'test-key'}
+        old = {'hash': '123', 'name': 'Movie', 'save_path': str(self.movie_root), 'category': 'cinema-movies',
+               'added_on': 1, 'progress': 1, 'amount_left': 0, 'state': 'uploading'}
+        self.service.torrents = [old]
+        self.service.files = [{'index': 0, 'name': self.source.name, 'size': self.item['size'], 'priority': 1, 'progress': 1}]
+        self.run_upload(Sources(config, self.media, self.uploader.db).downloads())
+        self.assertIn(self.item['dest'], self.service.objects)
+
+        sub = self.source.with_suffix('.srt')
+        sub.write_bytes(b'subtitle')
+        self.service.files.append({'index': 1, 'name': sub.name, 'size': sub.stat().st_size, 'priority': 1, 'progress': 1})
+        partial = {**old, 'name': 'Partial', 'hash': '456'}
+        self.service.torrents = [partial]
+        old_sub, old_parent = Sources(config, self.media, self.uploader.db).downloads()
+        self.uploader.add(old_sub)  # Interrupted before its parent was inserted.
+
+        mounts = ['/aliyun', '/私有盘']
+        self.service.objects[mounts[1]] = {'is_dir': True, 'size': 0}
+        self.remote.mounts = self.uploader.mounts = mounts
+        config.update(cloud_mount=mounts[1], cloud_mounts=mounts)
+        self.service.torrents = [old, partial, {**old, 'name': 'New', 'hash': '789'}]
+        result = Sources(config, self.media, self.uploader.db).downloads()
+        self.assertEqual([r['dest'].split('/')[1] for r in result], ['aliyun'] * 4 + ['私有盘'] * 2)
+        self.assertEqual([r['parent_id'] for r in result[::2]], [r['id'] for r in result[1::2]])
+        self.assertEqual((result[1]['id'], result[3]['id']), (self.item['id'], old_parent['id']))
+        self.run_upload(result)
+        self.assertEqual((self.service.puts, self.service.moves), (6, 6))
+        self.assertTrue(all(r['dest'] in self.service.objects for r in result))
+        self.assertFalse(any(path.startswith('/私有盘/Movies/Movie/') for path in self.service.objects))
+
+    def test_native_task_name_uses_jobs_mount_after_switch(self):
+        mounts = ['/aliyun', '/最初', '/目前']
+        self.remote.mounts = self.uploader.mounts = mounts
+        dest = '/最初/Movies/Movie/Movie.mkv'
+        self.service.objects['/最初'] = {'is_dir': True, 'size': 0}
+        item = candidate('movie:123:0', self.source, dest, self.item['size'], mount='/最初')
+        self.service.task_state = 1
+        self.run_upload([item])
+        job = self.row()
+        self.uploader.update(job, state='uploading', task_id=None)
+        stage = PurePosixPath(job['stage'])
+        tasks = [{'id':'native-upload', 'name':f'upload {stage.name} to [/最初]({str(stage.parent).removeprefix("/最初")})'}]
+        with patch.object(self.remote, 'tasks', return_value=tasks):
+            self.run_upload([])
+        self.assertEqual((self.row()['state'], self.row()['task_id']), ('queued', 'native-upload'))
+        self.assertEqual(self.service.puts, 1)
+        self.service.task_state = 2
+        self.run_upload([])
+        self.assertIn(dest, self.service.objects)
+
+        with self.assertRaisesRegex(Failure, 'unsafe_remote_path'):
+            self.uploader.publish({**self.row(), 'stage':str(stage).replace('/最初/', '/目前/')})
+        with self.assertRaisesRegex(Failure, 'unsafe_remote_path'):
+            self.remote.mkdir('/最初-extra/Movies')
+
+    def test_cloud_only_configuration_waits_for_download_setup(self):
+        from uploader import load_config
+        cfg = self.base / 'config.json'
+        settings = {'openlist_url': self.service.url, 'openlist_token': 'test', 'cloud_mount':'/drive'}
+        cfg.write_text(json.dumps(settings), encoding='utf-8')
+        self.assertIsNone(load_config(cfg))
+        cfg.write_text(json.dumps({**settings,'cloud_mounts':'/drive'}), encoding='utf-8')
+        with self.assertRaisesRegex(Failure, 'invalid_configuration'):
+            load_config(cfg)
+
     def test_qb_53_login_and_reused_session_require_a_real_session_cookie(self):
         config = {"qb_url": self.service.url, "qb_username": "test-user", "qb_password": "password",
                   "sonarr_url": self.service.url, "sonarr_api_key": "test-key"}

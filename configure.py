@@ -118,10 +118,12 @@ def migrate_relay_token(root):
 
 
 def connect(root):
+    from archive import cloud_mount
     from integration import connect_services, read_api_key
     existing_path = root / "state/uploader/config.json"
     existing = json.loads(existing_path.read_text(encoding="utf-8")) if existing_path.exists() else {}
-    print("请先在网页完成 OpenList 挂载 /aliyun、Prowlarr/Sonarr 登录设置和 qB 密码设置。")
+    mount = cloud_mount(existing.get('cloud_mount', '/aliyun'))
+    print(f"请先在网页完成 OpenList 挂载 {mount}、Prowlarr/Sonarr 登录设置和 qB 密码设置。")
     token = getpass.getpass("OpenList 管理 Token（不回显；留空沿用已保存值）: ").strip()
     token = token or existing.get("openlist_token", "")
     if not token or any(c.isspace() or ord(c) < 32 for c in token):
@@ -134,7 +136,7 @@ def connect(root):
         raise ValueError("需要 qB 用户名和密码。")
     prowlarr_key = read_api_key(root / "state/prowlarr/config.xml")
     sonarr_key = read_api_key(root / "state/sonarr/config.xml")
-    connect_services(token, username, password, prowlarr_key, sonarr_key)
+    connect_services(token, username, password, prowlarr_key, sonarr_key, mount_path=mount)
     config_path = root / "state/relay/config.yml"
     config = config_path.read_text(encoding="utf-8")
     if len(re.findall(r'^  token: .*$', config, re.MULTILINE)) != 1:
@@ -143,7 +145,7 @@ def connect(root):
     private_write(config_path, config)
     write_relay_token(root / 'state/relay-token', token)
     private_write(existing_path, json.dumps({
-        **{k:v for k,v in existing.items() if k in {'emby_url','emby_token'}},
+        **existing,
         "openlist_url": "http://openlist:5244/openlist", "openlist_token": token,
         "qb_url": "http://qbittorrent:8080", "qb_username": username, "qb_password": password,
         "sonarr_url": "http://sonarr:8989/sonarr", "sonarr_api_key": sonarr_key,

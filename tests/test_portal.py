@@ -521,6 +521,112 @@ class PortalTests(unittest.TestCase):
             dummy.wfile.write.side_effect = ConnectionAbortedError('client gone')
             Handler.reply(dummy, {'ok': True})  # Must swallow mid-write client abort cleanly.
 
+    def test_mount_endpoints_protect_inventory_credentials_and_existing_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app, ol = App(Path(temp)), Mock()
+            records = [
+                {'mount_path':'/aliyun','driver':'Local','addition':'private-storage-data'},
+                {'mount_path':'/网盘','driver':'AliyundriveOpen','addition':'private-refresh'},
+                {'mount_path':'/pool.balance1','driver':'AliyundriveOpen'},
+                {'mount_path':'/old/sub','driver':'Local'}, {'mount_path':'/off','driver':'AliyundriveOpen','disabled':True}]
+            def native(method, path, body=None):
+                self.assertEqual(method, 'GET')
+                page = int(path.split('page=')[1].split('&')[0])
+                return {'code':200, 'data':{'total':len(records), 'content':records[(page-1)*2:page*2]}}
+            ol.json.side_effect = native
+            app.openlist = Mock(return_value=(ol, 'service-secret'))
+            _, call, headers = self._admin(app)
+            for endpoint in ['cloud-mounts', 'cloud-mount']:
+                response, _ = call(endpoint, {})
+                self.assertEqual(response.status, 403)
+            app.openlist.assert_not_called()
+            response, payload = call('cloud-mounts', {}, headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual({m['path']:m['eligible'] for m in payload['mounts']},
+                             {'/aliyun':False, '/网盘':True, '/pool':False, '/old':False, '/off':False})
+            for item in payload['mounts']:
+                self.assertEqual(set(item), {'path','provider','eligible'})
+            self.assertNotIn('private-', json.dumps(payload))
+            for path in ['/aliyun','/ALIYUN','/pool','/old','/off','/网盘','/../root','/a/b','/pool.balance2']:
+                response, payload = call('cloud-mount', {'mount_path':path, 'refresh_token':'private-new'}, headers)
+                self.assertEqual(response.status, 400, path)
+                self.assertNotIn('private', json.dumps(payload))
+            for endpoint in ('cloud-mount','configure'):
+                app.openlist.reset_mock()
+                response, _ = call(endpoint, {'expected_mount':'/stale','mount_path':'/new'}, headers)
+                self.assertEqual(response.status, 409)
+                app.openlist.assert_not_called()
+            self.assertFalse((app.state / 'config.json').exists())
+
+    def test_cloud_mount_activation_retries_without_qb_preserves_previous_archive_and_playback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app, ol = App(Path(temp)), Mock()
+            app.openlist = Mock(return_value=(ol, 'private-service-key'))
+            app.client = Mock(return_value=Mock())
+            roots, dirs = {'/aliyun':'Local'}, set()
+            old_config = {'cloud_mount':'/archive', 'cloud_mounts':['/aliyun', '/archive'], 'emby_token':'private-maintenance'}
+            (app.state / 'config.json').write_text(json.dumps(old_config))
+            def native(method, path, body=None):
+                if '/storage/list?' in path:
+                    data = {'total':len(roots), 'content':[{'mount_path':p, 'driver':v} for p,v in roots.items()]}
+                elif path == '/api/admin/storage/create':
+                    self.assertEqual(json.loads(body['addition'])['refresh_token'], 'private-new')
+                    self.assertNotIn(body['mount_path'], roots)
+                    roots[body['mount_path']] = body['driver']
+                    data = {}
+                elif path == '/api/fs/get':
+                    data = {'is_dir':True, 'provider':roots['/new']}
+                elif path == '/api/fs/list':
+                    data = {'total':len(dirs), 'content':[{'name':d, 'is_dir':True} for d in dirs]}
+                elif path == '/api/fs/mkdir':
+                    self.assertTrue(body['path'].startswith('/new/'))
+                    dirs.add(body['path'].split('/')[-1])
+                    data = {}
+                else:
+                    self.fail(path)
+                return {'code':200, 'data':data}
+            ol.json.side_effect = native
+            session = {'username':'admin', 'token':'test-admin'}
+            relay = app.state / 'relay-token/cinema-mounts.json'
+            with patch('portal.server.activate_cloud_library', side_effect=ValueError('Emby 暂不可用。')):
+                with self.assertRaisesRegex(ValueError, 'Emby'):
+                    app.cloud_mount(session, {'mount_path':'/new', 'refresh_token':'private-new'})
+            self.assertEqual(app.config(), old_config)
+            self.assertFalse(relay.exists())
+            self.assertEqual(dirs, {'Movies','TV','.cinema-upload'})
+            relay.parent.mkdir()
+            relay.write_text(json.dumps({'mounts':['/aliyun','/uncommitted']}))
+            with patch('portal.server.activate_cloud_library') as activate:
+                result = app.cloud_mount(session, {'mount_path':'/new'})
+                activate.assert_called_once_with(app.client.return_value, '/new')
+            self.assertEqual(set(result), {'path','provider','message'})
+            self.assertEqual(result['path'], '/new')
+            self.assertNotIn('private-', json.dumps(result))
+            self.assertEqual(app.config(), {**old_config, 'cloud_mount':'/new', 'cloud_mounts':['/aliyun','/archive','/new'],
+                                           'openlist_token':'private-service-key', 'openlist_url':app.origins['openlist']})
+            self.assertEqual(json.loads(relay.read_text())['mounts'], ['/aliyun', '/archive', '/new'])
+            self.assertEqual((app.state / 'relay-token/openlist-token').read_text(), 'private-service-key')
+            self.assertTrue(all(c.args == ('emby',) for c in app.client.call_args_list))
+            app.openlist.reset_mock()
+            with self.assertRaisesRegex(ValueError, '当前挂载已更改'):
+                app.configure(session, {'expected_mount':'/archive'})
+            app.openlist.assert_not_called()
+            with patch('portal.server.read_api_key', return_value='test'), patch('portal.server.connect_services') as connect:
+                app.configure(session, {'expected_mount':'/new','qb_username':'admin','qb_password':'test'})
+                self.assertEqual(connect.call_args.kwargs, {'mount_path':'/new'})
+            self.assertEqual(app.config()['cloud_mounts'], ['/aliyun', '/archive', '/new'])
+
+    def test_mount_creation_preserves_an_existing_folder_in_native_root(self):
+        app, ol = App(), Mock()
+        app.openlist = Mock(return_value=(ol, 'test'))
+        ol.json.side_effect = [{'code':200,'data':{'total':1,'content':[{'mount_path':'/','driver':'Local'}]}},
+                               {'code':200,'data':{'total':2,'content':[{'name':'first'}]}},
+                               {'code':200,'data':{'total':2,'content':[{'name':'MEDIA'}]}}]
+        with self.assertRaisesRegex(ValueError, '同名'):
+            app.cloud_mount({}, {'mount_path':'/media','refresh_token':'test'})
+        self.assertEqual([c.args[1].split('?')[0] for c in ol.json.call_args_list],
+                         ['/api/admin/storage/list','/api/fs/list','/api/fs/list'])
+
     def test_cloud_wizard_handles_null_openlist_slices_on_fresh_install(self):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))

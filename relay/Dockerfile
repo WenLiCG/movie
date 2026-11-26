@@ -10,13 +10,14 @@ COPY strict-direct.patch /tmp/strict-direct.patch
 RUN git apply --check /tmp/strict-direct.patch && git apply /tmp/strict-direct.patch
 COPY managed-token.patch /tmp/managed-token.patch
 RUN git apply --check /tmp/managed-token.patch && git apply /tmp/managed-token.patch
+COPY cinema_mounts.go cinema_mounts_test.go ./internal/service/openlist/localtree/
 COPY playback.go playback_test.go ./internal/service/emby/
 COPY playback.patch /tmp/playback.patch
 RUN git apply --check /tmp/playback.patch && git apply /tmp/playback.patch
 # ponytail: relay admin UI is disabled; restore upstream web build if enabling it.
 # Emby's movie wall and the custom search entry do not use this optional UI.
 COPY LICENSE.upstream web/dist/disabled.txt
-RUN go test ./internal/web ./internal/service/emby ./internal/service/m3u8 ./internal/service/openlist -run 'TestStrict' \
+RUN go test ./internal/web ./internal/service/emby ./internal/service/m3u8 ./internal/service/openlist ./internal/service/openlist/localtree -run 'TestStrict' \
     && CGO_ENABLED=0 go build -tags=goexperiment.jsonv2 -trimpath \
        -ldflags='-X main.ginMode=release' -o /relay .
 

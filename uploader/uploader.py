@@ -16,7 +16,7 @@ import time
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys, TaskScopeChanged, episodes_with_monitoring
+from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys, TaskScopeChanged, episodes_with_monitoring, cloud_mount
 from configure import private_write
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -42,6 +42,23 @@ def relative(value):
     if any(p in {"", ".", ".."} for p in parts):
         raise Failure("unsafe_path")
     return PurePosixPath(*parts)
+
+
+def remote_path(value, mounts, folders=None):
+    if not isinstance(value, str) or not value.startswith('/'):
+        raise Failure('unsafe_remote_path')
+    path = PurePosixPath('/') / relative(value[1:])
+    if '/' + path.parts[1] not in mounts or (folders and (len(path.parts) < 4 or path.parts[2] not in folders)):
+        raise Failure('unsafe_remote_path')
+    return path
+
+
+def configured_mounts(config):
+    current = cloud_mount(config.get('cloud_mount', '/aliyun'))
+    history = config.get('cloud_mounts', [])
+    if not isinstance(history, list):
+        raise Failure('invalid_configuration')
+    return current, list(dict.fromkeys(cloud_mount(v) for v in ['/aliyun', *history, current]))
 
 
 def local_path(value, root, missing_ok=False):
@@ -206,7 +223,10 @@ class HTTP:
 
 
 class OpenList:
-    def __init__(self, url, token):
+    mounts = ('/aliyun',)
+
+    def __init__(self, url, token, mounts=('/aliyun',)):
+        self.mounts = mounts
         self.http = HTTP(url, {"Authorization": token})
         self.tick = lambda: None
 
@@ -239,7 +259,7 @@ class OpenList:
         raise Failure("directory_too_large")
 
     def find(self, path):
-        p = PurePosixPath(path)
+        p = remote_path(path, self.mounts)
         found = [item for item in self.entries(str(p.parent)) if item.get("name") == p.name]
         if len(found) > 1:
             raise Failure("duplicate_remote_names")
@@ -247,9 +267,10 @@ class OpenList:
 
     def lookup(self, path):
         """Prove absence from healthy ancestor listings, including a missing parent."""
-        current = PurePosixPath('/aliyun')
-        parts = relative(path.removeprefix('/aliyun/')).parts
-        if not path.startswith('/aliyun/'):
+        path = remote_path(path, self.mounts)
+        current = PurePosixPath('/') / path.parts[1]
+        parts = path.parts[2:]
+        if not parts:
             raise Failure('unsafe_remote_path')
         for index, name in enumerate(parts):
             found = [v for v in self.entries(str(current)) if v.get('name') == name]
@@ -264,11 +285,9 @@ class OpenList:
         return item
 
     def mkdir(self, directory):
-        path = PurePosixPath(directory)
-        if path == PurePosixPath("/aliyun"):
+        path = remote_path(directory, self.mounts)
+        if len(path.parts) == 2:
             return
-        if not path.is_relative_to("/aliyun"):
-            raise Failure("unsafe_remote_path")
         self.mkdir(str(path.parent))
         item = self.find(str(path))
         if item is None:
@@ -331,14 +350,15 @@ class OpenList:
                                  "skip_existing": False})
 
 
-def candidate(identity, source, dest, size, **metadata):
+def job_id(identity, dest):
+    return hashlib.sha256((identity + "\0" + dest).encode()).hexdigest()[:32]
+
+
+def candidate(identity, source, dest, size, *, mount='/aliyun', **metadata):
     if type(size) is not int or size <= 0:
         raise Failure("invalid_source_size")
-    relative(dest.removeprefix("/aliyun/"))
-    if not dest.startswith(("/aliyun/Movies/", "/aliyun/TV/")):
-        raise Failure("unsafe_remote_path")
-    key = hashlib.sha256((identity + "\0" + dest).encode()).hexdigest()[:32]
-    return {"id": key, "source": str(source), "dest": dest, "size": size, "identity": identity,
+    remote_path(dest, (mount,), ('Movies', 'TV'))
+    return {"id": job_id(identity, dest), "source": str(source), "dest": dest, "size": size, "identity": identity,
             'torrent_hash': identity.split(':')[1] if identity.startswith(('movie:', 'manual-tv:')) else None,
             'tvdb_id': None, 'episode_keys': '[]', 'parent_id': None, 'download_source':str(source), 'added_on':0, **metadata}
 
@@ -349,11 +369,27 @@ DOWNLOADS = {'cinema-movies': ('movies', 'Movies', 'movie'),
 
 
 class Sources:
-    def __init__(self, config, media):
+    def __init__(self, config, media, db=None):
         self.config, self.media = config, Path(media)
+        self.mount, self.mounts = configured_mounts(config)
+        self.db = db
         self.qb = HTTP(config["qb_url"], {"Referer": config["qb_url"].rstrip("/") + "/"})
         self.sonarr = HTTP(config["sonarr_url"], {"X-Api-Key": config["sonarr_api_key"]})
         self.emby = HTTP(config['emby_url'], {'X-Emby-Token':config['emby_token']}) if config.get('emby_token') else None
+
+    def destination_mount(self, identity, suffix, added_on):
+        if self.db is None or len(self.mounts) == 1:
+            return self.mount
+        # A subtitle may already be recorded even if discovery stopped before inserting its parent.
+        matches = []
+        for mount in self.mounts:
+            key = job_id(identity, mount + '/' + suffix)
+            if self.db.execute("""SELECT 1 FROM jobs WHERE (id=? OR parent_id=?)
+                AND (added_on=0 OR ?=0 OR added_on=?) LIMIT 1""", (key, key, added_on, added_on)).fetchone():
+                matches.append(mount)
+        if len(matches) > 1:
+            raise Failure('destination_reserved')
+        return matches[0] if matches else self.mount
 
     def login_qb(self):
         credentials = urlencode({"username": self.config["qb_username"],
@@ -403,8 +439,11 @@ class Sources:
                         rel = relative(file['name'])
                         source = local_path(save.joinpath(*rel.parts), root)
                         clean = PurePosixPath(*rel.parts[1:]) if len(rel.parts) > 1 and rel.parts[0] == torrent['name'] else rel
-                        item = candidate(identity + ':' + torrent['hash'] + ':' + str(file['index']), source,
-                                         f'/aliyun/{remote}/{title}/{clean}', file['size'], added_on=torrent.get('added_on',0))
+                        source_id = identity + ':' + torrent['hash'] + ':' + str(file['index'])
+                        suffix = f'{remote}/{title}/{clean}'
+                        mount = self.destination_mount(source_id, suffix, torrent.get('added_on', 0))
+                        item = candidate(source_id, source, f'{mount}/{suffix}', file['size'], mount=mount,
+                                         added_on=torrent.get('added_on',0))
                         sidecars = [f for f in files if f.get('priority', 0) > 0 and subtitle_for(f['name'], file['name'])]
                         if any(f.get('progress') != 1 for f in sidecars):
                             continue
@@ -414,7 +453,8 @@ class Sources:
                             subsource = local_path(save.joinpath(*subrel.parts), root)
                             subclean = PurePosixPath(*subrel.parts[1:]) if len(subrel.parts) > 1 and subrel.parts[0] == torrent['name'] else subrel
                             group.append(candidate(identity + ':' + torrent['hash'] + ':' + str(sub['index']), subsource,
-                                                    f'/aliyun/{remote}/{title}/{subclean}', sub['size'], parent_id=item['id'],added_on=item['added_on']))
+                                                    f'{mount}/{remote}/{title}/{subclean}', sub['size'], mount=mount,
+                                                    parent_id=item['id'],added_on=item['added_on']))
                         result.extend([*group, item])
                     except (Failure, KeyError, TypeError, ValueError, OSError):
                         log(category, "invalid_source")
@@ -460,7 +500,10 @@ class Sources:
                     st = source.stat()
                     original = originals.get((st.st_dev, st.st_ino))
                     keys = [(e['seasonNumber'], e['episodeNumber']) for e in episodes if e.get('episodeFileId') == file['id']]
-                    item = candidate('tv:' + str(file['id']), source, '/aliyun/TV/' + source.relative_to(root).as_posix(), file['size'],
+                    source_id = 'tv:' + str(file['id'])
+                    suffix = 'TV/' + source.relative_to(root).as_posix()
+                    mount = self.destination_mount(source_id, suffix, original[4] if original else 0)
+                    item = candidate(source_id, source, f'{mount}/{suffix}', file['size'], mount=mount,
                                      tvdb_id=series.get('tvdbId'), episode_keys=json.dumps(keys), torrent_hash=original[0] if original else None,
                                      download_source=str(original[1]) if original else str(source),added_on=original[4] if original else 0)
                     subs = [p for p in source.parent.iterdir() if subtitle_for(p.as_posix(), source.as_posix())]
@@ -486,7 +529,7 @@ class Sources:
                     for sub in subs:
                         sub = local_path(sub, root)
                         group.append(candidate('tv-sub:' + str(file['id']) + ':' + sub.name, sub,
-                                                '/aliyun/TV/' + sub.relative_to(root).as_posix(), sub.stat().st_size,
+                                                mount + '/TV/' + sub.relative_to(root).as_posix(), sub.stat().st_size, mount=mount,
                                                 torrent_hash=item['torrent_hash'], parent_id=item['id'],
                                                 download_source=str(sub_sources.get(sub,sub)),added_on=item['added_on'],tvdb_id=item['tvdb_id']))
                     result.extend([*group, item])
@@ -513,8 +556,9 @@ def verify(item, job, require_sha1=False):
 
 
 class Uploader:
-    def __init__(self, remote, state, media):
+    def __init__(self, remote, state, media, mounts=('/aliyun',)):
         self.remote, self.media, self.state = remote, Path(media), Path(state)
+        self.mounts = mounts
         self.library = Path('/library')
         self.activity = {'phase': 'starting', 'job_id': None, 'at': time.time()}
         self.discovery_issue = None
@@ -547,7 +591,14 @@ class Uploader:
             if name not in columns:
                 self.db.execute('ALTER TABLE jobs ADD COLUMN ' + name + ' ' + definition)
         create_archive(self.db)
+        self.db.execute('CREATE INDEX IF NOT EXISTS jobs_parent ON jobs(parent_id)')
         self.db.commit()
+
+    def job_path(self, job):
+        dest = remote_path(job['dest'], self.mounts, ('Movies', 'TV'))
+        if job.get('stage'):
+            remote_path(job['stage'], ('/' + dest.parts[1],), ('.cinema-upload',))
+        return dest
 
     def update(self, job, **values):
         with self.db:
@@ -573,12 +624,18 @@ class Uploader:
         return value
 
     def add(self, item):
+        dest = self.job_path(item)
         episode_keys(item.get('episode_keys'))
         row = self.db.execute("SELECT * FROM jobs WHERE dest=?", (item["dest"],)).fetchone()
         actions = task_actions(self.state/'uploads.sqlite3')
-        if (not row or row['id'] != item['id']) and any(
-                a['action'] == 'delete' and a['state'] == 'done' and action_matches(item, a) for a in actions):
-            return
+        if not row or row['id'] != item['id']:
+            deleted = [a for a in actions if a['action'] == 'delete' and a['state'] == 'done']
+            if deleted:
+                suffix = '/' + '/'.join(dest.parts[2:])
+                for mount in self.mounts:
+                    previous = {**item, 'id': job_id(item['identity'], mount + suffix)}
+                    if any(action_matches(previous, a) for a in deleted):
+                        return
         with self.db:
             if row and any(row[k] != item[k] for k in ('id', 'source', 'size')):
                 if (row['id'] == item['id'] or row['state'] != 'cancelled' or not row['hidden']
@@ -614,6 +671,7 @@ class Uploader:
         self.touch('reconciling', job['id'])
         if not job.get('stage') or not job.get('sha1'):
             raise Failure('upload_unconfirmed')
+        mount = '/' + self.job_path(job).parts[1]
         current = self.instance()
         changed = bool(current and job.get('instance_id') and current != job['instance_id'])
         if job.get('task_id'):
@@ -626,8 +684,8 @@ class Uploader:
                 if job.get('native_state') is not None or job.get('terminal_proven'):
                     self.update(job, native_state=None, terminal_proven=0)
         if not changed:
-            path = str(PurePosixPath(job['stage']).parent).removeprefix('/aliyun') or '/'
-            expected = f"upload {PurePosixPath(job['stage']).name} to [/aliyun]({path})"
+            path = str(PurePosixPath(job['stage']).parent).removeprefix(mount) or '/'
+            expected = f"upload {PurePosixPath(job['stage']).name} to [{mount}]({path})"
             tasks = [t for t in self.remote.tasks() if t.get('name') == expected]
             if len(tasks) > 1:
                 raise Failure('ambiguous_upload_task')
@@ -655,6 +713,7 @@ class Uploader:
 
     def upload(self, job):
         self.touch('hashing', job['id'])
+        dest = self.job_path(job)
         if self.remote.lookup(job["dest"]) is not None:
             raise Failure("destination_conflict")
         reserved = self.db.execute("""SELECT COALESCE(sum(size),0) FROM jobs
@@ -662,11 +721,11 @@ class Uploader:
         if shutil.disk_usage(self.state).free < reserved + job['size'] + 2 * 1024 ** 3:
             raise Failure('upload_cache_space_low')
         if job['identity'] and job['identity'].startswith('manual-tv:'):
-            if not job['dest'].startswith('/aliyun/TV/'):
+            if dest.parts[2] != 'TV':
                 raise Failure('unsafe_remote_path')
             root = self.media / 'downloads/tv-manual'
         else:
-            root = self.media / ("downloads/movies" if job["dest"].startswith("/aliyun/Movies/") else "library/tv")
+            root = self.media / ("downloads/movies" if dest.parts[2] == 'Movies' else "library/tv")
         with open_source(job["source"], root) as handle:
             before = fingerprint(handle)
             if before[2] != job["size"]:
@@ -680,7 +739,7 @@ class Uploader:
             if job.get('sha1') and job['sha1'] != digest.hexdigest():
                 raise Failure('source_changed')
             attempt = job["attempt"] + 1
-            stage = f"/aliyun/.cinema-upload/{job['id']}-{attempt}/{PurePosixPath(job['dest']).name}"
+            stage = f"/{dest.parts[1]}/.cinema-upload/{job['id']}-{attempt}/{dest.name}"
             self.remote.mkdir(str(PurePosixPath(stage).parent))
             if self.remote.find(stage) is not None:
                 raise Failure("staging_conflict")
@@ -697,6 +756,7 @@ class Uploader:
             self.poll_upload(job)
 
     def poll_upload(self, job, manual=False):
+        self.job_path(job)
         self.touch('uploading', job['id'])
         if not job.get('task_id'):
             raise Failure('missing_upload_task')
@@ -733,6 +793,7 @@ class Uploader:
         self.update(job, state='uploaded', receipt=json.dumps(receipt), failures=0, error=None, retry_at=0, progress=100)
 
     def publish(self, job, finish_only=False):
+        self.job_path(job)
         self.touch('publishing', job['id'])
         episode_keys(job.get('episode_keys'))
         if self.blocked(job) and not finish_only:
@@ -790,6 +851,7 @@ class Uploader:
                    for a in task_actions(self.state/'uploads.sqlite3'))
 
     def cancel_job(self, job):
+        self.job_path(job)
         if job['state'] in {'published','cancelled'}:
             return True
         if job['state']=='moving':
@@ -827,17 +889,18 @@ class Uploader:
         if not sources.emby or not self.library.is_dir():
             raise Failure('delete_all_not_configured')
         libraries = sources.emby.json('GET', '/Library/VirtualFolders/Query')['Items']
+        roots = set()
         for plan in payload['delete_plan']:
-            path = plan['dest']
-            if not path.startswith(('/aliyun/Movies/', '/aliyun/TV/')):
-                raise Failure('unsafe_remote_path')
-            relative(path.removeprefix('/aliyun/'))
+            dest = self.job_path(plan)
+            roots.add('/library/' + '/'.join(dest.parts[1:3]))
             if not re.fullmatch(r'[a-fA-F0-9]{40}', plan.get('sha1') or ''):
                 raise Failure('delete_all_unverified')
-        roots = {v['dest'].split('/')[2] for v in payload['delete_plan']}
-        selected = [lib for lib in libraries if any('/library/aliyun/'+r in lib['Locations'] for r in roots)]
-        if len(selected)!=len(roots):
-            raise Failure('delete_all_not_configured')
+        selected = {}
+        for root in roots:
+            matches = [lib for lib in libraries if root in {p.rstrip('/') for p in lib['Locations']}]
+            if len(matches) != 1:
+                raise Failure('delete_all_not_configured')
+            selected[matches[0]['ItemId']] = matches[0]
         # Validate the whole selection before deleting any cloud object.
         for plan in payload['delete_plan']:
             index = local_path(self.library / plan['dest'].lstrip('/'), self.library, missing_ok=True)
@@ -880,19 +943,19 @@ class Uploader:
                 else:
                     shutil.move(str(index), str(destination))
                 parent = index.parent
-                while parent != self.library/'aliyun'/plan['dest'].split('/')[2]:
+                while parent != self.library.joinpath(*PurePosixPath(plan['dest']).parts[1:3]):
                     try: parent.rmdir()
                     except OSError: break
                     parent = parent.parent
         if roots:
             if time.time()-payload.get('scan_at',0)>60:
-                for lib in selected:
+                for lib in selected.values():
                     sources.emby.request('POST', '/Items/'+lib['ItemId']+'/Refresh?Recursive=true&ReplaceAllMetadata=false&ReplaceAllImages=false')
                 payload['scan_at'] = time.time()
                 with self.db:
                     self.db.execute('UPDATE task_actions SET payload=? WHERE id=?',(json.dumps(payload),action_id))
             removed = {'/library'+p['dest'] for p in payload['delete_plan']}
-            for lib in selected:
+            for lib in selected.values():
                 start = 0
                 while True:
                     result = sources.emby.json('GET', '/Items', query={'ParentId':lib['ItemId'],'Recursive':'true',
@@ -1154,6 +1217,7 @@ class Uploader:
             if job['state'] == 'pending' and job['id'] not in available:
                 continue
             try:
+                self.job_path(job)
                 if job['state'] in {'uploading','queued','failed'}:
                     self.recover_upload(job, manual=bool(job.get('retry_requested')))
                 elif job['state'] == 'pending':
@@ -1273,7 +1337,9 @@ def monitor(uploader, config_dir, stop):
         status = {'at':time.time(), 'activity':uploader.activity, 'discovery_issue':uploader.discovery_issue,
                   'disk_paused':0, 'error':None}
         try:
-            config = json.loads(config_path.read_text(encoding='utf-8'))
+            config = load_config(config_path)
+            if config is None:
+                raise Failure('waiting_for_setup')
             if sources is None or config != active_config:
                 sources = Sources(config, uploader.media)
                 sources.qb.timeout = 15
@@ -1294,9 +1360,13 @@ def load_config(path):
     config = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise Failure("invalid_configuration")
-    for key in ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key"):
-        if not isinstance(config.get(key), str) or not config[key] or any(ord(c) < 32 for c in config[key]):
+    keys = ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key")
+    for key in keys:
+        if key in config and (not isinstance(config[key], str) or any(ord(c) < 32 for c in config[key])):
             raise Failure("invalid_configuration")
+    config['cloud_mount'], config['cloud_mounts'] = configured_mounts(config)
+    if not all(config.get(key) for key in keys):
+        return None
     return config
 
 
@@ -1305,28 +1375,42 @@ def main():
     state, media = Path("/state"), Path("/media")
     state.mkdir(exist_ok=True)
     with single_process(state):
-        while not Path("/config/config.json").is_file():
+        config_path = Path("/config/config.json")
+        while True:
+            config = load_config(config_path) if config_path.is_file() else None
+            if config:
+                break
             log("uploader", "waiting_for_setup")
+            if "--once" in sys.argv:
+                return
             time.sleep(30)
-        config = load_config("/config/config.json")
-        uploader = Uploader(OpenList(config["openlist_url"], config["openlist_token"]), state, media)
+        mounts = config['cloud_mounts']
+        uploader = Uploader(OpenList(config["openlist_url"], config["openlist_token"], mounts), state, media, mounts)
+        sources = Sources(config, media, uploader.db)
         sys.modules.setdefault("uploader", sys.modules[__name__])
         from cleanup import Cleaner
         cleaner = Cleaner(uploader, state, Path('/config/settings.json'))
         stop = threading.Event()
         observer = threading.Thread(target=monitor,args=(uploader,Path('/config'),stop),daemon=True)
         observer.start()
-        active_config, next_discovery = None, 0
+        active_config, next_discovery = config, 0
         try:
             while True:
                 try:
-                    config = load_config("/config/config.json")
+                    config = load_config(config_path)
                 except (Failure, OSError, ValueError):
                     log("uploader", "config_reload_deferred")
                     config = active_config
-                if config and config != active_config:
-                    uploader.remote = OpenList(config["openlist_url"], config["openlist_token"])
-                    sources = Sources(config, media)
+                if config is None:
+                    log("uploader", "waiting_for_setup")
+                    if "--once" in sys.argv:
+                        break
+                    time.sleep(30)
+                    continue
+                if config != active_config:
+                    uploader.mounts = config['cloud_mounts']
+                    uploader.remote = OpenList(config["openlist_url"], config["openlist_token"], uploader.mounts)
+                    sources = Sources(config, media, uploader.db)
                     active_config, next_discovery = config, 0
                 discover = time.monotonic() >= next_discovery
                 candidates = None

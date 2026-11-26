@@ -20,11 +20,11 @@ from urllib.parse import urlencode, urlsplit, parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configure import private_write, write_relay_token
-from integration import APIError, Client, connect_services, read_api_key, emby_defaults
+from integration import APIError, Client, connect_services, read_api_key, emby_defaults, activate_cloud_library
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
 from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
-from archive import SUBTITLES, archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring
+from archive import SUBTITLES, archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring, cloud_mount
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
         "qb": "http://qbittorrent:8080", "sonarr": "http://sonarr:8989/sonarr",
@@ -34,7 +34,7 @@ USER_ERROR_PREFIXES = (
     "请", "已", "搜索", "结果", "下载器", "云盘", "VPS", "/aliyun", "Sonarr", "Emby",
     "OpenList", "qB", "QBittorrent", "Prowlarr", "prowlarr", "sonarr", "登录", "会话", "追更",
     "季数", "所选集数", "播放记录", "影院", "同名", "重复的", "当前应用", "应用设置",
-    "本地应用", "需要", "无法", "请求", "Cinema ", "API 响应",
+    "本地应用", "需要", "无法", "请求", "所选挂载", "目标目录", "Cinema ", "API 响应",
 )
 
 
@@ -54,6 +54,10 @@ def trim_mapping(mapping, limit=500):
 
 
 class SessionCheckUnavailable(Exception):
+    pass
+
+
+class CurrentMountChanged(ValueError):
     pass
 
 
@@ -339,53 +343,160 @@ class App:
         client.opener.addheaders = [("Authorization", token)]
         return client, token
 
-    def configure(self, session, body):
-        ol, token = self.openlist(session, body)
-        refresh = body.get("refresh_token", "")
-        if refresh:
+    def mount_pages(self, ol, directory=None):
+        """Read the entire inventory before treating a mount path as available."""
+        page, seen, total = 1, 0, None
+        previous = set()
+        while True:
+            if directory is not None:
+                data = self.ol(ol, "POST", "/api/fs/list", {"path": directory, "password": "", "page": page, "per_page": 100, "refresh": page == 1})
+            else:
+                data = self.ol(ol, "GET", f"/api/admin/storage/list?page={page}&per_page=100")
+            if not isinstance(data, dict) or "content" not in data:
+                raise ValueError("OpenList 目录列表不完整，请刷新后重试。")
+            items = [] if data["content"] is None else data["content"]
+            count = data.get("total", 0 if items == [] and page == 1 else None)
+            if (not isinstance(items, list) or any(not isinstance(item, dict) for item in items)
+                    or type(count) is not int or (total is not None and count != total)
+                    or seen + len(items) > count or (not items and seen < count)):
+                raise ValueError("OpenList 目录列表不完整，请刷新后重试。")
+            key = "mount_path" if directory is None else "name"
+            names = [item.get(key) for item in items]
+            if any(not isinstance(name, str) or name in previous for name in names):
+                raise ValueError("OpenList 目录列表已更改，请刷新后重试。")
+            previous.update(names)
+            yield from items
+            total, seen = count, seen + len(items)
+            if seen == total:
+                return
+            page += 1
+
+    def mount_inventory(self, ol):
+        roots = {}
+        for item in self.mount_pages(ol):
+            path, driver = item.get("mount_path"), item.get("driver")
+            if not isinstance(path, str) or not path.startswith("/") or not isinstance(driver, str) or not driver:
+                raise ValueError("OpenList 挂载列表不完整，请在原生管理中检查。")
+            # OpenList resolves ".balance..." suffixes and exposes intermediate directories of nested mounts.
+            actual = path.rsplit(".balance", 1)[0].rstrip("/")
+            top = "/" + actual.lstrip("/").split("/", 1)[0]
+            key = top.casefold()
+            if key in roots:
+                roots[key].update(provider="", eligible=False)
+            else:
+                provider = driver if path.rstrip("/") == top else ""
+                roots[key] = {"path": top, "provider": provider, "eligible": provider == "AliyundriveOpen" and not item.get("disabled")}
+        return roots
+
+    @staticmethod
+    def create_cloud_storage(ol, path, refresh):
+        addition = {
+            "root_folder_id": "root", "drive_type": "resource", "use_online_api": True,
+            "alipan_type": "default", "api_url_address": "https://api.oplist.org/alicloud/renewapi",
+            "client_id": "", "client_secret": "", "remove_way": "trash", "internal_upload": False,
+            "rapid_upload": True, "livp_download_format": "jpeg", "refresh_token": refresh}
+        App.ol(ol, "POST", "/api/admin/storage/create",
+               {"mount_path": path, "driver": "AliyundriveOpen", "cache_expiration": 30, "order": 0,
+                "addition": json.dumps(addition), "web_proxy": False, "webdav_policy": "302_redirect", "disabled": False})
+
+    def cloud_mounts(self, session, body):
+        ol, _ = self.openlist(session, body)
+        mounts = []
+        for mount in self.mount_inventory(ol).values():
+            try:
+                cloud_mount(mount["path"])
+            except ValueError:
+                continue
+            mounts.append(mount)
+        return {"mounts": sorted(mounts, key=lambda item: item["path"].casefold())}
+
+    def prepare_cloud_mount(self, ol, path, refresh):
+        if refresh != "":
             refresh = text(refresh, 4096)
-            storages = self.ol(ol, "GET", "/api/admin/storage/list?page=1&per_page=1000")
-            # OpenList (Go) serializes an empty slice as JSON null on fresh installations.
-            entries = (storages or {}).get("content") or [] if isinstance(storages, dict) else []
-            found = [s for s in entries if isinstance(s, dict) and str(s.get("mount_path", "")).rstrip("/") == "/aliyun"]
-            if len(found) > 1 or (found and found[0].get("driver") != "AliyundriveOpen"):
-                raise ValueError("/aliyun 已被其他挂载占用，请先在 OpenList 检查。")
-            storage = dict(found[0]) if found else {"mount_path": "/aliyun", "driver": "AliyundriveOpen", "cache_expiration": 30, "order": 0}
-            addition = json.loads(storage.get("addition") or "{}")
-            addition.update(refresh_token=refresh)
-            if not found:
-                addition.update(root_folder_id="root", drive_type="resource", use_online_api=True,
-                                alipan_type="default", api_url_address="https://api.oplist.org/alicloud/renewapi",
-                                client_id="", client_secret="", remove_way="trash", internal_upload=False,
-                                rapid_upload=True, livp_download_format="jpeg")
-            storage.update(addition=json.dumps(addition), web_proxy=False, webdav_policy="302_redirect", disabled=False)
-            storage.pop("mount_details", None)
-            self.ol(ol, "POST", "/api/admin/storage/" + ("update" if found else "create"), storage)
-        remote = self.ol(ol, "POST", "/api/fs/get", {"path": "/aliyun", "password": ""})
-        if not isinstance(remote, dict) or not remote.get("is_dir") or remote.get("provider") != "AliyundriveOpen":
-            raise ValueError("请填写阿里云盘 Open Refresh Token，或检查 /aliyun 挂载。")
+        roots = self.mount_inventory(ol)
+        found = roots.get(path.casefold())
+        if found:
+            if not found["eligible"] or found["path"] != path:
+                raise ValueError("所选挂载路径已被占用或停用，请在 OpenList 检查，或选择其他顶级路径。")
+            if refresh:
+                raise ValueError("已有挂载的授权只能在 OpenList 原生管理中更新。请清空 Refresh Token 核验原挂载。")
+        else:
+            if not refresh:
+                raise ValueError("请填写 Refresh Token 创建新挂载，或选择已有的阿里云盘 Open 挂载。")
+            if "/" in roots:
+                for item in self.mount_pages(ol, "/"):
+                    if not isinstance(item.get("name"), str) or item["name"].casefold() == path[1:].casefold():
+                        raise ValueError("OpenList 根目录存在同名文件、目录或无法核对的条目，请选择其他路径。")
+            try:
+                self.create_cloud_storage(ol, path, refresh)
+            except (ValueError, OSError):
+                raise ValueError("OpenList 未确认挂载创建成功。请先刷新挂载列表，在原生管理中检查授权与存储状态。") from None
+        try:
+            props = self.ol(ol, "POST", "/api/fs/get", {"path": path, "password": ""})
+            if not isinstance(props, dict) or not props.get("is_dir") or props.get("provider") != "AliyundriveOpen":
+                raise ValueError
+        except (ValueError, OSError):
+            raise ValueError("OpenList 挂载已存在，但尚未验证可读。请在原生管理中检查授权后，清空 Refresh Token 再次核验。") from None
+        folders = ("Movies", "TV", ".cinema-upload")
+        present = set()
+        for item in self.mount_pages(ol, path):
+            name = item.get("name")
+            if not isinstance(name, str):
+                raise ValueError("OpenList 返回了无法核对的目录信息。")
+            if name.casefold() in {"movies", "tv", ".cinema-upload"}:
+                if name not in folders or not item.get("is_dir") or name in present:
+                    raise ValueError("云盘所需目录与现有文件或目录名称冲突，请在 OpenList 检查。")
+                present.add(name)
+        for folder in folders:
+            if folder not in present:
+                self.ol(ol, "POST", "/api/fs/mkdir", {"path": path + "/" + folder})
+                info = self.ol(ol, "POST", "/api/fs/get", {"path": path + "/" + folder, "password": ""})
+                if not isinstance(info, dict) or not info.get("is_dir") or info.get("provider") != "AliyundriveOpen":
+                    raise ValueError("云盘尚未确认创建影院目录，请在 OpenList 检查后重试。")
+
+    def cloud_mount(self, session, body):
+        path = cloud_mount(body.get("mount_path"))
         config = self.config()
+        current = cloud_mount(config.get("cloud_mount", "/aliyun"))
+        if "expected_mount" in body and body["expected_mount"] != current:
+            raise CurrentMountChanged("影院当前挂载已更改，请刷新设置后重试。")
+        history = config.get("cloud_mounts", [])
+        if not isinstance(history, list):
+            raise ValueError("云盘历史挂载配置无效，请检查影院配置。")
+        mounts = list(dict.fromkeys(cloud_mount(m) for m in ["/aliyun", *history, current, path]))
+        ol, token = self.openlist(session, body)
+        self.prepare_cloud_mount(ol, path, body.get("refresh_token", ""))
+        emby = self.client("emby")
+        emby.opener.addheaders = [("X-Emby-Token", session["token"])]
+        with watch_lock(self.data / 'emby-defaults'):
+            activate_cloud_library(emby, path)
+            directory = self.state / "relay-token"
+            write_relay_token(directory, token)
+            private_write(directory / "cinema-mounts.json", json.dumps({"mounts": mounts}))
+            config.update(cloud_mount=path, cloud_mounts=mounts, openlist_url=self.origins["openlist"], openlist_token=token)
+            private_write(self.state / "config.json", json.dumps(config))
+        return {"path": path, "provider": "AliyundriveOpen", "message": f"已启用 {path}，新归档和播放使用此挂载。"}
+
+    def configure(self, session, body):
+        config = self.config()
+        path = cloud_mount(config.get("cloud_mount", "/aliyun"))
+        if body.get("expected_mount", "/aliyun") != path:
+            raise CurrentMountChanged("影院当前挂载已更改，请刷新设置后重试。")
+        ol, token = self.openlist(session, body)
         raw_user = body.get("qb_username")
         username = text(raw_user) if raw_user else (config.get("qb_username") or session["username"])
         password = body.get('qb_password') or config.get('qb_password')
         if not password:
             raise ValueError('请填写 qB 正式登录密码，后台下载服务需要保存此凭据。')
         text(password, 1024)
+        self.prepare_cloud_mount(ol, path, body.get("refresh_token", ""))
         prowlarr_key = read_api_key(self.services / "prowlarr/config.xml")
         sonarr_key = read_api_key(self.services / "sonarr/config.xml")
-        connect_services(token, username, password, prowlarr_key, sonarr_key, self.origins)
-        listing = self.ol(ol, "POST", "/api/fs/list", {"path": "/aliyun", "password": "", "page": 1, "per_page": 1000, "refresh": True})
-        items = (listing or {}).get("content") or [] if isinstance(listing, dict) else []
-        for folder in ("Movies", "TV", ".cinema-upload"):
-            existing = next((i for i in items if isinstance(i, dict) and i.get("name") == folder), None)
-            if existing and not existing.get("is_dir"):
-                raise ValueError("云盘目录名称已被文件占用，请在 OpenList 检查。")
-            if not existing:
-                self.ol(ol, "POST", "/api/fs/mkdir", {"path": "/aliyun/" + folder})
-        private_write(self.state / "config.json", json.dumps({**{k:v for k,v in config.items() if k in {'emby_url','emby_token'}}, "openlist_url": self.origins["openlist"],
-                      "openlist_token": token, "qb_url": self.origins["qb"], "qb_username": username,
-                      "qb_password": password, "sonarr_url": self.origins["sonarr"], "sonarr_api_key": sonarr_key}))
+        connect_services(token, username, password, prowlarr_key, sonarr_key, self.origins, mount_path=path)
         write_relay_token(self.state / 'relay-token', token)
+        config.update(openlist_url=self.origins["openlist"], openlist_token=token, qb_url=self.origins["qb"],
+                      qb_username=username, qb_password=password, sonarr_url=self.origins["sonarr"], sonarr_api_key=sonarr_key)
+        private_write(self.state / "config.json", json.dumps(config))
         return {"message": "阿里云盘与下载器已连接，自动上传已就绪。"}
 
     def playbacks(self, session):
@@ -417,7 +528,11 @@ class App:
             client = self.client('emby')
             client.timeout = 15
             client.opener.addheaders = [('X-Emby-Token', session['token'])]
-            emby_defaults(client)
+            mounts = self.config().get('cloud_mounts', [])
+            if any(m != '/aliyun' for m in mounts):
+                emby_defaults(client, mounts)
+            else:
+                emby_defaults(client)
             private_write(marker, '1\n')
         with self.lock:
             self.localized.clear()
@@ -1073,7 +1188,7 @@ class App:
             if job['id'] in linked or job.get('parent_id') in visible_ids:
                 continue
             key='series:'+str(job['tvdb_id']) if job.get('tvdb_id') else ('torrent:'+job['torrent_hash'] if job.get('torrent_hash') else 'job:'+job['id'])
-            value=group(key,job.get('tvdb_id'),job['dest'].removeprefix('/aliyun/').split('/')[1])
+            value=group(key,job.get('tvdb_id'),PurePosixPath(job['dest']).parts[3])
             value['uploads'].extend([job, *[j for j in children[job['id']] if j['id'] not in linked]])
         for action in actions:
             if action['action']=='delete' and action['state']=='done':
@@ -1263,6 +1378,7 @@ class App:
 
     def status(self):
         config = self.config()
+        mount = cloud_mount(config.get('cloud_mount', '/aliyun'))
         def client(service):
             value = self.client(service)
             value.timeout = 10
@@ -1273,10 +1389,10 @@ class App:
             try:
                 ol = client('openlist')
                 ol.opener.addheaders = [('Authorization', config['openlist_token'])]
-                item = self.ol(ol, 'POST', '/api/fs/get', {'path': '/aliyun', 'password': ''})
+                item = self.ol(ol, 'POST', '/api/fs/get', {'path': mount, 'password': ''})
                 if not isinstance(item, dict) or not item.get('is_dir') or item.get('provider') != 'AliyundriveOpen':
-                    return False, '/aliyun 尚未正确挂载阿里云盘 Open，请重新连接。'
-                return True, '阿里云盘连接正常。'
+                    return False, f'{mount} 尚未正确挂载阿里云盘 Open，请检查当前挂载。'
+                return True, f'阿里云盘 {mount} 连接正常。'
             except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 return False, '阿里云盘连接失败，请检查授权或在 OpenList 查看挂载。'
         def downloader():
@@ -1369,7 +1485,7 @@ class App:
                                'remote_size_mismatch':'云端文件校验未通过，保留本地', 'remote_hash_mismatch':'云端校验不一致，保留本地'}
                     if 'reason' in {r[1] for r in db.execute('PRAGMA table_info(cleanups)')}:
                         cleanup['reasons'] = [reasons.get(r[0],'安全复核尚未通过，保留本地并自动复查') for r in db.execute("SELECT DISTINCT reason FROM cleanups WHERE state!='done' AND reason IS NOT NULL LIMIT 5")]
-        return {'settings': settings, 'configured': checks['cloud']['complete'], 'cleanup': cleanup,
+        return {'settings': settings, 'configured': checks['cloud']['complete'], 'cleanup': cleanup, 'cloud_mount': mount,
                 'credentials': {'openlist': not checks['cloud']['complete'], 'qb': not checks['downloader']['complete']},
                 'indexers': count, 'prowlarr_ok': checks['indexers']['complete'],
                 'sonarr_ok': checks['television']['complete'], 'checks': checks}
@@ -1507,6 +1623,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply({"message": "清理设置已保存。"})
                     if path == "/api/configure":
                         return self.reply(app.configure(session, body))
+                    if path == "/api/cloud-mounts":
+                        return self.reply(app.cloud_mounts(session, body))
+                    if path == "/api/cloud-mount":
+                        return self.reply(app.cloud_mount(session, body))
                     if path == '/api/preview-version':
                         return self.reply(app.preview_release(session, body))
                     if path == '/api/download-release':
@@ -1532,7 +1652,7 @@ class Handler(BaseHTTPRequestHandler):
                     if path == "/api/download":
                         return self.reply(app.download_release(session, {'release_id': body.get('id')}, 'movie'))
             self.reply({"error": "接口不存在。"}, 404)
-        except TaskScopeChanged as error:
+        except (TaskScopeChanged, CurrentMountChanged) as error:
             self.reply({'error':str(error)}, 409)
         except SessionCheckUnavailable:
             self.reply({'error':'Emby 暂时无法验证会话，请稍后重试。'}, 503)

@@ -8,6 +8,12 @@
 
 本节汇总当前代码的实际状态，后面的历次记录保留当时的证据。两者不一致时以本节和代码为准。
 
+- **在设置页切换归档挂载。** 以 GitHub 与本地共同提交 `6674df3` 为基线。管理员在 `/discover/` 读取 OpenList 挂载，核验已有的阿里云盘 Open 挂载，或在空闲的顶级路径创建一个。默认路径仍为 `/aliyun`。先准备远端 Movies、TV、.cinema-upload，再把两个成品目录追加至原 Emby 媒体库，最后发布 relay 扫描清单并保存新的归档路径。重复提交可以恢复部分完成的片库设置。旧路径及其任务继续可用，qB 本地保存路径和做种状态独立于云盘选择。同一云盘目录通过两个名字挂载仍共享实际文件，应选择独立归档目录。
+
+- **运行与验证。** `state/uploader/config.json` 保存当前挂载 `cloud_mount` 和历史挂载 `cloud_mounts`，旧配置缺省为 `/aliyun`。relay 在每次扫描开始时读取 `state/relay-token/cinema-mounts.json`；升级需一起重建 portal、uploader、relay，并给 portal 挂载原有的 `state/library:/library`。之后在网页选择新盘即可。回归覆盖同名路径冲突、并发页面、旧任务与字幕归属、上传回执、Emby 追加路径以及删除范围。真实阿里云盘授权、上传和播放需在具备授权的站点验证。
+
+- **本轮验收。** WSL Linux 源码和安装包解包后各运行 234 项 Python 测试，均 233 项通过、1 项按平台跳过；安装包 SHA-256 校验通过。4 套 Node 检查、两套 Chrome 桌面与移动流程、Compose 配置及 Go 严格播放和扫描测试通过。在隔离环境运行官方 Emby 4.10.2.0，实际追加目录返回 HTTP 204，同一媒体库 ID 回读到新旧两个路径。用发布指定的 Go 1.27.4 构建 Linux relay，govulncheck 二进制扫描命中可调用漏洞 0 项。线上站点当时仍提供旧版设置页，现场切换和真实云盘链路待部署后验收。
+
 - **本地管理账号（11 月 26 日）。** 测试站的 Emby、OpenList、Prowlarr 和 Sonarr 已在原用户 ID 上统一为 `admin`，分别通过密码登录。公网门户和三个原生后台均已验证，普通观众可登录电影墙但不能进入管理门户。OpenList 的服务令牌与挂载、Prowlarr/Sonarr 的 API Key 已复核。停用的 qBittorrent 已预置相同管理凭据，并在隔离的 5.3.0 实例上验证；测试站的下载器仍未启动。各应用独立保存密码，今后轮换须逐个更新。第三方 PT 账号和云盘授权由对应平台管理。
 
 - **主线与回归。** `main` 已包含 PR #9–#14、2026-11-26 公网登录验收记录（`5cfbd8b`）以及本轮端到端复审优化。GitHub Actions `Regression` 在每次 push 和 PR 上运行源码与安装包解包后的 Python 回归、Node 检查、两套 Chrome 流程、Compose 配置、relay/portal/uploader 镜像构建、portal/uploader 启动检查以及 `caddy validate`。它不部署任何环境。
@@ -122,7 +128,7 @@
 ### 改动时需要守住的边界
 
 - **下载来源分开。** `cinema-movies` 使用 `/media/downloads/movies`，独立剧集或综艺 `cinema-tv` 使用 `/media/downloads/tv-manual`。自动追剧 `sonarr-tv` 先下载到 `/media/downloads/tv`，上传器只收 Sonarr 已导入 `/media/library/tv` 的文件。按版追更必须通过 Sonarr 原生规则，找不到同版就等待。版本状态和原生 Sonarr Profile 需要配套保留。
-- **发布以持久凭证为准。** 上传先进入 `/aliyun/.cinema-upload`，经 OpenList 任务成功、远端大小和可用 SHA1 校验，完成移动和回读才记为 `published`。回执丢失先查任务和强哈希证据，保留 SQLite 状态供恢复。`Movies`、`TV` 和暂存区只能由同一个 uploader 写入。匹配的 `srt`、`ass`、`ssa` 字幕先于视频发布。[找片与归档说明](docs/DISCOVER.md)
+- **发布以持久凭证为准。** 上传先进入任务所属挂载的 `.cinema-upload`，经 OpenList 任务成功、远端大小和可用 SHA1 校验，完成移动和回读才记为 `published`。回执丢失先查任务和强哈希证据，保留 SQLite 状态供恢复。`Movies`、`TV` 和暂存区只能由同一个 uploader 写入。匹配的 `srt`、`ass`、`ssa` 字幕先于视频发布。[找片与归档说明](docs/DISCOVER.md)
 - **删除范围和保留期按实例校验。** 自动清理默认从当前种子完成算 7 天，`0` 关闭。手动删除默认保留 VPS 文件；选择“删除所有”后，由确认清单确定云端原件、字幕、Emby 索引和本地文件。换单个版本时使用资源级操作。验收删除时使用自建测试媒体。[删除流程](docs/DISCOVER.md#删除所有与重新下载)
 - **索引和播放授权独立验证。** Emby 的 `/library` 只挂载 `state/library` 虚拟索引。relay 逐资源校验 Emby 授权和云端路径，取链失败直接拒绝。检查播放时同时看视频或分片的云盘/CDN 响应及客户端进度。自动移除索引关闭，外部手动删片留下旧版本时，先确认云盘目录健康、旧对象确实消失，再备份移出对应索引并扫描 Emby。见 [播放记录与直连证据](docs/DISCOVER.md#播放记录与直连证据) 和 [旧索引处理](docs/DISCOVER.md#删除后换版与旧索引)。
 

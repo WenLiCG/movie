@@ -114,6 +114,15 @@ function signedIn(value, username = '') {
     csrf = '';
     $('logout').title = '';
     $('cloud-form').reset();
+    $('mount-form').reset();
+    $('openlist-user').value = $('openlist-password').value = '';
+    $('openlist-credentials').open = false;
+    openlistCredentialsNeeded = null;
+    setActiveMount('/aliyun');
+    mountEntries = null;
+    $('mount-choice').replaceChildren();
+    $('mount-choices').hidden = $('mount-feedback').hidden = true;
+    updateMountControls();
     $('retention-form').reset();
     delete $('days').dataset.edited;
     $('query').value = '';
@@ -452,15 +461,18 @@ $('follow-form').onsubmit=event=>{event.preventDefault();action(event.submitter|
   if(currentView==='series')series().catch(e=>notice(e.message,true));
   if(mode==='manual')await openEpisodes({id,title});
 });};
-let statusBusy=false, statusAgain=false, qbCredentialsNeeded=null;
+let statusBusy=false, statusAgain=false, qbCredentialsNeeded=null, openlistCredentialsNeeded=null;
 $('days').addEventListener('input',()=>{$('days').dataset.edited='1';});
 async function status() {
   if(statusBusy){statusAgain=true;return;}statusBusy=true;statusAgain=false;
   try{await loadStatus();}finally{statusBusy=false;if(statusAgain){statusAgain=false;status().catch(()=>{});}}
 }
 async function loadStatus() {
+  const revision=mountRevision;
   const s = await api('status'); if (!$('days').dataset.edited && document.activeElement !== $('days')) $('days').value = s.settings.retention_days;
-  $('openlist-credentials').hidden=!s.credentials.openlist; if (s.credentials.qb !== qbCredentialsNeeded) { $('download-credentials').open=s.credentials.qb; qbCredentialsNeeded=s.credentials.qb; }
+  if (revision===mountRevision) setActiveMount(s.cloud_mount || '/aliyun');
+  if (s.credentials.openlist !== openlistCredentialsNeeded) { $('openlist-credentials').open=s.credentials.openlist; openlistCredentialsNeeded=s.credentials.openlist; }
+  if (s.credentials.qb !== qbCredentialsNeeded) { $('download-credentials').open=s.credentials.qb; qbCredentialsNeeded=s.credentials.qb; }
   const names = {metadata:'Emby 刮削', uploader:'上传服务', cloud: '阿里云盘', downloader: '下载器', indexers: '搜索站点', television: '追剧连接', retention: '保留时间'};
   const missing = Object.entries(s.checks).filter(([,v]) => !v.complete);
   missingConfigCount = missing.length;
@@ -472,7 +484,119 @@ async function loadStatus() {
 $('config-warning').onclick = () => show('settings');
 $('refresh-settings').onclick = () => action($('refresh-settings'), status);
 $('metadata-defaults').onclick = () => action($('metadata-defaults'), async () => {notice((await api('metadata-defaults', {})).message);await status();});
-$('cloud-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('cloud-form').querySelector('button.primary'), async () => { const r = await api('configure', {openlist_username:$('openlist-user').value,openlist_password:$('openlist-password').value, refresh_token: $('refresh-token').value, qb_username: $('qb-user').value, qb_password: $('qb-password').value}); $('refresh-token').value = ''; $('openlist-password').value=''; $('qb-password').value = ''; notice(r.message); await status(); }); };
+let mountEntries=null, mountBusy=false, connecting=false, activeMount='/aliyun', mountRevision=0;
+function setActiveMount(path) {
+  if (activeMount!==path && $('mount-path').value===activeMount) {
+    $('mount-path').value=path;
+    $('mount-token').value='';
+  }
+  activeMount=path;
+  $('active-mount').textContent=path;
+  updateMountControls();
+}
+function updateMountControls() {
+  const path=$('mount-path').value.trim();
+  const valid=/^\/[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$/u.test(path) && !path.toLowerCase().includes('.balance');
+  const entry=mountEntries?.find(item=>item.path.toLowerCase()===path.toLowerCase());
+  const eligible=entry?.eligible && entry.path===path;
+  $('mount-choice').value=entry?.path===path?path:'';
+  const busy=mountBusy || connecting;
+  $('connect-services').disabled=$('mount-path').disabled=$('list-mounts').disabled=$('mount-choice').disabled=busy;
+  $('mount-token-field').hidden=!valid || Boolean(entry);
+  $('mount-token').disabled=busy || $('mount-token-field').hidden;
+  if ($('mount-token-field').hidden) $('mount-token').value='';
+  const create=valid && !entry && Boolean(mountEntries || $('mount-token').value);
+  $('mount-token').required=create;
+  $('save-mount').disabled=busy || !valid || Boolean(entry && !eligible);
+  $('save-mount').textContent=create?'新建并启用挂载':path===activeMount?'核验当前挂载':'核验并启用挂载';
+  let hint='已有挂载可直接核验。新建时填写此挂载的阿里云盘 Open 刷新令牌。';
+  if (!valid) hint='请输入单级路径，例如 /aliyun-media。名称最长 64 个字符，以字母或数字开头。';
+  else if (entry) hint=eligible?'已找到阿里云盘 Open 挂载，可直接核验连接。':'此路径已占用或无法核验，请从清单选择可用挂载或输入其他路径。';
+  else if (mountEntries) hint='清单中没有此路径。填写刷新令牌后可新建挂载。';
+  $('mount-hint').textContent=hint;
+  $('mount-hint').className=(!valid || (entry && !eligible))?'warning-text':'muted';
+}
+function mountFeedback(message, error=false) {
+  $('mount-feedback').textContent=message;
+  $('mount-feedback').className=error?'warning-text':'muted';
+  $('mount-feedback').hidden=false;
+}
+function applyMountList(entries) {
+  mountEntries=entries;
+  $('mount-choice').replaceChildren(new Option('手动输入路径',''),...entries.map(m=>
+    new Option(m.path+(m.eligible?'':'（已占用或不可用）'),m.path)));
+  $('mount-choices').hidden=!entries.length;
+}
+$('mount-path').oninput=()=>{
+  $('mount-token').value='';
+  $('mount-feedback').hidden=true;
+  updateMountControls();
+};
+$('mount-choice').onchange=()=>{
+  $('mount-path').value=$('mount-choice').value;
+  $('mount-path').oninput();
+  if (!$('mount-path').value) $('mount-path').focus();
+};
+$('mount-token').oninput=updateMountControls;
+async function manageMount(listOnly) {
+  if (mountBusy || connecting || (!listOnly && $('save-mount').disabled)) return;
+  const account=csrf, path=$('mount-path').value.trim();
+  const body={openlist_username:$('openlist-user').value,openlist_password:$('openlist-password').value};
+  if (!listOnly) {
+    body.expected_mount=activeMount;
+    body.mount_path=path;
+    if (!$('mount-token').disabled && $('mount-token').value) body.refresh_token=$('mount-token').value;
+  }
+  mountBusy=true;
+  updateMountControls();
+  mountFeedback(listOnly?'正在读取已有挂载…':'正在核验云盘挂载…');
+  try {
+    const result=await api(listOnly?'cloud-mounts':'cloud-mount',body);
+    if (account!==csrf) return;
+    if (listOnly) {
+      applyMountList(result.mounts);
+      mountFeedback(result.mounts.length?'已读取 '+result.mounts.length+' 个挂载。':'尚未配置挂载，可输入路径新建。');
+    } else {
+      $('mount-token').value='';
+      mountRevision++;
+      setActiveMount(result.path);
+      if (mountEntries) applyMountList([...mountEntries.filter(m=>m.path!==result.path),{path:result.path,eligible:true}]);
+      mountFeedback(result.message);
+      status().catch(error=>notice(error.message,true));
+    }
+  } catch (error) {
+    if (account===csrf) {
+      mountFeedback(error.message,true);
+      if (error.status===409) status().catch(()=>{});
+    }
+  } finally {
+    mountBusy=false;
+    updateMountControls();
+  }
+}
+$('list-mounts').onclick=()=>manageMount(true);
+$('mount-form').onsubmit=event=>{event.preventDefault();manageMount(false);};
+updateMountControls();
+$('cloud-form').onsubmit = async event => {
+  event.preventDefault();
+  if (mountBusy || connecting) return;
+  connecting=true;
+  updateMountControls();
+  try {
+    const r=await api('configure',{expected_mount:activeMount,openlist_username:$('openlist-user').value,
+      openlist_password:$('openlist-password').value,
+      qb_username:$('qb-user').value,qb_password:$('qb-password').value});
+    $('openlist-password').value=$('qb-password').value='';
+    notice(r.message);
+    await status();
+  } catch (error) {
+    notice(error.message,true);
+    if (error.status===409) status().catch(()=>{});
+  } finally {
+    connecting=false;
+    updateMountControls();
+  }
+};
 $('retention-form').onsubmit = event => { event.preventDefault(); action(event.submitter || $('retention-form').querySelector('button'), async () => { notice((await api('settings', {retention_days: Number($('days').value)})).message); delete $('days').dataset.edited; await status(); }); };
 function chooseVersionForSeries(series){
   show('search');document.querySelector('[name=kind][value=tv]').checked=true;$('query').value=series.title;$('search-form').requestSubmit();
@@ -539,7 +663,7 @@ function uploadRow(u, compact=false, short=false) {
   const check=awaitingArchiveCheck(u);
   const retry=u.retry_at&&u.retry_at*1000>Date.now()&&!['published','cancelled','failed'].includes(u.state)
     ?'下次重试 '+new Date(u.retry_at*1000).toLocaleTimeString('zh-CN',{hour12:false}):'';
-  const el=row(short?episodeTitle(name):name,[u.dest.startsWith('/aliyun/TV/')?'剧集／综艺':'电影',check?'等待归档复核':uploadStates[u.state]||'处理中',u.state==='queued'&&!check?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message,retry],'upload-row');
+  const el=row(short?episodeTitle(name):name,[u.dest.split('/')[2]==='TV'?'剧集／综艺':'电影',check?'等待归档复核':uploadStates[u.state]||'处理中',u.state==='queued'&&!check?`${Number(u.progress||0).toFixed(1)}%`:'',u.queue_position?`排队第 ${u.queue_position} 个文件`:'',u.error_message,retry],'upload-row');
   el.firstChild.firstChild.title=name;
   el.firstChild.firstChild.hidden=compact;
   if(check||u.state==='failed'||u.error==='upload_unconfirmed'||u.error==='move_pending'){

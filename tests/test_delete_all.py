@@ -109,6 +109,49 @@ class DeleteAllTests(unittest.TestCase):
         self.assertTrue(all(j['dest'] in self.cloud.objects for j in self.selected))
         self.assertTrue(Path(self.selected[0]['source']).exists())
 
+    def test_delete_across_two_managed_mounts_refreshes_shared_library_once(self):
+        mount = '/新盘'
+        self.cloud.mounts = self.uploader.mounts = ('/aliyun', mount)
+        old = self.selected[0]
+        second = {**old, 'id':'second', 'dest':mount + '/Movies/Second/second.mkv'}
+        self.cloud.objects.update({mount:{'is_dir':True}, mount+'/Movies':{'is_dir':True},
+                                   mount+'/Movies/Second':{'is_dir':True}, second['dest']:self.cloud.objects[old['dest']]})
+        index = self.index / second['dest'].lstrip('/')
+        index.parent.mkdir(parents=True)
+        index.write_bytes(b'index')
+        original = self.sources.emby.json
+        def emby_json(method, path, query=None):
+            if path == '/Library/VirtualFolders/Query':
+                return {'Items':[{'ItemId':'movies','Locations':['/library/aliyun/Movies','/library'+mount+'/Movies']}]}
+            return original(method, path, query)
+        self.sources.emby.json = emby_json
+        jobs = [old, second]
+        with self.assertRaisesRegex(Failure, 'unsafe_remote_path'):
+            self.uploader.delete_cloud_and_index(jobs, {'delete_plan':[old, {**second, 'dest':'/other/Movies/second.mkv'}]},
+                                                 self.sources, 'multi-mount', 1)
+        self.assertIn(old['dest'], self.cloud.objects)
+        self.uploader.delete_cloud_and_index(jobs, {'delete_plan':jobs}, self.sources, 'multi-mount', 1)
+        self.assertFalse(index.exists())
+        self.assertNotIn(old['dest'], self.cloud.objects)
+        self.assertNotIn(second['dest'], self.cloud.objects)
+        self.assertIn(mount+'/Movies', self.cloud.objects)
+        self.assertIn(self.selected[1]['dest'], self.cloud.objects)
+        self.assertEqual(len(self.sources.emby.requests), 1)
+
+    def test_completed_deletion_cannot_be_rediscovered_after_switching_mounts(self):
+        self.submit()
+        self.uploader.process_actions(self.sources)
+        self.assertEqual(self.action_state()['state'], 'done')
+        mount = '/新盘'
+        self.uploader.mounts = ('/aliyun', mount)
+        old = self.selected[0]
+        item = candidate(old['identity'], old['source'], old['dest'].replace('/aliyun/', mount + '/'),
+                         old['size'], mount=mount, torrent_hash=old['torrent_hash'], added_on=old['added_on'])
+        self.uploader.add(item)
+        self.assertIsNone(self.uploader.db.execute('SELECT id FROM jobs WHERE id=?', (item['id'],)).fetchone())
+        self.uploader.add({**item, 'added_on': old['added_on'] + 1})
+        self.assertEqual(self.uploader.db.execute('SELECT state FROM jobs WHERE id=?', (item['id'],)).fetchone()[0], 'pending')
+
     def test_outage_and_uncertain_remove_are_not_success(self):
         self.submit();self.cloud.outage=True;self.uploader.process_actions(self.sources)
         self.assertEqual(self.action_state()['state'],'pending')

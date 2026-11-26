@@ -149,6 +149,7 @@ services:
     volumes:
       - ./state/uploader:/state
       - ./state/relay-token:/state/relay-token
+      - ./state/library:/library
       - ./state/prowlarr:/services/prowlarr:ro
       - ./state/sonarr:/services/sonarr:ro
       - ./state/relay/lib/playback:/playback:ro
