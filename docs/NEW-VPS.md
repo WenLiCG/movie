@@ -105,14 +105,14 @@ bash install.sh status
 
 | 公网地址 | 用途 |
 | --- | --- |
-| `https://你的域名/` | Emby 电影墙、观看 |
+| `https://你的域名/` | 观众用普通 Emby 用户名和密码登录、看片，此地址也可填入 Emby 客户端 |
 | `https://你的域名/discover/` | 找片、独立下载、追剧、设置及 VPS 状态 |
 | `https://你的域名/search/` | Prowlarr 站点配置 |
 | `https://你的域名/sonarr/` | Sonarr 高级管理 |
 | `https://你的域名/qb/` | 下载和做种管理 |
 | `https://你的域名/openlist/` | 云盘高级管理 |
 
-公网生效后，日常无需开 SSH 隧道。关闭 Open.cmd 窗口只断开隧道，VPS 服务继续运行。没有统一登录，原生管理页面各自认证；定制页使用 Emby 管理员。
+管理员首次配置或排障时可用 `Open.cmd` 打开 SSH 隧道，关闭窗口后公网服务继续运行。日常观影直接访问 HTTPS 域名。公网原生后台入口先检查 `/discover/` 的 Emby 管理员会话，再由对应应用验证其原生账号。
 
 ## 6. 日常使用和验证
 
