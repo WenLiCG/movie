@@ -24,7 +24,7 @@ from configure import UPLOADER_CONNECTIONS, private_write, write_relay_token
 from integration import APIError, Client, connect_services, read_api_key, emby_defaults, activate_cloud_library
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
-from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile
+from portal.versions import NOT_GROUPS, details, rule, matches, validate_profile, release_series_title, provider_id, matching_series
 from archive import SUBTITLES, archived_counts, archived_keys, watch_lock, read_requests, save_requests, apply_scope, space_required, create_actions, task_actions, delete_target, torrent_instance, video, TaskScopeChanged, episodes_with_monitoring, cloud_mount
 
 BASE = {"emby": "http://emby:8096", "openlist": "http://openlist:5244/openlist",
@@ -587,9 +587,9 @@ class App:
         for value in missing:
             for match in matches:
                 ids = match.get('ProviderIds') or {}
-                same = str(ids.get('Tvdb', '')) == str(value['tvdbId']) or (
-                    value.get('tmdbId') and str(ids.get('Tmdb', '')) == str(value['tmdbId']))
-                if same and chinese(match.get('Name')):
+                comparisons = [str(ids[remote]) == str(value[native]) for remote, native in
+                               (('Tvdb', 'tvdbId'), ('Tmdb', 'tmdbId')) if ids.get(remote) and value.get(native)]
+                if comparisons and all(comparisons) and chinese(match.get('Name')):
                     updates[value['tvdbId']] = {'title': match['Name'], 'overview': match.get('Overview'), 'expires': now + 86400}
                     break
         if updates or not query and missing:
@@ -742,20 +742,41 @@ class App:
         rid = text(body.get('release_id'))
         release = self.stored_release(session, rid, 'tv')
         sonarr = self.client('sonarr')
-        parsed = sonarr.json('GET', '/api/v3/parse?' + urlencode({'title': release['title']}))
+        try:
+            parsed = sonarr.json('GET', '/api/v3/parse?' + urlencode({'title': release['title']})) or {}
+        except APIError as error:
+            if error.status not in (400, 404, 422):
+                raise
+            parsed = {}
         info = parsed.get('parsedEpisodeInfo') or {}
-        if not info.get('seriesTitle'):
-            return {'available': False, 'message': 'Sonarr 未能识别此资源的剧名或集数，自动追更暂不可用；不会提交到电影下载目录。'}
-        if parsed.get('series'):
-            candidates = [parsed['series']]
-        else:
-            term = 'tvdb:' + str(release['tvdbId']) if release.get('tvdbId') else info['seriesTitle']
-            candidates = sonarr.json('GET', '/api/v3/series/lookup?' + urlencode({'term': term}))[:20]
+        title = release_series_title(release['title'], info)
+        tvdb = provider_id(release, 'tvdbId')
+        manual = text(body['series_query']) if 'series_query' in body else ''
+        if re.fullmatch('[0-9]{1,12}', manual):
+            manual = 'tvdb:' + manual
+        term = manual or ('tvdb:' + tvdb if tvdb else title or release['_query'])
+        native = parsed.get('series') if not manual else None
+        lookup_failed = False
+        try:
+            lookup = sonarr.json('GET', '/api/v3/series/lookup?' + urlencode({'term': term}))
+        except (OSError, ValueError):
+            if not native or not native.get('tvdbId'):
+                raise
+            lookup, lookup_failed = [], True
+        candidates = {s['tvdbId']: s for s in lookup if s.get('tvdbId')}
+        if native and native.get('tvdbId'):
+            candidates.setdefault(native['tvdbId'], native)
         if not candidates:
-            return {'available': False, 'message': 'Sonarr 没有找到可关联的剧集／综艺，自动追更暂不可用；请在高级管理核对元数据。'}
+            return {'available': False, 'selected_id': '', 'candidates': [], 'message': 'Sonarr 没有找到可关联的剧集／综艺，可换用原名、别名或 TVDB 编号搜索。'}
+        candidates = list(candidates.values())
+        localized = self.localize(session, candidates, manual or release['_query'])
+        selected = matching_series(release, title, info, candidates, localized, lookup_failed)
+        if selected:
+            candidates.sort(key=lambda s: str(s['tvdbId']) != selected)
+        candidates = candidates[:20]
         fields, span = details(release['title'])
         native_group = info.get('releaseGroup') or ''
-        if fields['group'] and not (native_group and (fields['group'].casefold() == native_group.casefold() or fields['group'].casefold().startswith(native_group.casefold() + '@'))):
+        if fields['group'] and native_group and not (fields['group'].casefold() == native_group.casefold() or fields['group'].casefold().startswith(native_group.casefold() + '@')):
             fields['group'] = ''
         if not fields['group'] and native_group and native_group.casefold() not in NOT_GROUPS:
             fields['group'] = native_group
@@ -764,11 +785,11 @@ class App:
             series_cache.update({str(v['tvdbId']): v for v in candidates})
             trim_mapping(series_cache, 500)
             previews = session.setdefault('version_previews', {})
-            previews[rid] = {'info': info, 'candidates': [v['tvdbId'] for v in candidates]}
+            ids = previews.get(rid, {}).get('candidates', []) + [v['tvdbId'] for v in candidates]
+            previews[rid] = {'info': info, 'candidates': list(dict.fromkeys(ids))[-500:]}
             trim_mapping(previews, 500)
-        localized = self.localize(session, candidates, release['_query'])
         records = self.version_records()
-        return {'available': True, 'title': release['title'], 'fields': fields, 'episodes': span,
+        return {'available': True, 'selected_id': selected, 'title': release['title'], 'fields': fields, 'episodes': span,
                 'missing': [key for key, value in fields.items() if not value],
                 'candidates': [{'id': str(v['tvdbId']), 'title': localized[v['tvdbId']]['title'], 'year': v.get('year'),
                                 'seasons': [s['seasonNumber'] for s in (v.get('seasons') or []) if s['seasonNumber'] > 0],
@@ -795,8 +816,8 @@ class App:
         preview = session.get('version_previews', {}).get(rid)
         raw_id = body.get('id')
         tvdb = str(raw_id).strip() if isinstance(raw_id, (str, int)) and type(raw_id) is not bool else ''
-        if not preview or not tvdb.isdigit() or int(tvdb) not in preview['candidates'] or body.get('confirmed') is not True:
-            raise ValueError('请先预览资源并确认正确的剧集与全部版本条件。')
+        if not preview or tvdb not in session.get('series', {}) or not tvdb.isdigit() or int(tvdb) not in preview['candidates']:
+            raise ValueError('请先预览资源并选择对应的剧集。')
         mode=body.get('mode','all')
         if mode not in {'all','future','season','manual'}:
             raise ValueError('请选择追更范围。')

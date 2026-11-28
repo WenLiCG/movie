@@ -243,97 +243,128 @@ function versionSummary(fields) { return Object.entries(fields || {}).filter(([,
 function currentVersionFields() {
   return Object.fromEntries(Object.entries(versionInputs).map(([key,id])=>[key,$(id).value.trim()]));
 }
-function syncReplaceRequirement() {
-  const existing=versionPreview?.candidates.find(c=>c.id===following)?.version;
-  if(!existing || !selectedRelease){
-    $('replace-version-row').hidden=true;
-    $('replace-version').required=false;
-    return;
-  }
-  const current=currentVersionFields();
-  const changed=Object.keys(versionInputs).some(k=>(existing[k]||'')!==current[k]);
-  $('replace-version-row').hidden=!changed;
-  $('replace-version').required=changed;
-  if(!changed)$('replace-version').checked=false;
+function followMode() { return document.querySelector('[name=follow-mode]:checked').value; }
+function selectedCandidate() { return versionPreview?.candidates.find(c=>c.id===following); }
+function replacingVersion() {
+  const existing=selectedCandidate()?.version, current=currentVersionFields();
+  return !!existing && Object.keys(current).some(k=>(existing[k]||'')!==current[k]);
+}
+function syncFollowMode() {
+  const seasonOption=document.querySelector('[name=follow-mode][value=season]');
+  seasonOption.disabled=!$('season').options.length;
+  $('follow-season-row').hidden=seasonOption.disabled;
+  $('follow-manual-row').hidden=!selectedRelease;
+  if ((seasonOption.checked && seasonOption.disabled) || (followMode()==='manual' && !selectedRelease)) $('follow-all').checked=true;
+  const mode=followMode(), replacing=replacingVersion();
+  $('season-label').hidden=mode!=='season';
+  $('version-extra').querySelector('summary').textContent=mode==='season'?'更多选项 · 指定季':mode==='manual'?'更多选项 · 仅选集下载':'更多选项';
+  $('existing-version').hidden=!replacing;
+  if(replacing) $('existing-version').textContent='当前版本：'+versionSummary(selectedCandidate().version)+'。新版本：'+versionSummary(currentVersionFields())+'。已下载和正在下载的内容将保留。';
+  $('submit-version').textContent=selectedRelease
+    ? (replacing?'更换版本并':'')+(mode==='manual'?'选集下载':'追更')
+    : '保存追更范围';
+  $('submit-version').disabled=!following;
+  $('group-help').hidden=!selectedRelease || !!$('version-group').value.trim();
+  if($('group-help').hidden) $('version-group').removeAttribute('aria-describedby');
+  else $('version-group').setAttribute('aria-describedby','group-help');
 }
 function fillVersion(fields, editable) {
   Object.entries(versionInputs).forEach(([key,id])=>{ $(id).value=fields?.[key] || ''; $(id).disabled=!editable; });
-  $('version-extra').open=false;
-  updateVersionSummary();
+  $('version-extra').open=editable && !$('version-group').value;
 }
-function updateVersionSummary(){
-  const current=currentVersionFields();
-  $('version-summary').textContent='将同时要求：'+Object.entries(versionInputs).map(([key])=>`${versionLabels[key]} ${current[key]||'不限'}`).join(' · ');
-  const missing=Object.keys(versionInputs).filter(k=>!current[k]);
-  $('version-missing').textContent=missing.length ? `尚未限定：${missing.map(k=>versionLabels[k]).join('、')}。请补充标题中的标记，或确认这些条件不限。` : '识别结果需确认；只保证标题同时符合这些条件。';
-  syncReplaceRequirement();
-}
-Object.values(versionInputs).forEach(id=>{
-  $(id).addEventListener('input',updateVersionSummary);
-  $(id).addEventListener('change',updateVersionSummary);
-});
-function syncFollowMode() {
-  const manualOption = $('mode').querySelector('option[value="manual"]');
-  const seasonOption = $('mode').querySelector('option[value="season"]');
-  const hasSeasons = $('season').options.length > 0;
-  if (manualOption) { manualOption.hidden = !selectedRelease; manualOption.disabled = !selectedRelease; }
-  if (seasonOption) seasonOption.disabled = !hasSeasons;
-  if ($('mode').value === 'season' && !hasSeasons) $('mode').value = 'all';
-  if ($('mode').value === 'manual' && !selectedRelease) $('mode').value = 'all';
-  $('season-label').hidden = $('mode').value !== 'season' || !hasSeasons;
-  $('submit-version').textContent = selectedRelease
-    ? ($('mode').value === 'manual' ? '保存规则并选集' : '保存规则并追更')
-    : '保存追更范围';
-}
+Object.values(versionInputs).forEach(id=>$(id).addEventListener('input',syncFollowMode));
+$('version-group').addEventListener('invalid',()=>{$('version-extra').open=true;});
+document.querySelectorAll('[name=follow-mode]').forEach(input=>input.onchange=syncFollowMode);
 function chooseSeries() {
   following=$('series-match').value;
-  const candidate=versionPreview?.candidates.find(c=>c.id===following);
-  $('season').replaceChildren(...(candidate?.seasons || []).map(v=>new Option(`第 ${v} 季`,v)));
-  $('existing-version').hidden=!candidate?.version;
-  $('existing-version').textContent=candidate?.version ? '当前版本：'+versionSummary(candidate.version)+'。换版不会删除已有内容。' : '';
-  $('replace-version').checked=false;
-  syncReplaceRequirement();
+  const candidate=selectedCandidate();
+  $('season').replaceChildren(...(candidate?.seasons || []).map(v=>new Option('第 '+v+' 季',v)));
+  $('series-title').hidden=!candidate;
+  if(candidate) $('series-title').textContent=candidate.title+(candidate.year?' · '+candidate.year:'');
+  $('follow-options').hidden=!candidate;
   syncFollowMode();
 }
 $('series-match').onchange=chooseSeries;
-async function openResource(item) {
+$('correct-series').onclick=()=>{
+  $('series-picker').hidden=false;$('series-correction').open=true;
+  $('correct-series').hidden=true;$('series-match').value='';
+  chooseSeries();$('series-query').focus();
+};
+async function previewSeries(query) {
   const generation=++versionGeneration;
-  selectedRelease=item;versionPreview=null;following='';
-  $('follow-title').textContent='按此版本追更';
-  $('version-resource').textContent=item.title;
-  $('follow-notice').hidden=true;$('version-content').hidden=true;$('version-loading').hidden=false;
-  $('submit-version').disabled=true;$('version-confirm').checked=false;$('version-confirm').required=true;
-  $('version-confirm-row').hidden=false;$('series-match').disabled=false;
-  $('follow-scope').hidden=false;
-  $('mode').value='all';syncFollowMode();
-  $('follow-dialog').showModal();
+  const request={release_id:selectedRelease.id};
+  if(query){
+    request.series_query=query;
+    $('series-match').replaceChildren();
+    $('series-match-label').hidden=$('series-match').hidden=true;
+    chooseSeries();
+  }
+  $('version-loading').hidden=false;$('follow-notice').hidden=true;
+  $('version-content').disabled=true;$('submit-version').disabled=true;
   try {
-    const preview=await api('preview-version',{release_id:item.id});
+    const preview=await api('preview-version',request);
     if(generation!==versionGeneration || !$('follow-dialog').open)return;
-    if(!preview.available){$('follow-notice').textContent=preview.message+' 可直接使用列表中的“下载此资源”独立下载并归档到 TV。';$('follow-notice').hidden=false;return;}
-    versionPreview=preview;
-    fillVersion(preview.fields,true);
-    const options=preview.candidates.map(c=>new Option(c.title+(c.year?` · ${c.year}`:''),c.id));
-    if(options.length>1)options.unshift(new Option('请选择正确的剧集／综艺',''));
-    $('series-match').replaceChildren(...options);chooseSeries();
-    $('version-content').hidden=false;$('submit-version').disabled=false;
-    $('series-match').focus({preventScroll:true});$('follow-dialog').scrollTop=0;
-  } catch (error) {
-    if (generation === versionGeneration && $('follow-dialog').open) throw error;
-  } finally {if(generation===versionGeneration)$('version-loading').hidden=true;}
+    const candidates=preview.available ? preview.candidates : [];
+    const automatic=typeof preview.selected_id==='string' && candidates.find(c=>c.id===preview.selected_id);
+    if(preview.available){
+      if(!versionPreview?.available) fillVersion(preview.fields,true);
+      versionPreview=preview;
+    } else versionPreview={...versionPreview,candidates:[]};
+    $('series-match').replaceChildren(new Option('请选择剧集／综艺',''),...candidates.map(c=>new Option(c.title+(c.year?' · '+c.year:''),c.id)));
+    $('series-match').value=automatic?.id || '';
+    $('series-picker').hidden=!!automatic;
+    $('correct-series').hidden=!automatic;
+    $('series-match-label').hidden=$('series-match').hidden=!candidates.length;
+    $('series-correction').open=!candidates.length;
+    chooseSeries();
+    if(!candidates.length) {
+      $('follow-notice').textContent=(preview.message || '未找到剧集。')+' 也可返回列表，使用“下载此资源”。';
+      $('follow-notice').hidden=false;
+    }
+    $('version-content').hidden=false;
+  } catch(error) {
+    if(generation===versionGeneration && $('follow-dialog').open) {
+      $('follow-notice').textContent=error.message;$('follow-notice').hidden=false;
+      $('version-content').hidden=false;
+      if(!following){$('series-picker').hidden=false;$('series-correction').open=true;}
+    }
+  } finally {
+    if(generation===versionGeneration && $('follow-dialog').open) {
+      $('version-loading').hidden=true;$('version-content').disabled=false;
+      $('submit-version').disabled=!following;
+      const focus=following ? ($('group-help').hidden?'follow-all':'version-group') : ($('series-match').hidden?'series-query':'series-match');
+      if(focus==='version-group') $(focus).focus();
+      else {$(focus).focus({preventScroll:true});$('follow-dialog').scrollTop=0;}
+    }
+  }
+}
+function searchSeries() {
+  const query=$('series-query').value.trim();
+  if(query) return previewSeries(query);
+  $('series-query').focus();
+}
+$('search-series').onclick=searchSeries;
+$('series-query').onkeydown=event=>{if(event.key==='Enter' && !event.isComposing){event.preventDefault();searchSeries();}};
+async function openResource(item) {
+  selectedRelease=item;versionPreview=null;following='';
+  $('follow-title').textContent='按此版本追更';$('version-resource').textContent=item.title;
+  $('series-title').hidden=$('series-picker').hidden=$('follow-options').hidden=true;
+  $('series-match').replaceChildren();$('series-match-label').hidden=$('series-match').hidden=true;
+  $('series-query').value='';$('follow-all').checked=true;$('version-extra').open=false;
+  $('version-content').hidden=true;$('submit-version').disabled=true;
+  $('follow-dialog').showModal();
+  await previewSeries();
 }
 function openFollow(item) {
   versionGeneration++;selectedRelease=null;versionPreview=null;following=String(item.tvdbId);
-  $('follow-title').textContent='设置追更范围';$('version-resource').textContent=item.title;
-  $('follow-notice').hidden=true;$('version-loading').hidden=true;$('version-content').hidden=false;
-  $('series-match').replaceChildren(new Option(item.title,following));$('series-match').disabled=true;
-  fillVersion(item.version.fields,false);
-  $('version-confirm-row').hidden=true;$('version-confirm').required=false;$('replace-version-row').hidden=true;$('existing-version').hidden=true;
-  $('follow-scope').hidden=false;
-  $('mode').value='all';
-  $('season').replaceChildren(...(item.seasons||[]).filter(v=>v.seasonNumber>0).map(v=>new Option(`第 ${v.seasonNumber} 季`,v.seasonNumber)));
-  syncFollowMode();
-  $('submit-version').disabled=false;$('follow-dialog').showModal();
+  $('follow-title').textContent='设置追更范围';$('series-title').textContent=item.title;
+  $('series-title').hidden=false;$('version-resource').textContent='';
+  $('version-loading').hidden=$('series-picker').hidden=$('follow-notice').hidden=true;
+  $('correct-series').hidden=true;
+  $('version-content').hidden=$('version-content').disabled=$('follow-options').hidden=false;
+  fillVersion(item.version.fields,false);$('follow-all').checked=true;
+  $('season').replaceChildren(...(item.seasons||[]).filter(v=>v.seasonNumber>0).map(v=>new Option('第 '+v.seasonNumber+' 季',v.seasonNumber)));
+  syncFollowMode();$('follow-dialog').showModal();
 }
 $('follow-dialog').addEventListener('close',()=>{versionGeneration++;});
 function releaseDownload(item, tv) {
@@ -486,14 +517,13 @@ $('episodes-form').onsubmit = async event => {
   }
 };
 ['resolution', 'codec', 'site', 'free'].forEach(id => $(id).onchange = render);
-$('mode').onchange = syncFollowMode;
 $('cancel-follow').onclick = () => $('follow-dialog').close();
 $('follow-form').onsubmit=async event=>{
   event.preventDefault();
   const generation=versionGeneration;
-  const mode=$('mode').value,id=following,title=versionPreview?.candidates.find(c=>c.id===id)?.title || $('version-resource').textContent;
+  const mode=followMode(),id=following,title=selectedCandidate()?.title || $('series-title').textContent;
   const body={id,mode,season:Number($('season').value)};
-  if(selectedRelease)Object.assign(body,{release_id:selectedRelease.id,fields:Object.fromEntries(Object.entries(versionInputs).map(([key,input])=>[key,$(input).value.trim()])),confirmed:$('version-confirm').checked,replace:$('replace-version').checked});
+  if(selectedRelease)Object.assign(body,{release_id:selectedRelease.id,fields:currentVersionFields(),replace:replacingVersion()});
   const result=await submitSelection(event.currentTarget,'follow',body,()=>generation===versionGeneration);
   if(!result)return;
   $('follow-dialog').close();notice(result.message||'版本规则已保存。');
