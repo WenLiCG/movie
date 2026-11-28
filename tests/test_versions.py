@@ -92,9 +92,9 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(self.native.calls,[])
 
     def test_rings_of_power_resolves_without_relying_on_search_order_or_language(self):
-        self.session['results']['r'][1].update(title=RINGS, _query='指环王')
+        self.session['results']['r'][1].update(title=RINGS, _query='指环王', imdbId=32446124, tvdbId=0, tmdbId=0)
         correct = {'title':'The Lord of the Rings: The Rings of Power','tvdbId':367506,'year':2022,
-                   'seasons':[{'seasonNumber':3}]}
+                   'imdbId':'tt7631058','tmdbId':84773,'seasons':[{'seasonNumber':3}]}
         noise = [{'title':f'The Rings of Power Extras {n}', 'tvdbId':n} for n in range(1,21)]
         self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':{'seriesTitle':'The Lord of the Rings The Rings of Power',
                                'seasonNumber':3,'episodeNumbers':[3],'releaseGroup':'NTb'}}, [*noise, correct]])
@@ -124,6 +124,24 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(preview(tvdbId=42, imdbId='tt0000099'), '')
         del candidates[0]['imdbId']
         self.assertEqual(preview(tvdbId=42, imdbId='tt0000099'), '')
+
+    def test_episode_imdb_can_only_fall_back_to_unambiguous_series_evidence(self):
+        target = {'title':'Example', 'tvdbId':42, 'imdbId':'tt0000042', 'tmdbId':7}
+        other = {'title':'Other Show', 'tvdbId':99, 'imdbId':'tt0000099', 'tmdbId':9}
+        remake = {**other, 'title':'Example (2022)', 'year':2022}
+        release = self.session['results']['r'][1]
+        for candidates, episodes, ids, expected in (
+                ([target, remake], [1], {'imdbId':32446124}, ''),
+                ([target, other], [1], {'imdbId':99}, ''),
+                ([target, other], [1], {'imdbId':32446124,'tvdbId':99}, ''),
+                ([other], [1], {'imdbId':32446124,'tvdbId':99}, ''),
+                ([target, other], [1], {'imdbId':32446124,'tmdbId':9}, ''),
+                ([target, other], [1], {'imdbId':32446124,'tvdbId':42,'tmdbId':7}, '42'),
+                ([target, other], [], {'imdbId':32446124}, '')):
+            with self.subTest(episodes=episodes, ids=ids, expected=expected):
+                self.session['results']['r'] = (time.time()+60, {**release, **ids})
+                self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':{'seriesTitle':'Example','episodeNumbers':episodes}}, candidates])
+                self.assertEqual(self.app.preview_release(self.session, {'release_id':'r'})['selected_id'], expected)
 
     def test_manual_lookup_and_aliases_stay_bound_to_the_release(self):
         self.session['results']['r'][1].update(title=TITLE.replace('Example.', '示例：剧集.'))

@@ -61,6 +61,13 @@ def provider_id(series, key):
 
 def matching_series(release, title, info, candidates, localized, lookup_failed=False):
     external = {key: provider_id(release, key) for key in ('tvdbId', 'imdbId', 'tmdbId') if provider_id(release, key)}
+    # An indexer can attach an episode's IMDb ID; Sonarr supplies series-level IDs.
+    episodes = info.get('episodeNumbers') or info.get('absoluteEpisodeNumbers') or []
+    episode_imdb = len(episodes) == 1 and 'imdbId' in external and not any(
+            provider_id(series, 'imdbId') == external['imdbId'] for series in candidates)
+    if episode_imdb:
+        del external['imdbId']
+    id_match = None
     if external:
         matches = []
         for series in candidates:
@@ -69,7 +76,9 @@ def matching_series(release, title, info, candidates, localized, lookup_failed=F
                 if not all(comparisons):
                     return ''
                 matches.append(series['tvdbId'])
-        return str(matches[0]) if len(matches) == 1 else ''
+        if len(matches) != 1:
+            return ''
+        id_match = matches[0]
 
     name = normalized_title(title)
     base, _, suffix = name.rpartition(' ')
@@ -93,6 +102,8 @@ def matching_series(release, title, info, candidates, localized, lookup_failed=F
         dated = suffix_year and suffix_year == year and base in names
         if dated or (literal and (not lookup_failed or year and parsed_year == year)):
             matches.append(tvdb)
+    if id_match is not None:
+        return str(id_match) if id_match in matches or (not episode_imdb and not matches) else ''
     return str(matches[0]) if len(matches) == 1 else ''
 
 
