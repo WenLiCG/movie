@@ -10,6 +10,11 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
+UPLOADER_CONNECTIONS = {
+    "openlist_url": "OpenList", "openlist_token": "OpenList",
+    "qb_url": "qBittorrent", "qb_username": "qBittorrent", "qb_password": "qBittorrent",
+    "sonarr_url": "Sonarr", "sonarr_api_key": "Sonarr",
+}
 DIRECTORIES = (
     "state", "state/library", "state/library/aliyun",
     "state/relay", "state/relay-token", "state/caddy", "media", "media/downloads",

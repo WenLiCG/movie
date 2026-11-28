@@ -53,4 +53,9 @@ jobs:
           curl -fsS --max-time 3 --retry 10 --retry-delay 1 --retry-all-errors http://127.0.0.1:8097/discover/ -o /dev/null
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8097/discover/api/session)" = 401
           timeout 20 bash -c 'until docker compose logs uploader | grep -F waiting_for_setup; do sleep 1; done'
+          if report=$(docker compose exec -T portal python -m portal.verify_setup); then
+            echo 'Fresh installation unexpectedly passed setup verification'
+            exit 1
+          fi
+          grep -F '配置下载器与追剧' <<< "$report"
           docker compose --profile public run --rm --no-deps gateway caddy validate --config /etc/caddy/Caddyfile

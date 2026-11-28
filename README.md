@@ -39,8 +39,10 @@ sudo bash cinema-all-in-one.sh
 cd /opt/cinema
 sudo docker compose --profile connected up -d --build relay uploader
 sudo bash install.sh public
-sudo bash install.sh status
+sudo bash install.sh verify
 ```
+
+完成云盘授权、下载器接线和站点配置后，用 `verify` 验收。它会检查后台七项状态，并确认上传心跳持续更新。配置尚未完成时也可以使用管理后台。
 
 默认源码和运行目录为 `/opt/cinema`。安装器不覆盖旧配置、不卸载冲突软件、不调整防火墙；依赖和容器镜像需要联网下载。Debian 12 amd64 已实测，其余受支持版本/架构未做真机安装验收。
 

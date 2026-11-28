@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.request import Request, build_opener, HTTPCookieProcessor
@@ -70,6 +71,41 @@ class PortalTests(unittest.TestCase):
             (Path(temp)/'config.json').write_text(json.dumps({'openlist_token':'private'}))
             app.ol = Mock(side_effect=ValueError('expired'))
             self.assertFalse(app.status()['configured'])
+
+    def test_uploader_status_distinguishes_incomplete_wiring_from_missing_heartbeat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = App(Path(temp))
+            app.client = Mock()
+            app.qb = Mock(side_effect=ValueError('unavailable'))
+            config = {'openlist_url': 'http://openlist', 'openlist_token': 'secret-token',
+                      'qb_url': 'http://qb', 'qb_username': 'user', 'qb_password': 'secret-password'}
+            path = app.state / 'config.json'
+            path.write_text(json.dumps(config), encoding='utf-8')
+            check = app.status()['checks']['uploader']
+            self.assertFalse(check['complete'])
+            self.assertIn('Sonarr', check['message'])
+            self.assertIn('配置下载器与追剧', check['message'])
+            self.assertNotIn('secret', check['message'])
+
+            app.data.mkdir()
+            heartbeat = app.data / 'heartbeat.json'
+            now = time.time()
+            heartbeat.write_text(json.dumps({'at': now, 'activity': {'at': now}}))
+            self.assertFalse(app.status()['checks']['uploader']['complete'])
+
+            config.update(sonarr_url='http://sonarr', sonarr_api_key='secret-key')
+            path.write_text(json.dumps(config), encoding='utf-8')
+            self.assertTrue(app.status()['checks']['uploader']['complete'])
+            heartbeat.unlink()
+            check = app.status()['checks']['uploader']
+            self.assertFalse(check['complete'])
+            self.assertIn('心跳', check['message'])
+            self.assertNotIn('配置下载器与追剧', check['message'])
+            for record in ({'at': now - 301, 'activity': {'at': now}},
+                           {'at': now, 'activity': {'at': now - 601}},
+                           {'at': now, 'activity': {'at': now}, 'error': 'disk_check_unavailable'}):
+                heartbeat.write_text(json.dumps(record))
+                self.assertFalse(app.uploader_status(config)['complete'])
 
     def test_downloader_status_detects_a_misdirected_prowlarr_client(self):
         with tempfile.TemporaryDirectory() as temp:

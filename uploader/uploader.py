@@ -17,7 +17,7 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from archive import CLEANUP_EXTRAS, VIDEO, video, subtitle_for, create_archive, record_archive, archived_keys, watch_lock, read_requests, save_requests, apply_scope, task_actions, action_matches, delete_target, torrent_instance, episode_keys, TaskScopeChanged, episodes_with_monitoring, cloud_mount
-from configure import private_write
+from configure import UPLOADER_CONNECTIONS, private_write
 from urllib.parse import quote, urlencode, urlsplit
 
 
@@ -1364,12 +1364,11 @@ def load_config(path):
     config = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise Failure("invalid_configuration")
-    keys = ("openlist_url", "openlist_token", "qb_url", "qb_username", "qb_password", "sonarr_url", "sonarr_api_key")
-    for key in keys:
+    for key in UPLOADER_CONNECTIONS:
         if key in config and (not isinstance(config[key], str) or any(ord(c) < 32 for c in config[key])):
             raise Failure("invalid_configuration")
     config['cloud_mount'], config['cloud_mounts'] = configured_mounts(config)
-    if not all(config.get(key) for key in keys):
+    if not all(config.get(key) for key in UPLOADER_CONNECTIONS):
         return None
     return config
 
