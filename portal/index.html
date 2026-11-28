@@ -73,26 +73,38 @@
 </main>
 <footer id="metrics" hidden><span class="metrics-heading"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg>VPS 实时状态</span><div><label for="disk-meter"><svg class="icon" aria-hidden="true"><use href="#i-disk"/></svg>磁盘 <strong id="disk-label">读取中</strong></label><meter id="disk-meter" min="0" max="100" value="0"></meter></div><div><label for="memory-meter"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg>内存 <strong id="memory-label">读取中</strong></label><meter id="memory-meter" min="0" max="100" value="0"></meter></div><div><label for="cpu-meter"><svg class="icon" aria-hidden="true"><use href="#i-cpu"/></svg>CPU <strong id="cpu-label">采样中</strong></label><meter id="cpu-meter" min="0" max="100" value="0"></meter></div><small id="metrics-time">每 10 秒更新</small></footer>
 <dialog id="follow-dialog" aria-labelledby="follow-title"><form id="follow-form">
-<h2 id="follow-title">按此版本追更</h2><p id="version-resource" class="muted"></p>
+<h2 id="follow-title">按此版本追更</h2>
 <div id="version-loading" class="loading-state" role="status" hidden><span class="spinner" aria-hidden="true"></span>正在识别剧集与版本条件…</div>
 <fieldset class="selection-fields" id="version-content">
-<label for="series-match">关联到正确的剧集／综艺</label><select id="series-match" required></select>
-<p id="existing-version" class="warning-text" hidden></p>
+<p id="series-title" class="series-title" role="status" hidden></p>
+<div id="series-picker" hidden>
+<label id="series-match-label" for="series-match">请选择要追更的剧集／综艺</label><select id="series-match" aria-required="true"></select>
+<details id="series-correction"><summary>按剧名或 TVDB ID 重新查找</summary>
+<label for="series-query">剧名或 tvdb:编号</label><div class="series-lookup"><input id="series-query" maxlength="200" placeholder="例如 tvdb:367506"><button type="button" id="search-series">查找剧集</button></div></details>
+</div>
+<div id="follow-options">
+<fieldset class="follow-modes"><legend>追更范围</legend>
+<label><input type="radio" name="follow-mode" id="follow-all" value="all" checked>补齐已有并持续追更</label>
+<label><input type="radio" name="follow-mode" value="future">仅后续更新</label></fieldset>
+<details id="version-extra"><summary>更多选项</summary>
+<button type="button" id="correct-series" class="quiet" hidden>更正关联剧集</button>
+<fieldset class="follow-modes"><legend>其他范围</legend>
+<label id="follow-season-row"><input type="radio" name="follow-mode" value="season">指定季</label>
+<label id="follow-manual-row"><input type="radio" name="follow-mode" value="manual">仅选集下载（已有追更保持）</label></fieldset>
+<label id="season-label" for="season" hidden>选择季<select id="season"></select></label>
+<p id="version-resource" class="muted"></p>
+<p id="group-help" class="warning-text" hidden>未识别发布组，请补充资源标题中的发布组。</p>
 <div class="version-fields">
-<label>发布组<input id="version-group" maxlength="80" required placeholder="未识别时必须补充"></label>
-<label>清晰度<select id="quality"><option value="">不限（请明确确认）</option><option>1080p</option><option>4K</option><option>720p</option><option>1080i</option></select></label>
-<label>编码<select id="version-codec"><option value="">不限（请明确确认）</option><option>H.264</option><option>H.265</option><option>AV1</option></select></label>
-</div><details id="version-extra"><summary>片源、平台、音轨与字幕（可补充）</summary><div class="version-fields"><label>片源类型<input id="version-source" maxlength="80" placeholder="如 WEB-DL，空项为不限"></label>
+<label>发布组<input id="version-group" maxlength="80" required placeholder="资源标题中的发布组"></label>
+<label>清晰度<select id="quality"><option value="">不限</option><option>1080p</option><option>4K</option><option>720p</option><option>1080i</option></select></label>
+<label>编码<select id="version-codec"><option value="">不限</option><option>H.264</option><option>H.265</option><option>AV1</option></select></label>
+<label>片源类型<input id="version-source" maxlength="80" placeholder="如 WEB-DL，空项为不限"></label>
 <label>片源平台<input id="version-platform" maxlength="80" placeholder="如 Netflix，空项为不限"></label>
 <label>音轨标记<input id="version-audio" maxlength="80" placeholder="如 DDP.5.1,6Audios；逗号表示都要"></label>
 <label>字幕标记<input id="version-subtitles" maxlength="80" placeholder="如 CHS,CHT；空项为不限"></label>
-</div></details>
-<p id="version-summary" class="row-description"></p>
-<p id="version-missing" class="warning-text"></p>
-<p class="muted">所有已填写条件必须同时满足；没有同版资源就等待。规则只约束发布标题，站点副标题中的“中字”等标签不能证明实际音轨或字幕。</p>
-<label id="version-confirm-row" class="episode-option"><input type="checkbox" id="version-confirm"><span>我已确认剧集与版本条件；未识别的字段已补充，或明确留空表示不限。</span></label>
-<label id="replace-version-row" class="episode-option" hidden><input type="checkbox" id="replace-version"><span>如果条件改变，我确认换版；保留已下载和正在下载的内容。</span></label>
-<div id="follow-scope"><label for="mode">追更范围</label><select id="mode"><option value="all" selected>补齐已有并持续追更</option><option value="future">仅后续更新</option><option value="season">指定季</option><option value="manual">仅选集下载（已有追更保持）</option></select><label id="season-label" for="season" hidden>选择季<select id="season"></select></label></div>
+</div><p class="muted">仅匹配标题中全部已填写的条件。留空表示不限，没有同版资源时继续等待。</p></details>
+<p id="existing-version" class="warning-text" role="status" hidden></p>
+</div>
 </fieldset><p id="follow-notice" role="alert" hidden></p><div class="dialog-actions"><button type="button" id="cancel-follow">取消</button><button id="submit-version" class="primary">保存规则并追更</button></div></form></dialog>
 <dialog id="episodes-dialog" aria-labelledby="episodes-title"><form id="episodes-form"><h2 id="episodes-title">选集下载</h2><p class="muted">仅搜索勾选集数，必须符合该剧已保存的版本规则；没有匹配就等待。合集资源可能包含额外集数，请核对下载任务。</p><fieldset class="selection-fields" id="episode-fields"><label for="episode-season">选择季</label><select id="episode-season"></select><div class="episode-toolbar"><button id="select-season" type="button">全选本季</button><button id="refresh-episodes" type="button">刷新集数</button></div><div id="episode-loading" class="loading-state" role="status" hidden><span class="spinner" aria-hidden="true"></span><span>正在加载集数，完成后自动显示…</span></div><div id="episode-list"></div></fieldset><p id="episode-notice" role="alert" hidden></p><div class="dialog-actions"><button type="button" id="cancel-episodes">取消</button><button class="primary" id="download-episodes">下载所选集数</button></div></form></dialog>
 <dialog id="task-dialog" aria-labelledby="task-dialog-title"><form id="task-form"><h2 id="task-dialog-title">删除项目</h2><p id="task-dialog-name" class="row-description"></p><p id="task-dialog-description"></p><fieldset id="task-delete-options"><legend>选择删除范围</legend><label class="episode-option"><input type="radio" name="delete-files" value="false" checked><span>只删除条目，保留 VPS 本地文件</span></label><label class="episode-option"><input type="radio" name="delete-files" value="true"><span>删除条目，同时删除 VPS 本地文件</span></label><label class="episode-option delete-all-option"><input type="radio" name="delete-files" value="all"><span>删除所有（含云端原件）</span></label></fieldset><div id="task-all-details" hidden>

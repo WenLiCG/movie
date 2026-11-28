@@ -1,5 +1,6 @@
 """Title-based version requirements, shared by preview and native Sonarr enforcement."""
 import re
+import unicodedata
 
 
 FIELDS = ('group', 'resolution', 'codec', 'source', 'platform', 'audio', 'subtitles')
@@ -33,6 +34,66 @@ def validate_profile(record, series, profiles):
 
 def group_pattern(group):
     return r'(?:^\[' + re.escape(group) + r'\]|[-.]' + re.escape(group) + r'(?:\.(?:mkv|mp4|torrent))?$)'
+
+
+def release_series_title(title, info):
+    # Episode names and encoding details after S03E03 aren't part of the series title.
+    marker = re.search(r'(?<![A-Za-z0-9])(?:S\d{1,2}(?:[ ._-]*E\d{1,4})?|\d{1,2}x\d{1,3}|(?:19|20)\d\d[._-]\d\d[._-]\d\d)(?![A-Za-z0-9])', title, re.I)
+    if marker:
+        prefix = re.sub(r'^\[[^\]]+\][ ._-]*', '', title[:marker.start()])
+        prefix = re.sub(r'[._]+', ' ', prefix).strip(' -')
+        if prefix:
+            return prefix
+    return info.get('seriesTitle') or ''
+
+
+def normalized_title(name):
+    words = re.sub(r'[\W_]+', ' ', unicodedata.normalize('NFKC', name).casefold()).strip()
+    return re.sub(r'(?<=[\u3400-\u9fff]) (?=[\u3400-\u9fff])', '', words)
+
+
+def provider_id(series, key):
+    value = str(series.get(key) or '').lower()
+    if key == 'imdbId':
+        value = value.removeprefix('tt')
+    return value.lstrip('0') if re.fullmatch('[0-9]{1,12}', value) else ''
+
+
+def matching_series(release, title, info, candidates, localized, lookup_failed=False):
+    external = {key: provider_id(release, key) for key in ('tvdbId', 'imdbId', 'tmdbId') if provider_id(release, key)}
+    if external:
+        matches = []
+        for series in candidates:
+            comparisons = [provider_id(series, key) == value for key, value in external.items() if provider_id(series, key)]
+            if any(comparisons):
+                if not all(comparisons):
+                    return ''
+                matches.append(series['tvdbId'])
+        return str(matches[0]) if len(matches) == 1 else ''
+
+    name = normalized_title(title)
+    base, _, suffix = name.rpartition(' ')
+    suffix_year = int(suffix) if base and re.fullmatch(r'(?:19|20)\d\d', suffix) else None
+    parsed_year = (info.get('seriesTitleInfo') or {}).get('year')
+    matches = []
+    for series in candidates:
+        tvdb = series['tvdbId']
+        alternate = series.get('alternateTitles') or []
+        aliases = [series['title'], series.get('originalTitle')]
+        if localized[tvdb]['title'] not in [a.get('title') for a in alternate]:
+            aliases.append(localized[tvdb]['title'])
+        aliases.extend(a.get('title') for a in alternate
+                       if a.get('seasonNumber') in (None, -1, info.get('seasonNumber')))
+        names = {normalized_title(a) for a in aliases if a}
+        if series.get('year'):
+            names.update(a.removesuffix(' ' + str(series['year'])) for a in list(names))
+        year = series.get('year')
+        # A trailing number can be part of the official name ("Demon Lord 2099") or a remake year.
+        literal = name in names and (suffix_year is not None or not parsed_year or parsed_year == year)
+        dated = suffix_year and suffix_year == year and base in names
+        if dated or (literal and (not lookup_failed or year and parsed_year == year)):
+            matches.append(tvdb)
+    return str(matches[0]) if len(matches) == 1 else ''
 
 
 def details(title):

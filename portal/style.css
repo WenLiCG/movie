@@ -246,18 +246,22 @@ dialog p{font-size:14px}
 #episodes-dialog{width:min(610px,calc(100vw - 32px))}
 #episode-list{max-height:38vh;margin-top:16px;overflow:auto}
 .episode-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
-#follow-dialog{width:min(740px,calc(100vw - 32px));padding:24px 28px}
+#follow-dialog{width:min(560px,calc(100vw - 32px));padding:24px 28px}
 #follow-dialog p{margin:6px 0 12px}
 #follow-dialog details{margin:8px 0}
 #follow-dialog select{margin:6px 0 12px}
-#follow-dialog .episode-option{padding:8px 0}
+#follow-dialog .series-title{font-size:18px;font-weight:600;overflow-wrap:anywhere;margin:8px 0 20px}
+.follow-modes{border:0;padding:0;margin:12px 0}
+.follow-modes legend{font-weight:600;font-size:14px}
+.follow-modes label{display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer}
+.series-lookup{display:flex;gap:8px}
+.series-lookup input{flex:1;min-width:0}
+#version-extra{border-top:1px solid var(--line)}
 #follow-dialog .dialog-actions{margin-top:16px;padding-top:14px}
 #version-resource{overflow-wrap:anywhere;font-size:14px}
-.version-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 16px}
-#version-extra .version-fields{grid-template-columns:1fr 1fr}
+.version-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}
 .version-fields label{min-width:0;font-size:13px}
 .version-fields input{display:block;width:100%;margin:6px 0 12px}
-#version-missing{font-size:13px}
 #follow-dialog h2{overflow-wrap:anywhere}
 #task-dialog{width:min(560px,calc(100vw - 32px))}
 #task-dialog fieldset{padding:0;border:0;margin:20px 0}
@@ -346,7 +350,7 @@ dialog p{font-size:14px}
   footer>div{flex:1 1 100%;max-width:none}
   footer small{margin-left:0}
   dialog,#follow-dialog{padding:24px}
-  .version-fields,#version-extra .version-fields{grid-template-columns:1fr}
+  .version-fields{grid-template-columns:1fr}
   .dialog-actions{flex-wrap:wrap}
   .dialog-actions button{flex:1}
   #notice{bottom:16px;flex-wrap:wrap;gap:10px;padding:12px 16px;font-size:13px}

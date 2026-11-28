@@ -13,6 +13,7 @@ from portal.versions import details, rule, matches
 
 
 TITLE = 'Example.S01E01.1080p.NF.WEB-DL.DDP.5.1.H.264-HHWEB'
+RINGS = 'The.Lord.of.the.Rings.The.Rings.of.Power.S03E03.The.Secret.Fire.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb'
 
 
 class Sonarr:
@@ -29,6 +30,7 @@ class Sonarr:
         route=path.split('?')[0]
         if route == '/api/v3/parse':
             value={'series':self.series[0], 'parsedEpisodeInfo':{'seriesTitle':'Example','seasonNumber':1,'episodeNumbers':[1],'releaseGroup':'HHWEB'}}
+        elif route == '/api/v3/series/lookup': value=self.series
         elif route == '/api/v3/series':
             if method == 'POST':self.series.insert(0,{**body,'id':9})
             value=self.series[0] if method == 'POST' else self.series
@@ -65,7 +67,7 @@ class VersionTests(unittest.TestCase):
         self.app.client=lambda service:self.native
         self.session={'results':{'r':(time.time()+600,{'title':TITLE,'guid':'private-guid','size':1000,'indexer':'Site','indexerId':1,'_kind':'tv','_query':'Example'})}}
         preview=self.app.preview_release(self.session,{'release_id':'r'})
-        self.body={'release_id':'r','id':'42','confirmed':True,'fields':preview['fields'],'mode':'all'}
+        self.body={'release_id':'r','id':'42','fields':preview['fields'],'mode':'all'}
         self.native.calls.clear()
 
     def tearDown(self):self.temp.cleanup()
@@ -86,8 +88,81 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(fields['group'],'')
         with self.assertRaises(ValueError):rule(fields)
         with self.assertRaises(ValueError):rule({**self.body['fields'],'audio':'/anything/.*'})
-        with self.assertRaises(ValueError):self.app.save_version(self.session,{**self.body,'confirmed':False})
+        with self.assertRaises(ValueError):self.app.save_version(self.session,{**self.body,'id':'500'})
         self.assertEqual(self.native.calls,[])
+
+    def test_rings_of_power_resolves_without_relying_on_search_order_or_language(self):
+        self.session['results']['r'][1].update(title=RINGS, _query='指环王')
+        correct = {'title':'The Lord of the Rings: The Rings of Power','tvdbId':367506,'year':2022,
+                   'seasons':[{'seasonNumber':3}]}
+        noise = [{'title':f'The Rings of Power Extras {n}', 'tvdbId':n} for n in range(1,21)]
+        self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':{'seriesTitle':'The Lord of the Rings The Rings of Power',
+                               'seasonNumber':3,'episodeNumbers':[3],'releaseGroup':'NTb'}}, [*noise, correct]])
+        preview = self.app.preview_release(self.session, {'release_id':'r'})
+        self.assertEqual(preview['selected_id'], '367506')
+        self.assertIn({'id':'367506','title':correct['title'],'year':2022,'seasons':[3],'version':None}, preview['candidates'])
+        self.assertEqual(preview['episodes'], 'S03E03')
+        self.assertEqual(preview['fields'], {'group':'NTb','resolution':'1080p','codec':'H.264','source':'WEB-DL',
+                                             'platform':'Amazon','audio':'DDP.5.1','subtitles':''})
+        _, pattern = rule(preview['fields'])
+        self.assertTrue(matches(pattern, RINGS))
+        self.assertTrue(matches(pattern, RINGS.replace('S03E03.The.Secret.Fire', 'S03E04.Another.Title')))
+        self.assertFalse(matches(pattern, RINGS.replace('-NTb', '-OTHER')))
+
+    def test_ambiguous_titles_require_a_choice_and_external_ids_take_priority(self):
+        candidates = [{'title':'Example', 'tvdbId':42, 'year':1978, 'imdbId':'tt0000042'},
+                      {'title':'Example (2022)', 'tvdbId':99, 'year':2022, 'imdbId':'tt0000099'}]
+        release = self.session['results']['r'][1]
+        def preview(title=TITLE, **ids):
+            self.session['results']['r'] = (time.time()+60, {**release, 'title':title, **ids})
+            self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':{'seriesTitle':'Example'},'series':candidates[0]},candidates])
+            return self.app.preview_release(self.session, {'release_id':'r'})['selected_id']
+        self.assertEqual(preview(), '')
+        self.assertEqual(preview(TITLE.replace('Example.', 'Example.2022.')), '99')
+        self.assertEqual(preview(TITLE.replace('Example.', 'Example.Extras.')), '')
+        self.assertEqual(preview(imdbId=99), '99')
+        self.assertEqual(preview(tvdbId=42, imdbId='tt0000099'), '')
+        del candidates[0]['imdbId']
+        self.assertEqual(preview(tvdbId=42, imdbId='tt0000099'), '')
+
+    def test_manual_lookup_and_aliases_stay_bound_to_the_release(self):
+        self.session['results']['r'][1].update(title=TITLE.replace('Example.', '示例：剧集.'))
+        candidate = {'title':'Example', 'tvdbId':42, 'alternateTitles':[{'title':'示例剧集'}]}
+        self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':None},[candidate]])
+        preview = self.app.preview_release(self.session, {'release_id':'r', 'series_query':'Example'})
+        self.assertEqual(preview['selected_id'], '42')
+        self.assertEqual(preview['fields']['group'], 'HHWEB')
+        another = {'title':'Different', 'tvdbId':500}
+        self.native.json = Mock(side_effect=[{},[another]])
+        preview = self.app.preview_release(self.session, {'release_id':'r', 'series_query':'Different'})
+        self.assertTrue(preview['available'])
+        self.assertEqual(preview['selected_id'], '')
+        self.assertIn(42, self.session['version_previews']['r']['candidates'])
+        self.session['results']['other'] = self.session['results']['r']
+        with self.assertRaises(ValueError):
+            self.app.save_version(self.session, {**self.body, 'release_id':'other', 'id':'500'})
+        self.assertTrue(all(c.args[0]=='GET' for c in self.native.json.call_args_list))
+
+    def test_digits_in_an_official_series_name_are_not_always_a_remake_year(self):
+        self.session['results']['r'][1]['title'] = TITLE.replace('Example.', 'Demon.Lord.2099.')
+        actual = {'title':'Demon Lord 2099', 'tvdbId':42, 'year':2024}
+        remake = {'title':'Demon Lord', 'tvdbId':99, 'year':2099}
+        for candidates, expected in (([actual], '42'), ([actual,remake], ''), ([remake], '99')):
+            self.native.json = Mock(side_effect=[{'parsedEpisodeInfo':{'seriesTitleInfo':{'year':2099}}}, candidates])
+            self.assertEqual(self.app.preview_release(self.session, {'release_id':'r'})['selected_id'], expected)
+
+    def test_native_candidate_survives_catalog_outage_and_manual_tvdb_queries(self):
+        parsed = {'series':self.native.series[0], 'parsedEpisodeInfo':{'seriesTitle':'Example'}}
+        self.native.json = Mock(side_effect=[parsed, OSError('offline'), parsed, OSError('offline')])
+        preview = self.app.preview_release(self.session, {'release_id':'r'})
+        self.assertTrue(preview['available'])
+        self.assertEqual(preview['selected_id'], '')
+        self.session['results']['r'][1]['tvdbId'] = 42
+        self.assertEqual(self.app.preview_release(self.session, {'release_id':'r'})['selected_id'], '42')
+        for query in ('42', 'tvdb:42'):
+            self.native.json = Mock(side_effect=[{}, [self.native.series[0]]])
+            self.app.preview_release(self.session, {'release_id':'r','series_query':query})
+            self.assertTrue(self.native.json.call_args.args[1].endswith('term=tvdb%3A42'))
 
     def test_rules_are_saved_before_monitoring_and_missing_episode_search(self):
         self.app.follow(self.session,self.body)
@@ -170,7 +245,7 @@ class VersionTests(unittest.TestCase):
         self.assertIn(('PUT','/api/v3/episode/monitor',{'episodeIds':[101],'monitored':False}),self.native.calls)
 
     def test_unrecognized_show_never_prepares_a_download(self):
-        self.native.json=Mock(return_value={'parsedEpisodeInfo':None})
+        self.native.json=Mock(side_effect=[{'parsedEpisodeInfo':None}, []])
         result=self.app.preview_release(self.session,{'release_id':'r'})
         self.assertFalse(result['available'])
         self.assertTrue(all(c.args[0]=='GET' for c in self.native.json.call_args_list))
@@ -185,7 +260,7 @@ class VersionTests(unittest.TestCase):
 
     def test_chinese_subtitle_version_roundtrips_as_utf8_and_invalid_series_id_fails_cleanly(self):
         for bad_id in ('', None, True, 'not-a-number'):
-            with self.assertRaisesRegex(ValueError, '请先预览资源并确认'):
+            with self.assertRaisesRegex(ValueError, '请先预览资源并选择'):
                 self.app.save_version(self.session, {**self.body, 'id': bad_id})
         self.session['results']['r'][1]['title'] = TITLE.replace('-HHWEB', '.中字.简繁-HHWEB')
         fields = {**self.body['fields'], 'subtitles': '中字,简繁'}

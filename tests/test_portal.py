@@ -268,6 +268,13 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(app.localize({'token':'admin'}, series, 'Example S01')[42]['title'], 'Example')
         self.assertEqual(app.localize({'token':'admin'}, series)[42]['title'], '示例剧集')
 
+    def test_conflicting_provider_ids_cannot_supply_a_localized_title(self):
+        app, emby = App(), Mock()
+        app.client = lambda _: emby
+        series = [{'tvdbId':42, 'tmdbId':7, 'title':'Example'}]
+        emby.json.return_value = [{'Name':'同名的另一部剧', 'ProviderIds':{'Tvdb':'99','Tmdb':'7'}}]
+        self.assertEqual(app.localize({'token':'admin'}, series, '示例')[42]['title'], 'Example')
+
     def test_cloud_wizard_sets_driver_defaults_and_keeps_secrets_server_side(self):
         with tempfile.TemporaryDirectory() as temp:
             app = App(Path(temp))
