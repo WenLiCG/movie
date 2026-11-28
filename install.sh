@@ -9,11 +9,12 @@ MODE="${1:-install}"
 die() { printf '停止：%s\n' "$*" >&2; exit 1; }
 help() {
     cat <<'HELP'
-用法：sudo bash install.sh [install|setup|public|status|stop|help]
+用法：sudo bash install.sh [install|setup|public|status|verify|stop|help]
   install  检查 Debian/Docker，初始化并启动基础管理服务（默认）
   setup    录入网盘与下载器凭据，自动接线，构建并启动播放和上传服务
   public   检查账号和配置，显式开启 80/443 HTTPS 公网入口
   status   查看本项目容器
+  verify   验收设置页七项接线，确认上传服务心跳持续更新
   stop     停止本项目容器，保留配置和媒体
 HELP
 }
@@ -74,10 +75,10 @@ preflight() {
     python3 "$ROOT/scripts/compose_preflight.py" "$@"
 }
 
-case "$MODE" in help|--help|-h) help; exit 0 ;; install|setup|public|status|stop) ;; *) help; die "未知命令：$MODE" ;; esac
+case "$MODE" in help|--help|-h) help; exit 0 ;; install|setup|public|status|verify|stop) ;; *) help; die "未知命令：$MODE" ;; esac
 [[ $# -le 1 ]] || die '参数过多。'
 check_host
-if [[ $MODE != status ]]; then
+if [[ $MODE != status && $MODE != verify ]]; then
     exec 9<.
     flock -n 9 || die '另一项部署操作正在进行，请在结束后重试。'
 fi
@@ -108,7 +109,13 @@ else
             python3 configure.py --migrate-relay-token
             docker compose --profile public up -d gateway
             ;;
-        status) docker compose --profile '*' ps ;;
+        status)
+            docker compose --profile '*' ps
+            printf '\n完成设置后，运行 sudo bash install.sh verify 验收接线与上传心跳。\n'
+            ;;
+        verify)
+            docker compose exec -T portal python -m portal.verify_setup || die '接线验收未通过，请查看上方结果并确认 portal 容器正在运行。'
+            ;;
         stop) docker compose --profile '*' stop ;;
     esac
 fi

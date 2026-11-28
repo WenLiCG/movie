@@ -20,7 +20,7 @@ import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from configure import private_write, write_relay_token
+from configure import UPLOADER_CONNECTIONS, private_write, write_relay_token
 from integration import APIError, Client, connect_services, read_api_key, emby_defaults, activate_cloud_library
 from portal.metadata import metadata, resource_id
 from portal.playback import playback_records
@@ -509,7 +509,7 @@ class App:
         config.update(openlist_url=self.origins["openlist"], openlist_token=token, qb_url=self.origins["qb"],
                       qb_username=username, qb_password=password, sonarr_url=self.origins["sonarr"], sonarr_api_key=sonarr_key)
         private_write(self.state / "config.json", json.dumps(config))
-        return {"message": "阿里云盘与下载器已连接，自动上传已就绪。"}
+        return {"message": "阿里云盘与下载器已连接。可在设置中查看上传服务心跳。"}
 
     def playbacks(self, session):
         items = playback_records(Path('/playback'))
@@ -1404,6 +1404,30 @@ class App:
                            'cancel': '已请求取消下载，文件保留；正在核对并结束相关上传。'}[action]
             return {'message': message}
 
+    def uploader_status(self, config):
+        missing = dict.fromkeys(service for key, service in UPLOADER_CONNECTIONS.items() if not config.get(key))
+        if missing:
+            action = '请先启用阿里云盘挂载，再点击' if 'OpenList' in missing else '请在设置中点击'
+            return {'complete': False, 'message': f'上传服务缺少 {"、".join(missing)} 的连接配置。{action}“配置下载器与追剧”。'}
+        try:
+            heartbeat = json.loads((self.data / 'heartbeat.json').read_text(encoding='utf-8'))
+            now = time.time()
+            alive = 0 <= now - heartbeat['at'] < 300 and 0 <= now - heartbeat['activity']['at'] < 600
+        except FileNotFoundError:
+            return {'complete': False, 'message': '上传连接配置已保存，尚未收到心跳。首次接线后请稍候刷新，若仍无心跳，请检查 uploader 服务。'}
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            return {'complete': False, 'message': '上传服务心跳无法读取，请检查 uploader 日志和状态文件。'}
+        detail = '上传服务正常。'
+        if not alive:
+            detail = '上传服务心跳过期或主循环长时间没有进展，请检查 uploader 服务。'
+        elif heartbeat.get('error'):
+            detail = '已收到上传服务心跳。'
+        if heartbeat.get('disk_paused'):
+            detail += f" 空间保护已暂停 {heartbeat['disk_paused']} 个下载；空间恢复后自动继续。"
+        if heartbeat.get('error'):
+            detail += ' 空间检查暂不可用。'
+        return {'complete': alive and not heartbeat.get('error'), 'message': detail}
+
     def status(self):
         config = self.config()
         mount = cloud_mount(config.get('cloud_mount', '/aliyun'))
@@ -1488,16 +1512,7 @@ class App:
         checks['retention'] = {'complete': valid, 'message': ('保留时间已设置。' if valid else '保留时间无效，请填写 0–3650 天并保存。')}
         initialized = (self.state / 'emby-defaults.applied').is_file()
         checks['metadata'] = {'complete': initialized, 'message': 'Emby 中文默认配置已初始化，后续可自行调整。' if initialized else 'Emby 默认配置未完成，请点击“应用推荐刮削设置”重试并查看原因。'}
-        try:
-            heartbeat = json.loads((self.data / 'heartbeat.json').read_text(encoding='utf-8'))
-            fresh = time.time() - heartbeat['at'] < 300
-            alive = fresh and time.time() - heartbeat.get('activity',{}).get('at',0) < 600
-            detail = '上传服务正常。' if alive else '上传服务超过 5 分钟未更新或主循环长时间没有进展，请检查服务。'
-            if heartbeat.get('disk_paused'):
-                detail += f" 空间保护已暂停 {heartbeat['disk_paused']} 个下载；空间恢复后自动继续。"
-            checks['uploader'] = {'complete': alive and not heartbeat.get('error'), 'message': detail + (' 空间检查暂不可用。' if heartbeat.get('error') else '')}
-        except (OSError, ValueError, KeyError, TypeError):
-            checks['uploader'] = {'complete': False, 'message': '尚未收到上传服务心跳，请启动 uploader 服务或检查配置。'}
+        checks['uploader'] = self.uploader_status(config)
         if not valid: settings = {'retention_days': 7}
         cleanup = {'pending': 0, 'done': 0, 'last': None}
         dbpath = self.state / 'data/uploads.sqlite3'

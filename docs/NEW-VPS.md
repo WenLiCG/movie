@@ -96,12 +96,14 @@ docker compose logs --tail=100 qbittorrent
 cd /opt/cinema
 docker compose --profile connected up -d --build relay uploader
 bash install.sh public
-bash install.sh status
+bash install.sh verify
 ```
 
 第一条构建 relay，下载固定版本的 Go 上游并应用包内补丁，首次可能需要一些时间。`public` 会提示输入 Emby 管理员，检查所有启用账号都有密码，以及管理应用的认证状态，通过后启动 HTTPS 网关。该检查不会保存本次密码。
 
 若账号检查未通过，按错误回到相应应用修正，再运行 `bash install.sh public`。若证书失败，检查域名 A/AAAA、80/443 放行和端口占用。
+
+云盘授权、下载器接线和站点配置完成后，运行 `bash install.sh verify`。后台七项检查通过且上传服务心跳持续更新时，命令才会成功。基础安装阶段可先用 `bash install.sh status` 查看容器。
 
 | 公网地址 | 用途 |
 | --- | --- |
